@@ -15,6 +15,8 @@ pub mod gguf;
 pub mod lmstudio;
 pub mod map;
 pub mod synth;
+pub mod tokenizer;
 
 pub use gguf::{GgmlType, Gguf, TensorInfo, Value};
 pub use map::Mmap;
+pub use tokenizer::Tokenizer;
