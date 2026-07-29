@@ -14,6 +14,7 @@ use std::io::{Error, ErrorKind, Result};
 
 use crate::gguf::Gguf;
 
+pub mod bpe;
 pub mod bytes;
 
 fn bad(msg: impl Into<String>) -> Error {
