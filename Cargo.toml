@@ -15,6 +15,10 @@ exclude = ["*.gguf"]
 name = "ferrite"
 path = "src/lib.rs"
 
+[[bin]]
+name = "ferrite"
+path = "src/main.rs"
+
 # No dependencies. Not "few" — none. `cargo tree` prints one line.
 [dependencies]
 
