@@ -1,0 +1,5 @@
+/target
+*.gguf
+*.bin
+*.safetensors
+Cargo.lock
