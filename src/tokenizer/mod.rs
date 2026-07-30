@@ -60,6 +60,12 @@ impl TokenKind {
     }
 }
 
+/// A run of ordinary text, or one special token matched literally.
+enum Segment<'a> {
+    Text(&'a str),
+    Special(u32),
+}
+
 pub struct Tokenizer {
     pub kind: Kind,
     pub tokens: Vec<String>,
@@ -68,11 +74,32 @@ pub struct Tokenizer {
     ids: HashMap<String, u32>,
     /// `<0x0A>` style tokens, for text SentencePiece cannot segment.
     byte_fallback: HashMap<u8, u32>,
+    /// BPE merge table. Empty for SentencePiece vocabs.
+    merges: bpe::Merges,
+    /// Control and user-defined tokens, longest first. Matched literally in the
+    /// input before any merging happens.
+    specials: Vec<(String, u32)>,
+    /// First byte of every special token, so scanning can skip positions that
+    /// cannot start one.
+    special_starts: [bool; 256],
     pub bos: Option<u32>,
     pub eos: Option<u32>,
     pub unknown: Option<u32>,
     pub add_bos: bool,
     pub add_eos: bool,
+}
+
+impl std::fmt::Debug for Tokenizer {
+    /// Summary only — printing a 128k-entry vocab in a panic message helps
+    /// nobody.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tokenizer")
+            .field("kind", &self.kind)
+            .field("vocab", &self.tokens.len())
+            .field("merges", &self.merges.len())
+            .field("specials", &self.specials.len())
+            .finish()
+    }
 }
 
 impl Tokenizer {
@@ -137,6 +164,32 @@ impl Tokenizer {
             }
         }
 
+        let merges = match kind {
+            Kind::Bpe => {
+                let list = model
+                    .get("tokenizer.ggml.merges")
+                    .and_then(|v| v.as_strings())
+                    .ok_or_else(|| bad("gpt2 vocab has no tokenizer.ggml.merges"))?;
+                bpe::load_merges(&list, &ids)
+            }
+            Kind::Spm => bpe::Merges::new(),
+        };
+
+        // Longest first, so `<|im_end|>` wins over any shorter token that is a
+        // prefix of it.
+        let mut specials: Vec<(String, u32)> = tokens
+            .iter()
+            .zip(&kinds)
+            .enumerate()
+            .filter(|(_, (token, kind))| kind.is_special() && !token.is_empty())
+            .map(|(id, (token, _))| (token.clone(), id as u32))
+            .collect();
+        specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        let mut special_starts = [false; 256];
+        for (token, _) in &specials {
+            special_starts[token.as_bytes()[0] as usize] = true;
+        }
+
         let special = |key: &str| model.meta_u64(key).and_then(|v| u32::try_from(v).ok());
         let bos = special("tokenizer.ggml.bos_token_id");
         let eos = special("tokenizer.ggml.eos_token_id");
@@ -160,6 +213,9 @@ impl Tokenizer {
             scores,
             ids,
             byte_fallback,
+            merges,
+            specials,
+            special_starts,
             bos,
             eos,
             unknown,
@@ -220,6 +276,86 @@ impl Tokenizer {
                 token.replace('\u{2581}', " ").into_bytes()
             }
         }
+    }
+
+    /// Text to ids.
+    ///
+    /// `add_special` applies the file's own BOS/EOS policy rather than a guess.
+    /// Special tokens written literally in `text` — `<|im_start|>` and friends —
+    /// are matched as themselves; every chat template depends on that.
+    pub fn encode(&self, text: &str, add_special: bool) -> Vec<u32> {
+        let mut out = Vec::new();
+        if add_special && self.add_bos {
+            out.extend(self.bos);
+        }
+        for segment in self.split_specials(text) {
+            match segment {
+                Segment::Special(id) => out.push(id),
+                Segment::Text(chunk) => match self.kind {
+                    Kind::Bpe => self.encode_bpe(chunk, &mut out),
+                    Kind::Spm => out.extend(spm::encode(self, chunk)),
+                },
+            }
+        }
+        if add_special && self.add_eos {
+            out.extend(self.eos);
+        }
+        out
+    }
+
+    fn encode_bpe(&self, text: &str, out: &mut Vec<u32>) {
+        for word in bpe::pretokenize(text) {
+            let mapped = bytes::encode_str(word);
+            let mut symbols: Vec<u32> = Vec::with_capacity(mapped.len());
+            let mut buf = [0u8; 4];
+            for ch in mapped.chars() {
+                match self.id(ch.encode_utf8(&mut buf)) {
+                    Some(id) => symbols.push(id),
+                    // Byte-level vocabs contain all 256 single-character
+                    // tokens, so this only fires on a malformed vocab.
+                    None => symbols.extend(self.unknown),
+                }
+            }
+            bpe::apply_merges(&self.merges, &mut symbols);
+            out.extend_from_slice(&symbols);
+        }
+    }
+
+    /// Cut `text` around literal occurrences of special tokens.
+    fn split_specials<'a>(&self, text: &'a str) -> Vec<Segment<'a>> {
+        if self.specials.is_empty() {
+            return vec![Segment::Text(text)];
+        }
+        let mut out = Vec::new();
+        let mut pending = 0;
+        let mut at = 0;
+        while at < text.len() {
+            if !self.special_starts[text.as_bytes()[at] as usize] {
+                at += 1;
+                continue;
+            }
+            // `specials` is sorted longest first, so the first hit is the
+            // longest match at this position.
+            let hit = self
+                .specials
+                .iter()
+                .find(|(token, _)| text[at..].starts_with(token.as_str()));
+            match hit {
+                Some((token, id)) => {
+                    if at > pending {
+                        out.push(Segment::Text(&text[pending..at]));
+                    }
+                    out.push(Segment::Special(*id));
+                    at += token.len();
+                    pending = at;
+                }
+                None => at += 1,
+            }
+        }
+        if pending < text.len() {
+            out.push(Segment::Text(&text[pending..]));
+        }
+        out
     }
 
     /// Ids back to text. Control tokens are dropped rather than printed.
