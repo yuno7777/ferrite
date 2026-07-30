@@ -178,9 +178,24 @@ mod tests {
     #[test]
     fn candidate_order_prefers_high_score_then_left() {
         let mut heap = BinaryHeap::new();
-        heap.push(Candidate { left: 5, right: 6, score: 1.0, size: 2 });
-        heap.push(Candidate { left: 0, right: 1, score: 9.0, size: 2 });
-        heap.push(Candidate { left: 2, right: 3, score: 9.0, size: 2 });
+        heap.push(Candidate {
+            left: 5,
+            right: 6,
+            score: 1.0,
+            size: 2,
+        });
+        heap.push(Candidate {
+            left: 0,
+            right: 1,
+            score: 9.0,
+            size: 2,
+        });
+        heap.push(Candidate {
+            left: 2,
+            right: 3,
+            score: 9.0,
+            size: 2,
+        });
         assert_eq!(heap.pop().unwrap().left, 0, "highest score, leftmost");
         assert_eq!(heap.pop().unwrap().left, 2);
         assert_eq!(heap.pop().unwrap().left, 5);

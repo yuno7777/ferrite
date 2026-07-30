@@ -84,10 +84,7 @@ fn bpe_fixture(add_bos: bool) -> Builder {
         )
         .meta("tokenizer.ggml.bos_token_id", Value::U32(0))
         .meta("tokenizer.ggml.eos_token_id", Value::U32(1))
-        .meta(
-            "tokenizer.ggml.add_bos_token",
-            Value::Bool(add_bos),
-        )
+        .meta("tokenizer.ggml.add_bos_token", Value::Bool(add_bos))
 }
 
 /// SentencePiece vocab. Every intermediate prefix has to exist for the merge

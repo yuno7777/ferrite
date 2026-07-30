@@ -90,10 +90,7 @@ pub fn pretokenize(text: &str) -> Vec<&str> {
         let (start, ch) = chars[i];
 
         if ch == '\'' {
-            if let Some(found) = CONTRACTIONS
-                .iter()
-                .find(|c| text[start..].starts_with(**c))
-            {
+            if let Some(found) = CONTRACTIONS.iter().find(|c| text[start..].starts_with(**c)) {
                 out.push(&text[start..start + found.len()]);
                 i += found.chars().count();
                 continue;

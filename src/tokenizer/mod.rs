@@ -184,7 +184,7 @@ impl Tokenizer {
             .filter(|(_, (token, kind))| kind.is_special() && !token.is_empty())
             .map(|(id, (token, _))| (token.clone(), id as u32))
             .collect();
-        specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        specials.sort_by_key(|(token, _)| std::cmp::Reverse(token.len()));
         let mut special_starts = [false; 256];
         for (token, _) in &specials {
             special_starts[token.as_bytes()[0] as usize] = true;
