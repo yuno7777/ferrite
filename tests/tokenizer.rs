@@ -4,7 +4,7 @@
 //! token ids are known rather than guessed at.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ferrite::gguf::{Gguf, Value};
 use ferrite::synth::Builder;
@@ -133,7 +133,7 @@ fn spm_fixture() -> Builder {
         .meta("tokenizer.ggml.eos_token_id", Value::U32(2))
 }
 
-fn load(path: &PathBuf) -> Tokenizer {
+fn load(path: &Path) -> Tokenizer {
     let model = Gguf::open(path).expect("open fixture");
     Tokenizer::from_gguf(&model).expect("load tokenizer")
 }
