@@ -14,6 +14,7 @@
 pub mod gguf;
 pub mod lmstudio;
 pub mod map;
+pub mod quant;
 pub mod synth;
 pub mod tokenizer;
 
