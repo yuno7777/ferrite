@@ -228,6 +228,10 @@ impl Tokenizer {
         self.tokens.len()
     }
 
+    pub fn merge_count(&self) -> usize {
+        self.merges.len()
+    }
+
     pub fn id(&self, token: &str) -> Option<u32> {
         self.ids.get(token).copied()
     }

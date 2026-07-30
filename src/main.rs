@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 use ferrite::gguf::Gguf;
 use ferrite::lmstudio;
+use ferrite::Tokenizer;
 
 const USAGE: &str = "\
 ferrite — pure-Rust GGUF inference
@@ -11,6 +12,7 @@ usage:
   ferrite where                     directories being searched
   ferrite info <model|path> [-t]    header, hyperparameters, quant mix
                                     -t also dumps the tensor table
+  ferrite tokenize <model> <text>   encode text, show ids and pieces
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -22,6 +24,7 @@ fn main() -> ExitCode {
         Some("list") => cmd_list(),
         Some("where") => cmd_where(),
         Some("info") => cmd_info(&args[1..]),
+        Some("tokenize") => cmd_tokenize(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -162,6 +165,43 @@ fn cmd_info(args: &[String]) -> std::io::Result<()> {
                 t.byte_len.map(human).unwrap_or_else(|| "?".into())
             );
         }
+    }
+    Ok(())
+}
+
+fn cmd_tokenize(args: &[String]) -> std::io::Result<()> {
+    let (query, text) = match args {
+        [query, rest @ ..] if !rest.is_empty() => (query, rest.join(" ")),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "tokenize needs a model and some text",
+            ))
+        }
+    };
+
+    let model = Gguf::open(&lmstudio::resolve(query)?)?;
+    let tokenizer = Tokenizer::from_gguf(&model)?;
+    let ids = tokenizer.encode(&text, true);
+
+    println!(
+        "{:?} vocab, {} merges, {} tokens",
+        tokenizer.kind,
+        tokenizer.merge_count(),
+        ids.len()
+    );
+    for id in &ids {
+        // Byte-level vocabs store a space as U+0120; showing the decoded piece
+        // is more useful than showing the stored form.
+        let piece = String::from_utf8_lossy(&tokenizer.piece(*id)).into_owned();
+        println!("  {id:>7}  {piece:?}");
+    }
+
+    let round_trip = tokenizer.decode(&ids);
+    if round_trip != text {
+        // Not necessarily a bug — BOS/EOS and control tokens are dropped when
+        // decoding — but worth seeing when it happens.
+        println!("\ndecoded: {round_trip:?}");
     }
     Ok(())
 }

@@ -14,7 +14,44 @@ fn main() -> std::io::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "tiny.gguf".to_string());
 
-    let vocab = ["<s>", "</s>", "hello", " world"];
+    // A byte-level vocab: a space is stored as U+0120, and the merge list is
+    // what lets "hello" and " world" come back out as single tokens.
+    let vocab = [
+        "<s>",
+        "</s>",
+        "h",
+        "e",
+        "l",
+        "o",
+        "\u{0120}",
+        "w",
+        "r",
+        "d",
+        "ll",
+        "he",
+        "hell",
+        "hello",
+        "\u{0120}w",
+        "or",
+        "\u{0120}wor",
+        "\u{0120}worl",
+        "\u{0120}world",
+    ];
+    let merges = [
+        "l l",
+        "h e",
+        "he ll",
+        "hell o",
+        "\u{0120} w",
+        "o r",
+        "\u{0120}w or",
+        "\u{0120}wor l",
+        "\u{0120}worl d",
+    ];
+    let mut token_types = vec![Value::I32(1); vocab.len()];
+    token_types[0] = Value::I32(3); // <s> is a control token
+    token_types[1] = Value::I32(3);
+
     let embedding = 256u64;
     let layers = 2u64;
 
@@ -36,6 +73,11 @@ fn main() -> std::io::Result<()> {
         .meta(
             "tokenizer.ggml.tokens",
             Value::Array(vocab.iter().map(|t| Value::String((*t).into())).collect()),
+        )
+        .meta("tokenizer.ggml.token_type", Value::Array(token_types))
+        .meta(
+            "tokenizer.ggml.merges",
+            Value::Array(merges.iter().map(|m| Value::String((*m).into())).collect()),
         )
         .meta("tokenizer.ggml.bos_token_id", Value::U32(0))
         .meta("tokenizer.ggml.eos_token_id", Value::U32(1))
