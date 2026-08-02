@@ -14,6 +14,7 @@
 pub mod gguf;
 pub mod lmstudio;
 pub mod map;
+pub mod model;
 pub mod ops;
 pub mod quant;
 pub mod synth;
