@@ -13,6 +13,7 @@ use std::io::{Error, ErrorKind, Result};
 use crate::gguf::GgmlType;
 
 pub mod half;
+pub mod legacy;
 
 fn unsupported(ty: GgmlType) -> Error {
     Error::new(
@@ -65,9 +66,26 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], out: &mut [f32]) -> Result<()> {
                 ));
             }
         }
+        GgmlType::Q4_0 => per_block(bytes, out, 32, 18, legacy::q4_0),
+        GgmlType::Q4_1 => per_block(bytes, out, 32, 20, legacy::q4_1),
+        GgmlType::Q8_0 => per_block(bytes, out, 32, 34, legacy::q8_0),
         other => return Err(unsupported(other)),
     }
     Ok(())
+}
+
+/// Walk stored blocks and expanded elements in lockstep. Lengths were checked
+/// by the caller, so the zip cannot silently truncate.
+fn per_block(
+    bytes: &[u8],
+    out: &mut [f32],
+    block: usize,
+    size: usize,
+    expand: impl Fn(&[u8], &mut [f32]),
+) {
+    for (stored, slots) in bytes.chunks_exact(size).zip(out.chunks_exact_mut(block)) {
+        expand(stored, slots);
+    }
 }
 
 /// Allocating form, for one-off inspection.
