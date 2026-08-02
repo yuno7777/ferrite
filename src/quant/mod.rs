@@ -13,6 +13,7 @@ use std::io::{Error, ErrorKind, Result};
 use crate::gguf::GgmlType;
 
 pub mod half;
+pub mod k;
 pub mod legacy;
 
 fn unsupported(ty: GgmlType) -> Error {
@@ -66,6 +67,7 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], out: &mut [f32]) -> Result<()> {
                 ));
             }
         }
+        GgmlType::Q4_K => per_block(bytes, out, 256, 144, k::q4_k),
         GgmlType::Q4_0 => per_block(bytes, out, 32, 18, legacy::q4_0),
         GgmlType::Q4_1 => per_block(bytes, out, 32, 20, legacy::q4_1),
         GgmlType::Q8_0 => per_block(bytes, out, 32, 34, legacy::q8_0),
