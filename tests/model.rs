@@ -2,7 +2,7 @@
 //!
 //! A transformer with the wrong wiring does not crash, it produces plausible
 //! numbers. So these fixtures zero out most of the network, leaving a path
-//! whose output can be computed exactly and compared — the residual stream, the
+//! whose output can be computed exactly and compared â€” the residual stream, the
 //! KV cache, and the attention average each get their own arithmetic check.
 
 use std::fs;
@@ -32,7 +32,7 @@ fn identity(n: usize) -> Vec<f32> {
 /// Embedding table: one distinct vector per token.
 ///
 /// Deliberately not collinear. An earlier version used `(token + 1) *
-/// (channel + 1)`, which makes every row a multiple of the same vector — RMS
+/// (channel + 1)`, which makes every row a multiple of the same vector â€” RMS
 /// normalization then erases the difference between tokens entirely, and any
 /// test asking "does history change the output" passes vacuously.
 fn embeddings() -> Vec<f32> {
@@ -80,7 +80,7 @@ fn fixture(kv_heads: usize, value_path: bool) -> Builder {
             "blk.0.attn_norm.weight",
             &[DIM as u64],
             GgmlType::F32,
-            bytes(&vec![1.0; DIM]),
+            bytes(&[1.0; DIM]),
         )
         // Zero queries and keys mean every attention score is zero, so softmax
         // spreads weight evenly over the past. That is what makes the expected
@@ -124,7 +124,7 @@ fn fixture(kv_heads: usize, value_path: bool) -> Builder {
             "blk.0.ffn_norm.weight",
             &[DIM as u64],
             GgmlType::F32,
-            bytes(&vec![1.0; DIM]),
+            bytes(&[1.0; DIM]),
         )
         // A zeroed gate makes the whole feed-forward branch contribute nothing.
         .tensor(
@@ -149,7 +149,7 @@ fn fixture(kv_heads: usize, value_path: bool) -> Builder {
             "output_norm.weight",
             &[DIM as u64],
             GgmlType::F32,
-            bytes(&vec![1.0; DIM]),
+            bytes(&[1.0; DIM]),
         )
         .tensor(
             "output.weight",
@@ -168,7 +168,7 @@ fn write(name: &str, builder: &Builder) -> PathBuf {
 
 fn normalized(x: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0; x.len()];
-    ops::rms_norm(x, &vec![1.0; x.len()], EPS, &mut out);
+    ops::rms_norm(x, &vec![1.0f32; x.len()], EPS, &mut out);
     out
 }
 

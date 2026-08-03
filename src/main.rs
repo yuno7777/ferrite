@@ -1,7 +1,11 @@
+use std::io::Write;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use ferrite::gguf::Gguf;
 use ferrite::lmstudio;
+use ferrite::model::{self, Model, State};
+use ferrite::sample::Sampler;
 use ferrite::Tokenizer;
 
 const USAGE: &str = "\
@@ -13,6 +17,15 @@ usage:
   ferrite info <model|path> [-t]    header, hyperparameters, quant mix
                                     -t also dumps the tensor table
   ferrite tokenize <model> <text>   encode text, show ids and pieces
+  ferrite run <model> <prompt>      generate, streaming to stdout
+
+run options:
+  -n <count>      tokens to generate (default 128)
+  --temp <t>      sampling temperature, 0 for greedy (default 0)
+  --top-k <k>     keep only the k most likely tokens (default 40)
+  --top-p <p>     nucleus threshold (default 0.95)
+  --seed <s>      sampling seed (default 1)
+  --ctx <n>       KV cache size in tokens (default 2048)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -25,6 +38,7 @@ fn main() -> ExitCode {
         Some("where") => cmd_where(),
         Some("info") => cmd_info(&args[1..]),
         Some("tokenize") => cmd_tokenize(&args[1..]),
+        Some("run") => cmd_run(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -203,6 +217,118 @@ fn cmd_tokenize(args: &[String]) -> std::io::Result<()> {
         // decoding — but worth seeing when it happens.
         println!("\ndecoded: {round_trip:?}");
     }
+    Ok(())
+}
+
+/// Pull `--name value` out of the argument list, leaving the positionals.
+fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> std::io::Result<T> {
+    let Some(at) = args.iter().position(|a| a == name) else {
+        return Ok(default);
+    };
+    args.get(at + 1)
+        .and_then(|raw| raw.parse().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} needs a value"),
+            )
+        })
+}
+
+fn cmd_run(args: &[String]) -> std::io::Result<()> {
+    let limit: usize = flag(args, "-n", 128)?;
+    let temperature: f32 = flag(args, "--temp", 0.0)?;
+    let top_k: usize = flag(args, "--top-k", 40)?;
+    let top_p: f32 = flag(args, "--top-p", 0.95)?;
+    let seed: u64 = flag(args, "--seed", 1)?;
+    let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
+
+    // Positionals are whatever is left once flags and their values are removed.
+    let flags = ["-n", "--temp", "--top-k", "--top-p", "--seed", "--ctx"];
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if flags.contains(&args[index].as_str()) {
+            index += 2;
+            continue;
+        }
+        positional.push(args[index].clone());
+        index += 1;
+    }
+    let (query, prompt) = match positional.as_slice() {
+        [query, rest @ ..] if !rest.is_empty() => (query.clone(), rest.join(" ")),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "run needs a model and a prompt",
+            ))
+        }
+    };
+
+    let path = lmstudio::resolve(&query)?;
+    let gguf = Gguf::open(&path)?;
+    let tokenizer = Tokenizer::from_gguf(&gguf)?;
+    let model = Model::load(&gguf)?;
+    let mut state = State::with_context(&model.config, context);
+    let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
+
+    let prompt_tokens = tokenizer.encode(&prompt, true);
+    if prompt_tokens.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "prompt encoded to no tokens",
+        ));
+    }
+    eprintln!(
+        "{} · {} prompt tokens · {} kv cache",
+        model.config.arch,
+        prompt_tokens.len(),
+        human(state.cache_bytes() as u64)
+    );
+
+    let mut stdout = std::io::stdout();
+    print!("{prompt}");
+    stdout.flush().ok();
+
+    let prefill_start = Instant::now();
+    for (position, token) in prompt_tokens.iter().enumerate() {
+        model.forward(&mut state, *token, position)?;
+    }
+    let prefill = prefill_start.elapsed();
+
+    // A multi-byte character can straddle two tokens, so bytes accumulate
+    // until they form valid UTF-8 rather than printing one piece at a time.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut position = prompt_tokens.len();
+    let mut generated = 0;
+    let decode_start = Instant::now();
+
+    while generated < limit && position < state.context() {
+        let token = sampler.sample(&mut state.logits);
+        if Some(token) == tokenizer.eos {
+            break;
+        }
+        pending.extend(tokenizer.piece(token));
+        if let Ok(text) = std::str::from_utf8(&pending) {
+            print!("{text}");
+            stdout.flush().ok();
+            pending.clear();
+        }
+
+        model.forward(&mut state, token, position)?;
+        position += 1;
+        generated += 1;
+    }
+    println!();
+
+    let decode = decode_start.elapsed();
+    eprintln!(
+        "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s)",
+        prefill.as_secs_f64(),
+        prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+        decode.as_secs_f64(),
+        generated as f64 / decode.as_secs_f64().max(1e-9),
+    );
     Ok(())
 }
 
