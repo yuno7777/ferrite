@@ -72,6 +72,13 @@ impl Config {
                 "{heads} heads is not a multiple of {kv_heads} kv heads"
             )));
         }
+        // The attention output projection consumes heads * head_dim and emits
+        // embedding, so the two have to agree.
+        if heads * head_dim != embedding {
+            return Err(bad(format!(
+                "{heads} heads of {head_dim} do not add up to an embedding of {embedding}"
+            )));
+        }
 
         let vocab = model
             .get("tokenizer.ggml.tokens")
@@ -251,5 +258,179 @@ impl<'a> Model<'a> {
             output_norm: load_vector(gguf, "output_norm.weight")?,
             output,
         })
+    }
+
+    /// One decode step: token in, logits out, KV cache extended by one.
+    ///
+    /// `position` is where this token sits in the sequence; it drives RoPE and
+    /// decides how far back attention looks.
+    pub fn forward(&self, state: &mut State, token: u32, position: usize) -> Result<()> {
+        let c = &self.config;
+        if position >= state.context {
+            return Err(bad(format!(
+                "position {position} is past the {} token cache",
+                state.context
+            )));
+        }
+
+        // Split borrows up front so the attention loop can read one buffer
+        // while writing another.
+        let State {
+            x,
+            xb,
+            xb2,
+            hb,
+            hb2,
+            q,
+            k,
+            v,
+            att,
+            logits,
+            scratch,
+            key_cache,
+            value_cache,
+            context,
+        } = state;
+
+        let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
+        self.token_embd.row(token as usize, x)?;
+
+        for (index, layer) in self.layers.iter().enumerate() {
+            ops::rms_norm(x, &layer.attn_norm, c.eps, xb);
+            layer.wq.matvec(xb, q, &mut scratch[..c.embedding])?;
+            layer.wk.matvec(xb, k, &mut scratch[..c.embedding])?;
+            layer.wv.matvec(xb, v, &mut scratch[..c.embedding])?;
+
+            // Position is baked into the query and key, never into the value.
+            for head in 0..c.heads {
+                ops::rope(
+                    &mut q[head * head_dim..(head + 1) * head_dim],
+                    position,
+                    c.rope_base,
+                );
+            }
+            for head in 0..c.kv_heads {
+                ops::rope(
+                    &mut k[head * head_dim..(head + 1) * head_dim],
+                    position,
+                    c.rope_base,
+                );
+            }
+
+            let slot = (index * *context + position) * kv_dim;
+            key_cache[slot..slot + kv_dim].copy_from_slice(k);
+            value_cache[slot..slot + kv_dim].copy_from_slice(v);
+
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            for head in 0..c.heads {
+                // Grouped-query attention: several query heads share one KV head.
+                let kv_head = head / group;
+                let query = &q[head * head_dim..(head + 1) * head_dim];
+
+                for (past, score) in att[..=position].iter_mut().enumerate() {
+                    let at = (index * *context + past) * kv_dim + kv_head * head_dim;
+                    *score = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
+                }
+                ops::softmax(&mut att[..=position]);
+
+                let out = &mut xb[head * head_dim..(head + 1) * head_dim];
+                out.fill(0.0);
+                for (past, weight) in att[..=position].iter().enumerate() {
+                    let at = (index * *context + past) * kv_dim + kv_head * head_dim;
+                    for (slot, value) in out.iter_mut().zip(&value_cache[at..at + head_dim]) {
+                        *slot += weight * value;
+                    }
+                }
+            }
+
+            layer.wo.matvec(xb, xb2, &mut scratch[..c.embedding])?;
+            for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
+                *slot += delta;
+            }
+
+            ops::rms_norm(x, &layer.ffn_norm, c.eps, xb);
+            layer.gate.matvec(xb, hb, &mut scratch[..c.embedding])?;
+            layer.up.matvec(xb, hb2, &mut scratch[..c.embedding])?;
+            // SwiGLU: the gate is squashed, the up projection is not.
+            for (gate, up) in hb.iter_mut().zip(hb2.iter()) {
+                *gate = ops::silu(*gate) * up;
+            }
+            layer.down.matvec(hb, xb2, &mut scratch[..c.ffn])?;
+            for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
+                *slot += delta;
+            }
+        }
+
+        ops::rms_norm(x, &self.output_norm, c.eps, xb);
+        self.output
+            .matvec(xb, logits, &mut scratch[..c.embedding])?;
+        Ok(())
+    }
+}
+
+/// Everything one sequence needs that is not a weight.
+///
+/// Separate from `Model` so the weights stay shareable: two sequences decoding
+/// at once want two of these and one of those.
+pub struct State {
+    x: Vec<f32>,
+    xb: Vec<f32>,
+    xb2: Vec<f32>,
+    hb: Vec<f32>,
+    hb2: Vec<f32>,
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    att: Vec<f32>,
+    /// Scores for the last token processed, one per vocabulary entry.
+    pub logits: Vec<f32>,
+    scratch: Vec<f32>,
+    key_cache: Vec<f32>,
+    value_cache: Vec<f32>,
+    context: usize,
+}
+
+/// Cap on the cache a bare `State::new` will allocate.
+///
+/// The KV cache is layers * context * kv_dim * 4 bytes, twice over. A model
+/// advertising 128k context would ask for several gigabytes before generating
+/// a single token, so the default is a working size and the full window is
+/// opt-in through `with_context`.
+pub const DEFAULT_CONTEXT: usize = 2048;
+
+impl State {
+    pub fn new(config: &Config) -> Self {
+        Self::with_context(config, config.context.min(DEFAULT_CONTEXT))
+    }
+
+    pub fn with_context(config: &Config, context: usize) -> Self {
+        let context = context.clamp(1, config.context);
+        let kv = config.layers * context * config.kv_dim();
+        Self {
+            x: vec![0.0; config.embedding],
+            xb: vec![0.0; config.embedding],
+            xb2: vec![0.0; config.embedding],
+            hb: vec![0.0; config.ffn],
+            hb2: vec![0.0; config.ffn],
+            q: vec![0.0; config.heads * config.head_dim],
+            k: vec![0.0; config.kv_dim()],
+            v: vec![0.0; config.kv_dim()],
+            att: vec![0.0; context],
+            logits: vec![0.0; config.vocab],
+            scratch: vec![0.0; config.embedding.max(config.ffn)],
+            key_cache: vec![0.0; kv],
+            value_cache: vec![0.0; kv],
+            context,
+        }
+    }
+
+    /// How many tokens fit before `forward` refuses.
+    pub fn context(&self) -> usize {
+        self.context
+    }
+
+    /// Bytes held by the KV cache, which dominates everything else here.
+    pub fn cache_bytes(&self) -> usize {
+        (self.key_cache.len() + self.value_cache.len()) * std::mem::size_of::<f32>()
     }
 }

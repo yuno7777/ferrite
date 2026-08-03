@@ -53,7 +53,7 @@ mod tests {
         assert_eq!(f16(0x4000), 2.0);
         assert_eq!(f16(0xC000), -2.0);
         assert_eq!(f16(0x3800), 0.5);
-        assert_eq!(f16(0x3555), 0.333251953125); // nearest f16 to 1/3
+        assert_eq!(f16(0x3555), 0.333_251_95); // nearest f16 to 1/3
         assert_eq!(f16(0x7BFF), 65504.0); // largest finite f16
     }
 
