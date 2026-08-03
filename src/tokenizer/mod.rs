@@ -53,7 +53,7 @@ impl TokenKind {
         }
     }
 
-    /// Tokens that must never be produced by merging text â€” only by an exact
+    /// Tokens that must never be produced by merging text — only by an exact
     /// match against the literal token, or by the caller asking for them.
     pub fn is_special(self) -> bool {
         matches!(self, Self::Control | Self::UserDefined)
@@ -256,7 +256,7 @@ impl Tokenizer {
         self.byte_fallback.get(&byte).copied()
     }
 
-    /// Raw bytes for one token. Not necessarily valid UTF-8 on its own â€” a
+    /// Raw bytes for one token. Not necessarily valid UTF-8 on its own — a
     /// multi-byte character can be split across tokens, which is exactly why
     /// streaming output has to accumulate bytes rather than decode per token.
     pub fn piece(&self, id: u32) -> Vec<u8> {
