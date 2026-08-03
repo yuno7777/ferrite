@@ -26,6 +26,7 @@ run options:
   --top-p <p>     nucleus threshold (default 0.95)
   --seed <s>      sampling seed (default 1)
   --ctx <n>       KV cache size in tokens (default 2048)
+  --threads <n>   workers per matvec (default: machine parallelism)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -242,9 +243,18 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let top_p: f32 = flag(args, "--top-p", 0.95)?;
     let seed: u64 = flag(args, "--seed", 1)?;
     let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
+    let threads: usize = flag(args, "--threads", 0)?;
 
     // Positionals are whatever is left once flags and their values are removed.
-    let flags = ["-n", "--temp", "--top-k", "--top-p", "--seed", "--ctx"];
+    let flags = [
+        "-n",
+        "--temp",
+        "--top-k",
+        "--top-p",
+        "--seed",
+        "--ctx",
+        "--threads",
+    ];
     let mut positional = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -270,6 +280,9 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let tokenizer = Tokenizer::from_gguf(&gguf)?;
     let model = Model::load(&gguf)?;
     let mut state = State::with_context(&model.config, context);
+    if threads > 0 {
+        state.threads = threads;
+    }
     let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
 
     let prompt_tokens = tokenizer.encode(&prompt, true);
@@ -280,10 +293,11 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         ));
     }
     eprintln!(
-        "{} · {} prompt tokens · {} kv cache",
+        "{} · {} prompt tokens · {} kv cache · {} threads",
         model.config.arch,
         prompt_tokens.len(),
-        human(state.cache_bytes() as u64)
+        human(state.cache_bytes() as u64),
+        state.threads
     );
 
     let mut stdout = std::io::stdout();

@@ -180,6 +180,62 @@ impl<'a> Weight<'a> {
         quant::dequantize(self.ty, &self.bytes[start..start + self.row_bytes], out)
     }
 
+    /// `out = self * x`, split across `threads` workers.
+    ///
+    /// Rows are independent and each is reduced by the same code in the same
+    /// order, so the result is bit-identical to the single-threaded path no
+    /// matter how the split falls. That is worth preserving: a threaded kernel
+    /// that merely *approximates* the reference cannot be diffed against it.
+    pub fn matvec_threaded(
+        &self,
+        x: &[f32],
+        out: &mut [f32],
+        threads: usize,
+        scratch: &mut [f32],
+    ) -> Result<()> {
+        // Below a few rows per worker the spawn costs more than the work.
+        if threads <= 1 || self.rows < threads * 4 {
+            return self.matvec(x, out, scratch);
+        }
+
+        let chunk = self.rows.div_ceil(threads);
+        let outcomes: Vec<Result<()>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = out
+                .chunks_mut(chunk)
+                .enumerate()
+                .map(|(index, rows)| {
+                    scope.spawn(move || {
+                        // One scratch row per worker. The allocation is dwarfed
+                        // by the dequantize it feeds.
+                        let mut scratch = vec![0.0; self.cols];
+                        let first = index * chunk;
+                        for (offset, slot) in rows.iter_mut().enumerate() {
+                            let at = (first + offset) * self.row_bytes;
+                            quant::dequantize(
+                                self.ty,
+                                &self.bytes[at..at + self.row_bytes],
+                                &mut scratch,
+                            )?;
+                            *slot = ops::dot(&scratch, x);
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|_| Err(bad("worker panicked")))
+                })
+                .collect()
+        });
+
+        outcomes.into_iter().collect::<Result<Vec<()>>>()?;
+        Ok(())
+    }
+
     /// `out = self * x`, expanding one row at a time through `scratch`.
     pub fn matvec(&self, x: &[f32], out: &mut [f32], scratch: &mut [f32]) -> Result<()> {
         debug_assert_eq!(x.len(), self.cols);
@@ -290,6 +346,7 @@ impl<'a> Model<'a> {
             key_cache,
             value_cache,
             context,
+            threads,
         } = state;
 
         let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
@@ -297,9 +354,15 @@ impl<'a> Model<'a> {
 
         for (index, layer) in self.layers.iter().enumerate() {
             ops::rms_norm(x, &layer.attn_norm, c.eps, xb);
-            layer.wq.matvec(xb, q, &mut scratch[..c.embedding])?;
-            layer.wk.matvec(xb, k, &mut scratch[..c.embedding])?;
-            layer.wv.matvec(xb, v, &mut scratch[..c.embedding])?;
+            layer
+                .wq
+                .matvec_threaded(xb, q, *threads, &mut scratch[..c.embedding])?;
+            layer
+                .wk
+                .matvec_threaded(xb, k, *threads, &mut scratch[..c.embedding])?;
+            layer
+                .wv
+                .matvec_threaded(xb, v, *threads, &mut scratch[..c.embedding])?;
 
             // Position is baked into the query and key, never into the value.
             for head in 0..c.heads {
@@ -343,19 +406,27 @@ impl<'a> Model<'a> {
                 }
             }
 
-            layer.wo.matvec(xb, xb2, &mut scratch[..c.embedding])?;
+            layer
+                .wo
+                .matvec_threaded(xb, xb2, *threads, &mut scratch[..c.embedding])?;
             for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
                 *slot += delta;
             }
 
             ops::rms_norm(x, &layer.ffn_norm, c.eps, xb);
-            layer.gate.matvec(xb, hb, &mut scratch[..c.embedding])?;
-            layer.up.matvec(xb, hb2, &mut scratch[..c.embedding])?;
+            layer
+                .gate
+                .matvec_threaded(xb, hb, *threads, &mut scratch[..c.embedding])?;
+            layer
+                .up
+                .matvec_threaded(xb, hb2, *threads, &mut scratch[..c.embedding])?;
             // SwiGLU: the gate is squashed, the up projection is not.
             for (gate, up) in hb.iter_mut().zip(hb2.iter()) {
                 *gate = ops::silu(*gate) * up;
             }
-            layer.down.matvec(hb, xb2, &mut scratch[..c.ffn])?;
+            layer
+                .down
+                .matvec_threaded(hb, xb2, *threads, &mut scratch[..c.ffn])?;
             for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
                 *slot += delta;
             }
@@ -388,6 +459,8 @@ pub struct State {
     key_cache: Vec<f32>,
     value_cache: Vec<f32>,
     context: usize,
+    /// Workers per matvec. Defaults to the machine's parallelism.
+    pub threads: usize,
 }
 
 /// Cap on the cache a bare `State::new` will allocate.
@@ -421,6 +494,7 @@ impl State {
             key_cache: vec![0.0; kv],
             value_cache: vec![0.0; kv],
             context,
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
     }
 

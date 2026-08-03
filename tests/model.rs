@@ -2,7 +2,7 @@
 //!
 //! A transformer with the wrong wiring does not crash, it produces plausible
 //! numbers. So these fixtures zero out most of the network, leaving a path
-//! whose output can be computed exactly and compared â€” the residual stream, the
+//! whose output can be computed exactly and compared — the residual stream, the
 //! KV cache, and the attention average each get their own arithmetic check.
 
 use std::fs;
@@ -32,7 +32,7 @@ fn identity(n: usize) -> Vec<f32> {
 /// Embedding table: one distinct vector per token.
 ///
 /// Deliberately not collinear. An earlier version used `(token + 1) *
-/// (channel + 1)`, which makes every row a multiple of the same vector â€” RMS
+/// (channel + 1)`, which makes every row a multiple of the same vector — RMS
 /// normalization then erases the difference between tokens entirely, and any
 /// test asking "does history change the output" passes vacuously.
 fn embeddings() -> Vec<f32> {
@@ -260,6 +260,34 @@ fn decoding_is_deterministic_and_position_dependent() {
         run(&path, &[3, 2]),
         "history must change the outcome"
     );
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn threading_does_not_change_the_answer() {
+    // Rows are independent and each is reduced in the same order regardless of
+    // how they are split, so this must hold exactly, not approximately.
+    let path = write("threads", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let logits_for = |threads: usize| {
+        let mut state = State::new(&model.config);
+        state.threads = threads;
+        for (position, token) in [1u32, 3, 2].iter().enumerate() {
+            model
+                .forward(&mut state, *token, position)
+                .expect("forward");
+        }
+        state.logits.clone()
+    };
+
+    assert_eq!(
+        logits_for(1),
+        logits_for(4),
+        "bit-identical, not merely close"
+    );
+    assert_eq!(logits_for(1), logits_for(8));
     fs::remove_file(path).ok();
 }
 
