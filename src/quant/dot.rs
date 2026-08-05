@@ -256,15 +256,7 @@ pub fn q6_k(row: &[u8], x: &[f32]) -> f32 {
 mod tests {
     use super::*;
     use crate::quant;
-
-    /// Deterministic bytes that exercise every bit position.
-    fn pattern(len: usize) -> Vec<u8> {
-        (0..len).map(|i| ((i * 37 + 11) % 251) as u8).collect()
-    }
-
-    fn activations(len: usize) -> Vec<f32> {
-        (0..len).map(|i| ((i as f32) * 0.37).sin() * 2.0).collect()
-    }
+    use crate::quant::testdata::{activations, row};
 
     /// The property the whole module exists for: fusing must not change a
     /// single bit relative to dequantize-then-dot.
@@ -272,12 +264,16 @@ mod tests {
     /// Calls the kernel directly rather than through `fused`, so a type that is
     /// switched off for being slow is still held to the same correctness bar.
     fn assert_identical(ty: GgmlType, blocks: usize) {
-        let (block, size) = ty.layout().expect("sized type");
+        let (block, _) = ty.layout().expect("sized type");
         let elements = blocks * block as usize;
-        let row = pattern(blocks * size as usize);
+        let row = row(ty, blocks);
         let x = activations(elements);
 
         let expanded = quant::dequantize_to_vec(ty, &row, elements).expect("dequantize");
+        assert!(
+            expanded.iter().all(|v| v.is_finite()),
+            "fixture produced non-finite weights; the comparison would be vacuous"
+        );
         let reference = crate::ops::dot(&expanded, &x);
         let got = match ty {
             GgmlType::Q8_0 => q8_0(&row, &x),
