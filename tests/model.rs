@@ -136,19 +136,19 @@ fn fixture(kv_heads: usize, value_path: bool) -> Builder {
             "blk.0.ffn_gate.weight",
             &[DIM as u64, FFN as u64],
             GgmlType::F32,
-            bytes(&vec![0.0; DIM * FFN]),
+            bytes(&[0.0; DIM * FFN]),
         )
         .tensor(
             "blk.0.ffn_up.weight",
             &[DIM as u64, FFN as u64],
             GgmlType::F32,
-            bytes(&vec![0.0; DIM * FFN]),
+            bytes(&[0.0; DIM * FFN]),
         )
         .tensor(
             "blk.0.ffn_down.weight",
             &[FFN as u64, DIM as u64],
             GgmlType::F32,
-            bytes(&vec![0.0; FFN * DIM]),
+            bytes(&[0.0; FFN * DIM]),
         )
         .tensor(
             "output_norm.weight",
