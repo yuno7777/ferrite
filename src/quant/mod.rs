@@ -12,8 +12,10 @@ use std::io::{Error, ErrorKind, Result};
 
 use crate::gguf::GgmlType;
 
+pub mod activation;
 pub mod dot;
 pub mod half;
+pub mod idot;
 pub mod k;
 pub mod legacy;
 
@@ -98,6 +100,53 @@ pub fn dequantize_to_vec(ty: GgmlType, bytes: &[u8], elements: usize) -> Result<
     let mut out = vec![0.0; elements];
     dequantize(ty, bytes, &mut out)?;
     Ok(out)
+}
+
+/// Fixtures shared by the kernel tests.
+#[cfg(test)]
+pub(crate) mod testdata {
+    use super::GgmlType;
+
+    /// f16 0.0625 and 0.0078125 — small, exactly representable, and definitely
+    /// not Inf or NaN.
+    const SCALE: [u8; 2] = [0x00, 0x2C];
+    const MIN_SCALE: [u8; 2] = [0x00, 0x20];
+
+    /// A weight row whose payload is arbitrary but whose scale fields are
+    /// valid.
+    ///
+    /// Filling a block with pattern bytes puts whatever falls in the scale
+    /// field into an f16, and roughly one exponent in eight is Inf or NaN.
+    /// A comparison between two NaNs then passes while testing nothing, so the
+    /// scales are stamped deliberately.
+    pub(crate) fn row(ty: GgmlType, blocks: usize) -> Vec<u8> {
+        let (_, size) = ty.layout().expect("sized type");
+        let size = size as usize;
+        let mut row = vec![0u8; blocks * size];
+
+        for (index, block) in row.chunks_exact_mut(size).enumerate() {
+            for (offset, byte) in block.iter_mut().enumerate() {
+                *byte = ((index * 13 + offset * 37 + 11) % 251) as u8;
+            }
+            match ty {
+                // scale at the front
+                GgmlType::Q8_0 | GgmlType::Q4_0 => block[..2].copy_from_slice(&SCALE),
+                // scale and minimum-scale at the front
+                GgmlType::Q4_K | GgmlType::Q5_K => {
+                    block[..2].copy_from_slice(&SCALE);
+                    block[2..4].copy_from_slice(&MIN_SCALE);
+                }
+                // Q6_K puts its scale last
+                GgmlType::Q6_K => block[208..210].copy_from_slice(&SCALE),
+                other => panic!("no fixture for {}", other.name()),
+            }
+        }
+        row
+    }
+
+    pub(crate) fn activations(len: usize) -> Vec<f32> {
+        (0..len).map(|i| ((i as f32) * 0.37).sin() * 2.0).collect()
+    }
 }
 
 #[cfg(test)]
