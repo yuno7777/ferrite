@@ -16,7 +16,7 @@ pub const QK_K: usize = 256;
 /// The first four pairs live in the low 6 bits of `scales[0..8]`. The last four
 /// are split: their low 4 bits sit in `scales[8..12]`, and their top 2 bits are
 /// stolen from the unused high bits of the first eight bytes.
-fn scale_min(index: usize, scales: &[u8]) -> (u8, u8) {
+pub(crate) fn scale_min(index: usize, scales: &[u8]) -> (u8, u8) {
     if index < 4 {
         (scales[index] & 63, scales[index + 4] & 63)
     } else {
