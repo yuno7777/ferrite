@@ -2,71 +2,95 @@
 //!
 //! The unfused path expands a weight row into an f32 scratch buffer and then
 //! dots it. That writes the whole row to memory and reads it straight back —
-//! for a 4096-wide row, 16 KB out and 16 KB in, per row, per token. Fusing the
-//! expansion into the inner loop deletes both.
+//! for a 4096-wide row, 16 KB written and 16 KB read, per row, per token.
+//! Fusing the expansion into the dot deletes both.
 //!
-//! Every kernel here accumulates into the same four lanes, in the same index
-//! order, as [`crate::ops::dot`]. That is not decoration: it makes the fused
-//! result **bit-identical** to dequantizing first, so the fast path can be
-//! diffed against the reference rather than merely spot-checked. Block sizes
-//! are all multiples of four, so `index & 3` picks the same lane the unfused
-//! loop would have.
+//! Every kernel accumulates into the same four lanes, in the same index order,
+//! as [`crate::ops::dot`]. That makes the fused result **bit-identical** to
+//! dequantizing first, so the fast path can be diffed against the reference
+//! rather than spot-checked.
+//!
+//! The loops are written as `chunks_exact(4)` with a constant lane index rather
+//! than `lanes[index & 3]`. Both compute the same thing; only the first one
+//! vectorizes. The masked form was measurably *slower* than the unfused path it
+//! replaced, because the compiler could not prove the lane pattern and fell
+//! back to scalar code — the shape of the loop matters more here than the
+//! memory traffic it saves.
 
 use super::{half, k};
 use crate::gguf::GgmlType;
 
-/// Sum the lanes exactly as `ops::dot` does — left to right, no `iter().sum()`,
-/// which would fold in a leading zero and disturb signed zeros.
+/// Sum the lanes exactly as `ops::dot` does — left to right, not
+/// `iter().sum()`, which folds in a leading zero and disturbs signed zeros.
 #[inline]
 fn total(lanes: [f32; 4]) -> f32 {
     lanes[0] + lanes[1] + lanes[2] + lanes[3]
 }
 
-/// Whether a fused kernel exists, so callers can skip allocating the scratch
-/// row they would only need for the fallback.
+/// Which types fusion is actually *faster* for, measured rather than assumed.
+///
+/// From `cargo run --release --example bench` on a 16-thread x86-64 machine,
+/// fused versus expand-then-dot, at 2048x2048 and 4096x4096:
+///
+/// | type | speedup |
+/// | --- | --- |
+/// | Q6_K | 2.2 – 2.3x |
+/// | Q8_0 | 1.5 – 1.6x |
+/// | Q4_0 | 1.1 – 1.2x |
+/// | Q5_K | 1.1 – 1.2x |
+/// | Q4_K | **0.67x** |
+/// | F32  | ~1.0x |
+///
+/// Q4_K loses, consistently and by a lot, which is inconvenient because it is
+/// the format most models ship as. The reason is that its unpacking is already
+/// cheap — one mask and one shift per byte — and the unfused path spends it in
+/// two long, cleanly vectorized loops. Fusing chops that into eight short runs
+/// per super-block, and the loop overhead costs more than the round trip
+/// through the scratch buffer saves. Q6_K wins for the mirror-image reason: its
+/// unpacking is expensive enough that halving the memory traffic dominates.
+///
+/// F32's "dequantize" is a byte-order conversion the compiler turns into a
+/// copy, so there is nothing to fuse away.
+///
+/// The [`q4_k`] kernel below stays public and tested — it is what the benchmark
+/// compares against, and the day the loop structure improves this table is the
+/// one line to change.
 pub fn supports(ty: GgmlType) -> bool {
     matches!(
         ty,
-        GgmlType::F32
-            | GgmlType::Q8_0
-            | GgmlType::Q4_0
-            | GgmlType::Q4_K
-            | GgmlType::Q5_K
-            | GgmlType::Q6_K
+        GgmlType::Q8_0 | GgmlType::Q4_0 | GgmlType::Q5_K | GgmlType::Q6_K
     )
 }
 
 /// Dot one weight row, still quantized, against an activation vector.
 ///
-/// `None` for types without a fused kernel; the caller falls back to
-/// dequantize-then-dot, which is slower but never wrong.
+/// `None` when the unfused path is the faster one for this type; the caller
+/// falls back to dequantize-then-dot. See [`supports`] for which is which and
+/// why.
 pub fn fused(ty: GgmlType, row: &[u8], x: &[f32]) -> Option<f32> {
+    if !supports(ty) {
+        return None;
+    }
     Some(match ty {
-        GgmlType::F32 => f32_row(row, x),
         GgmlType::Q8_0 => q8_0(row, x),
         GgmlType::Q4_0 => q4_0(row, x),
-        GgmlType::Q4_K => q4_k(row, x),
         GgmlType::Q5_K => q5_k(row, x),
         GgmlType::Q6_K => q6_k(row, x),
         _ => return None,
     })
 }
 
-pub fn f32_row(row: &[u8], x: &[f32]) -> f32 {
-    let mut lanes = [0.0f32; 4];
-    for (index, (chunk, activation)) in row.chunks_exact(4).zip(x).enumerate() {
-        let weight = f32::from_le_bytes(chunk.try_into().expect("chunks_exact(4)"));
-        lanes[index & 3] += weight * activation;
-    }
-    total(lanes)
-}
-
 pub fn q8_0(row: &[u8], x: &[f32]) -> f32 {
     let mut lanes = [0.0f32; 4];
     for (block, activations) in row.chunks_exact(34).zip(x.chunks_exact(32)) {
         let d = half::read_f16(block);
-        for (index, (quant, activation)) in block[2..34].iter().zip(activations).enumerate() {
-            lanes[index & 3] += d * (*quant as i8) as f32 * activation;
+        for (quants, acts) in block[2..34]
+            .chunks_exact(4)
+            .zip(activations.chunks_exact(4))
+        {
+            for lane in 0..4 {
+                lanes[lane] += d * (quants[lane] as i8) as f32 * acts[lane];
+            }
         }
     }
     total(lanes)
@@ -76,13 +100,24 @@ pub fn q4_0(row: &[u8], x: &[f32]) -> f32 {
     let mut lanes = [0.0f32; 4];
     for (block, activations) in row.chunks_exact(18).zip(x.chunks_exact(32)) {
         let d = half::read_f16(block);
+        let quants = &block[2..18];
         // Element j is the low nibble of byte j; element j + 16 is the high
-        // nibble. Walking indices in order means two passes over the same bytes.
-        for (index, byte) in block[2..18].iter().enumerate() {
-            lanes[index & 3] += d * ((byte & 0x0F) as f32 - 8.0) * activations[index];
+        // nibble. Ascending index order means two passes over the same bytes.
+        for (bytes, acts) in quants
+            .chunks_exact(4)
+            .zip(activations[..16].chunks_exact(4))
+        {
+            for lane in 0..4 {
+                lanes[lane] += d * ((bytes[lane] & 0x0F) as f32 - 8.0) * acts[lane];
+            }
         }
-        for (index, byte) in block[2..18].iter().enumerate() {
-            lanes[index & 3] += d * ((byte >> 4) as f32 - 8.0) * activations[16 + index];
+        for (bytes, acts) in quants
+            .chunks_exact(4)
+            .zip(activations[16..].chunks_exact(4))
+        {
+            for lane in 0..4 {
+                lanes[lane] += d * ((bytes[lane] >> 4) as f32 - 8.0) * acts[lane];
+            }
         }
     }
     total(lanes)
@@ -104,13 +139,15 @@ pub fn q4_k(row: &[u8], x: &[f32]) -> f32 {
             let (d_low, offset_low) = (d * scale_low as f32, dmin * min_low as f32);
             let (d_high, offset_high) = (d * scale_high as f32, dmin * min_high as f32);
 
-            for (index, byte) in bytes.iter().enumerate() {
-                lanes[index & 3] += (d_low * (byte & 0x0F) as f32 - offset_low) * acts[index];
+            for (quants, a) in bytes.chunks_exact(4).zip(acts[..32].chunks_exact(4)) {
+                for lane in 0..4 {
+                    lanes[lane] += (d_low * (quants[lane] & 0x0F) as f32 - offset_low) * a[lane];
+                }
             }
-            // 32 is a multiple of 4, so the lane for element 32 + index is the
-            // same one index would land in.
-            for (index, byte) in bytes.iter().enumerate() {
-                lanes[index & 3] += (d_high * (byte >> 4) as f32 - offset_high) * acts[32 + index];
+            for (quants, a) in bytes.chunks_exact(4).zip(acts[32..].chunks_exact(4)) {
+                for lane in 0..4 {
+                    lanes[lane] += (d_high * (quants[lane] >> 4) as f32 - offset_high) * a[lane];
+                }
             }
         }
     }
@@ -136,15 +173,27 @@ pub fn q5_k(row: &[u8], x: &[f32]) -> f32 {
             let mask_low = 1u8 << (group * 2);
             let mask_high = 2u8 << (group * 2);
 
-            for (index, byte) in bytes.iter().enumerate() {
-                let fifth = if high[index] & mask_low != 0 { 16 } else { 0 };
-                lanes[index & 3] +=
-                    (d_low * ((byte & 0x0F) + fifth) as f32 - offset_low) * acts[index];
+            for ((quants, highs), a) in bytes
+                .chunks_exact(4)
+                .zip(high.chunks_exact(4))
+                .zip(acts[..32].chunks_exact(4))
+            {
+                for lane in 0..4 {
+                    let fifth = if highs[lane] & mask_low != 0 { 16 } else { 0 };
+                    lanes[lane] +=
+                        (d_low * ((quants[lane] & 0x0F) + fifth) as f32 - offset_low) * a[lane];
+                }
             }
-            for (index, byte) in bytes.iter().enumerate() {
-                let fifth = if high[index] & mask_high != 0 { 16 } else { 0 };
-                lanes[index & 3] +=
-                    (d_high * ((byte >> 4) + fifth) as f32 - offset_high) * acts[32 + index];
+            for ((quants, highs), a) in bytes
+                .chunks_exact(4)
+                .zip(high.chunks_exact(4))
+                .zip(acts[32..].chunks_exact(4))
+            {
+                for lane in 0..4 {
+                    let fifth = if highs[lane] & mask_high != 0 { 16 } else { 0 };
+                    lanes[lane] +=
+                        (d_high * ((quants[lane] >> 4) + fifth) as f32 - offset_high) * a[lane];
+                }
             }
         }
     }
@@ -166,7 +215,7 @@ pub fn q6_k(row: &[u8], x: &[f32]) -> f32 {
             let acts = &activations[half_block * 128..(half_block + 1) * 128];
 
             // Quads run in index order — 0..32, 32..64, 64..96, 96..128 — which
-            // is what keeps the lane assignment matching the unfused loop.
+            // keeps lane assignment matching the unfused loop.
             for quad in 0..4 {
                 let (source, shift, scale_base) = match quad {
                     0 => (0usize, 0u32, 0usize),
@@ -174,17 +223,28 @@ pub fn q6_k(row: &[u8], x: &[f32]) -> f32 {
                     2 => (0, 4, 4),
                     _ => (32, 6, 6),
                 };
-                let upper_nibble = quad >= 2;
+                let upper = quad >= 2;
 
-                for index in 0..32 {
-                    let nibble = if upper_nibble {
-                        low[source + index] >> 4
-                    } else {
-                        low[source + index] & 0x0F
-                    };
-                    let quant = (nibble | (((high[index] >> shift) & 3) << 4)) as i8 - 32;
-                    let scale = scales[scale_base + index / 16] as i8;
-                    lanes[index & 3] += d * scale as f32 * quant as f32 * acts[quad * 32 + index];
+                // The scale changes every 16 elements; hoisting it out leaves
+                // the inner run scale-invariant.
+                for sub in 0..2 {
+                    let scaled = d * scales[scale_base + sub] as i8 as f32;
+                    let at = sub * 16;
+                    let lows = &low[source + at..source + at + 16];
+                    let highs = &high[at..at + 16];
+                    let a = &acts[quad * 32 + at..quad * 32 + at + 16];
+
+                    for ((l, h), act) in lows
+                        .chunks_exact(4)
+                        .zip(highs.chunks_exact(4))
+                        .zip(a.chunks_exact(4))
+                    {
+                        for lane in 0..4 {
+                            let nibble = if upper { l[lane] >> 4 } else { l[lane] & 0x0F };
+                            let quant = (nibble | (((h[lane] >> shift) & 3) << 4)) as i8 - 32;
+                            lanes[lane] += scaled * quant as f32 * act[lane];
+                        }
+                    }
                 }
             }
         }
@@ -199,9 +259,7 @@ mod tests {
 
     /// Deterministic bytes that exercise every bit position.
     fn pattern(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|i| ((i * 37 + 11) % 251) as u8)
-            .collect::<Vec<_>>()
+        (0..len).map(|i| ((i * 37 + 11) % 251) as u8).collect()
     }
 
     fn activations(len: usize) -> Vec<f32> {
@@ -210,6 +268,9 @@ mod tests {
 
     /// The property the whole module exists for: fusing must not change a
     /// single bit relative to dequantize-then-dot.
+    ///
+    /// Calls the kernel directly rather than through `fused`, so a type that is
+    /// switched off for being slow is still held to the same correctness bar.
     fn assert_identical(ty: GgmlType, blocks: usize) {
         let (block, size) = ty.layout().expect("sized type");
         let elements = blocks * block as usize;
@@ -218,7 +279,14 @@ mod tests {
 
         let expanded = quant::dequantize_to_vec(ty, &row, elements).expect("dequantize");
         let reference = crate::ops::dot(&expanded, &x);
-        let got = fused(ty, &row, &x).expect("fused kernel exists");
+        let got = match ty {
+            GgmlType::Q8_0 => q8_0(&row, &x),
+            GgmlType::Q4_0 => q4_0(&row, &x),
+            GgmlType::Q4_K => q4_k(&row, &x),
+            GgmlType::Q5_K => q5_k(&row, &x),
+            GgmlType::Q6_K => q6_k(&row, &x),
+            other => panic!("no kernel for {}", other.name()),
+        };
 
         assert_eq!(
             got.to_bits(),
@@ -259,13 +327,23 @@ mod tests {
     }
 
     #[test]
-    fn f32_matches_the_reference_exactly() {
-        assert_identical(GgmlType::F32, 64);
-    }
+    fn selection_matches_the_measurements() {
+        for ty in [
+            GgmlType::Q8_0,
+            GgmlType::Q4_0,
+            GgmlType::Q5_K,
+            GgmlType::Q6_K,
+        ] {
+            assert!(supports(ty), "{} should be fused", ty.name());
+        }
+        // Measured slower fused; see the table on `supports`.
+        assert!(!supports(GgmlType::Q4_K));
+        assert!(!supports(GgmlType::F32));
+        // No kernel at all.
+        assert!(!supports(GgmlType::F16));
 
-    #[test]
-    fn unfused_types_report_themselves() {
+        assert!(fused(GgmlType::Q4_K, &[0; 144], &[0.0; 256]).is_none());
         assert!(fused(GgmlType::F16, &[0; 2], &[1.0]).is_none());
-        assert!(fused(GgmlType::Q2_K, &[0; 84], &[0.0; 256]).is_none());
+        assert!(fused(GgmlType::Q8_0, &[0; 34], &[0.0; 32]).is_some());
     }
 }

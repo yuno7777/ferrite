@@ -62,12 +62,15 @@ pub fn matvec(matrix: &[f32], x: &[f32], out: &mut [f32]) {
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut lanes = [0.0f32; 4];
-    let full = a.len() - a.len() % 4;
-    for start in (0..full).step_by(4) {
+    // `chunks_exact(4)` rather than indexed stepping: it hands the compiler a
+    // provably-4-element slice, which is what lets it emit a single vector
+    // multiply-add instead of four scalar ones.
+    for (x, y) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
         for lane in 0..4 {
-            lanes[lane] += a[start + lane] * b[start + lane];
+            lanes[lane] += x[lane] * y[lane];
         }
     }
+    let full = a.len() - a.len() % 4;
     let tail: f32 = a[full..].iter().zip(&b[full..]).map(|(x, y)| x * y).sum();
     lanes[0] + lanes[1] + lanes[2] + lanes[3] + tail
 }
