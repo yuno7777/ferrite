@@ -105,6 +105,37 @@ value and output projections returns the mean of what it has seen, so the KV
 cache can be checked arithmetically rather than by eyeballing whether the
 output looks like English.
 
+## Performance
+
+```bash
+cargo run --release --example bench
+```
+
+Fused dequantize-and-dot against expand-then-dot, single-threaded, at shapes
+from Llama-3.2-1B and Llama-3.1-8B on a 16-thread x86-64 machine:
+
+| type | 2048×2048 | 4096×4096 | fused? |
+| --- | --- | --- | --- |
+| Q6_K | 2.2x | 2.3x | yes |
+| Q8_0 | 1.6x | 1.5x | yes |
+| Q5_K | 1.2x | 1.1x | yes |
+| Q4_0 | 1.2x | 1.1x | yes |
+| Q4_K | **0.67x** | **0.67x** | no — falls back |
+
+Q4_K losing is the interesting result, and it is not a bug. Its unpacking is
+one mask and one shift per byte, which the unfused path spends in two long,
+cleanly vectorized loops. Fusing chops those into eight short runs per
+super-block and the loop overhead exceeds what the saved memory traffic is
+worth. Q6_K wins for exactly the mirror reason. So fusion is enabled per type
+by measurement, not by assumption — see the table on `quant::dot::supports`.
+
+The honest absolute number: 1–4 GB/s of weights per core, which puts a 4.5 GB
+8B model somewhere around a few tokens per second on all cores. llama.cpp is
+several times faster than that, and the gap is not mysterious — it quantizes
+*activations* to int8 and does integer dot products, where this still converts
+everything to f32 and multiplies in floating point. That is the next real
+optimization, and it is a bigger one than SIMD intrinsics would be.
+
 ## Roadmap
 
 | Phase | Scope | State |
@@ -113,12 +144,15 @@ output looks like English.
 | 2 | BPE and SentencePiece tokenizers from the GGUF vocab | done |
 | 3 | f32 forward pass, KV cache, sampling, `run` | done |
 | 4 | K-quant dequantization, threaded matvec | done |
-| 5 | Fused quantized GEMV, AVX2 via `std::arch`, benchmarks vs llama.cpp | |
-| 6 | Batched prefill, more architectures, speculative decoding | |
+| 5 | Fused quantized GEMV, benchmark harness | done |
+| 6 | int8 activations and integer dot products | next |
+| 7 | AVX2 via `std::arch`, batched prefill, more architectures | |
 
-The honest performance note: the matvec currently dequantizes to f32 and then
-does an f32 dot product. Fusing the dequantize into the inner loop and adding
-SIMD is phase 5, and is where the tok/s number comes from.
+Phase 6 is where the remaining multiple lives. Converting weights to f32 to
+multiply against f32 activations wastes most of the arithmetic width the
+hardware has; quantizing activations to int8 and accumulating in i32 is how
+llama.cpp gets its numbers, and it matters more than hand-written intrinsics
+would.
 
 ## Development
 
