@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use ferrite::gguf::{GgmlType, Gguf};
 use ferrite::model::Weight;
+use ferrite::quant::activation::Quantized;
 use ferrite::synth::Builder;
 
 /// Shapes lifted from Llama-3.2-1B and Llama-3.1-8B.
@@ -56,8 +57,8 @@ fn main() -> std::io::Result<()> {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     println!("{threads} hardware threads\n");
     println!(
-        "{:<26} {:>7} {:>11} {:>11} {:>8} {:>10}",
-        "shape", "type", "reference", "fused", "speedup", "bandwidth"
+        "{:<26} {:>7} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "shape", "type", "reference", "fused", "int8", "best", "GB/s"
     );
 
     for (label, cols, rows) in SHAPES {
@@ -86,17 +87,34 @@ fn main() -> std::io::Result<()> {
             });
             let fused = time(|| weight.matvec(&x, &mut out, &mut scratch).expect("fused"));
 
+            // The quantization is inside the timed body because a real matvec
+            // pays it once per call, not once per program.
+            let mut quantized = Quantized::with_capacity(cols);
+            let has_int8 = ferrite::quant::idot::supports(ty);
+            let int8 = if has_int8 {
+                time(|| {
+                    quantized.fill(&x);
+                    weight.matvec_int8(&quantized, &mut out);
+                })
+            } else {
+                f64::NAN
+            };
+
             // Bandwidth counts the stored weights, not the expanded f32: those
             // are the bytes that actually cross the memory bus.
-            let seconds = fused / 1.0e9;
-            let bandwidth = stored as f64 / seconds / (1024.0 * 1024.0 * 1024.0);
-
+            let best = if has_int8 { fused.min(int8) } else { fused };
+            let bandwidth = stored as f64 / (best / 1.0e9) / (1024.0 * 1024.0 * 1024.0);
             println!(
-                "{label:<26} {:>7} {:>9.2}ms {:>9.2}ms {:>7.2}x {:>7.1} GB/s",
+                "{label:<26} {:>7} {:>8.2}ms {:>8.2}ms {:>8} {:>7.2}x {:>8.1}",
                 ty.name(),
                 reference / 1.0e6,
                 fused / 1.0e6,
-                reference / fused,
+                if has_int8 {
+                    format!("{:.2}ms", int8 / 1.0e6)
+                } else {
+                    "-".to_string()
+                },
+                reference / best,
                 bandwidth
             );
 

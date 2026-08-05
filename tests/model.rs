@@ -314,6 +314,146 @@ fn the_fused_matvec_agrees_with_the_reference() {
     fs::remove_file(path).ok();
 }
 
+/// A model whose matmuls are `Q8_0`, so the integer kernels are actually
+/// reached. Dimensions are multiples of 32 because that is the block size.
+fn quantized_fixture() -> Builder {
+    const DIM: u64 = 32;
+    const VOCAB: u64 = 32;
+
+    /// One `Q8_0` block: an f16 scale of 0.0625, then 32 signed bytes.
+    fn q8_0(rows: u64, cols: u64, seed: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut state = seed;
+        for _ in 0..rows * (cols / 32) {
+            out.extend_from_slice(&0x2C00u16.to_le_bytes());
+            for _ in 0..32 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                out.push((state >> 33) as u8);
+            }
+        }
+        out
+    }
+
+    fn ones(n: usize) -> Vec<u8> {
+        (0..n).flat_map(|_| 1.0f32.to_le_bytes()).collect()
+    }
+
+    let mut builder = Builder::new()
+        .meta("general.architecture", Value::String("llama".into()))
+        .meta("llama.block_count", Value::U32(2))
+        .meta("llama.embedding_length", Value::U32(DIM as u32))
+        .meta("llama.feed_forward_length", Value::U32(DIM as u32))
+        .meta("llama.attention.head_count", Value::U32(2))
+        .meta("llama.attention.head_count_kv", Value::U32(2))
+        .meta("llama.context_length", Value::U32(16))
+        .meta("llama.attention.layer_norm_rms_epsilon", Value::F32(EPS))
+        .meta("llama.rope.freq_base", Value::F32(10000.0))
+        .meta("tokenizer.ggml.model", Value::String("llama".into()))
+        .meta(
+            "tokenizer.ggml.tokens",
+            Value::Array((0..VOCAB).map(|i| Value::String(format!("t{i}"))).collect()),
+        )
+        .tensor(
+            "token_embd.weight",
+            &[DIM, VOCAB],
+            GgmlType::Q8_0,
+            q8_0(VOCAB, DIM, 1),
+        );
+
+    for layer in 0..2u64 {
+        let seed = 100 + layer * 10;
+        builder = builder
+            .tensor(
+                &format!("blk.{layer}.attn_norm.weight"),
+                &[DIM],
+                GgmlType::F32,
+                ones(DIM as usize),
+            )
+            .tensor(
+                &format!("blk.{layer}.ffn_norm.weight"),
+                &[DIM],
+                GgmlType::F32,
+                ones(DIM as usize),
+            );
+        for (index, name) in [
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        ]
+        .iter()
+        .enumerate()
+        {
+            builder = builder.tensor(
+                &format!("blk.{layer}.{name}.weight"),
+                &[DIM, DIM],
+                GgmlType::Q8_0,
+                q8_0(DIM, DIM, seed + index as u64),
+            );
+        }
+    }
+
+    builder
+        .tensor(
+            "output_norm.weight",
+            &[DIM],
+            GgmlType::F32,
+            ones(DIM as usize),
+        )
+        .tensor(
+            "output.weight",
+            &[DIM, VOCAB],
+            GgmlType::Q8_0,
+            q8_0(VOCAB, DIM, 999),
+        )
+}
+
+#[test]
+fn the_integer_path_tracks_the_exact_one_through_a_whole_forward_pass() {
+    // Per-kernel accuracy is pinned in the unit tests; this checks the wiring.
+    // A misrouted activation or a mismatched block index would not produce a
+    // slightly different number, it would produce a completely different one.
+    let path = write("int8", &quantized_fixture());
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let logits_for = |int8: bool| {
+        let mut state = State::new(&model.config);
+        state.set_int8(int8);
+        for (position, token) in [1u32, 5, 2].iter().enumerate() {
+            model
+                .forward(&mut state, *token, position)
+                .expect("forward");
+        }
+        state.logits.clone()
+    };
+
+    let approximate = logits_for(true);
+    let exact = logits_for(false);
+
+    assert!(exact.iter().all(|v| v.is_finite()), "{exact:?}");
+    assert!(
+        exact.iter().any(|v| v.abs() > 1e-3),
+        "fixture is degenerate, the comparison would prove nothing: {exact:?}"
+    );
+
+    let scale = exact.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+    for (index, (a, e)) in approximate.iter().zip(&exact).enumerate() {
+        assert!(
+            (a - e).abs() / scale < 0.02,
+            "logit {index}: int8 {a}, exact {e} (scale {scale})"
+        );
+    }
+    // And they should not be *identical* — that would mean the flag does
+    // nothing and the test is watching one path twice.
+    assert_ne!(approximate, exact, "set_int8 appears to have no effect");
+
+    fs::remove_file(path).ok();
+}
+
 #[test]
 fn running_past_the_cache_is_an_error_not_a_corruption() {
     let path = write("overflow", &fixture(2, false));

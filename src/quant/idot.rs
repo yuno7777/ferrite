@@ -29,12 +29,29 @@ use super::activation::{Quantized, BLOCK};
 use super::{half, k};
 use crate::gguf::GgmlType;
 
-/// Which weight types have an integer kernel.
+/// Which weight types the integer path is actually chosen for.
+///
+/// Measured against the f32 paths at 2048×2048 and 14336×4096:
+///
+/// | type | reference | f32 fused | int8 |
+/// | --- | --- | --- | --- |
+/// | Q8_0 | 0.99 ms | 0.70 ms | **0.45 ms** |
+/// | Q4_K | 1.29 ms | 1.17 ms | **0.99 ms** |
+/// | Q4_0 | 1.17 ms | **1.09 ms** | 1.62 ms |
+///
+/// Q4_K matters most: it is the format most models ship as, and this is the
+/// first path that beats its plain reference. Q4_0 loses — its f32 unpacking is
+/// already trivial, so paying for the activation quantization buys nothing —
+/// so it keeps the fused f32 kernel, which stays below and stays tested.
 pub fn supports(ty: GgmlType) -> bool {
-    matches!(ty, GgmlType::Q8_0 | GgmlType::Q4_0 | GgmlType::Q4_K)
+    matches!(ty, GgmlType::Q8_0 | GgmlType::Q4_K)
 }
 
 /// Dot one quantized weight row against a quantized activation vector.
+///
+/// Runs whatever kernel exists, which is a wider set than [`supports`] selects
+/// — `supports` is the policy, this is the capability. Callers that want the
+/// fast path should ask `supports` first.
 pub fn integer(ty: GgmlType, row: &[u8], x: &Quantized) -> Option<f32> {
     Some(match ty {
         GgmlType::Q8_0 => q8_0(row, x),
@@ -179,6 +196,8 @@ mod tests {
         }
     }
 
+    /// Q4_0 is not selected — it measured slower than its f32 kernel — but the
+    /// implementation is still here and still has to be right.
     #[test]
     fn q4_0_stays_close_to_the_exact_dot() {
         for blocks in [1, 4, 16] {

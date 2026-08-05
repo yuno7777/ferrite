@@ -124,6 +124,33 @@ impl Config {
     }
 }
 
+/// Reusable buffers for a matvec, so a decode step allocates nothing.
+///
+/// Held by [`State`]. Sized for the widest matrix in the model.
+pub struct Workspace {
+    /// Expanded row, for weight types with no faster path.
+    scratch: Vec<f32>,
+    /// The activation, quantized once per matvec and shared by every row.
+    quantized: quant::activation::Quantized,
+    /// Set false to force the exact f32 path everywhere.
+    ///
+    /// The integer kernels are an approximation — small, bounded, and the same
+    /// trade every fast inference engine makes, but a real one. This is the
+    /// switch for anyone who would rather have the exact numbers, and for
+    /// bisecting a suspected numerical bug.
+    pub int8: bool,
+}
+
+impl Workspace {
+    pub fn new(widest: usize) -> Self {
+        Self {
+            scratch: vec![0.0; widest],
+            quantized: quant::activation::Quantized::with_capacity(widest),
+            int8: true,
+        }
+    }
+}
+
 /// A weight matrix left in its stored, quantized form.
 ///
 /// Rows are expanded one at a time during a matvec rather than up front: a
@@ -183,47 +210,47 @@ impl<'a> Weight<'a> {
     /// `out = self * x`, split across `threads` workers.
     ///
     /// Rows are independent and each is reduced by the same code in the same
-    /// order, so the result is bit-identical to the single-threaded path no
-    /// matter how the split falls. That is worth preserving: a threaded kernel
-    /// that merely *approximates* the reference cannot be diffed against it.
+    /// order, so the split never changes the answer — the threaded result is
+    /// bit-identical to the single-threaded one on whichever path is chosen.
     pub fn matvec_threaded(
         &self,
         x: &[f32],
         out: &mut [f32],
         threads: usize,
-        scratch: &mut [f32],
+        workspace: &mut Workspace,
     ) -> Result<()> {
+        // Quantizing the activation is O(cols) against the matvec's O(rows ×
+        // cols), and every row shares the result, so it happens once here
+        // rather than per row or per worker.
+        let int8 = workspace.int8 && quant::idot::supports(self.ty);
+        if int8 {
+            workspace.quantized.fill(x);
+        }
+        let Workspace {
+            scratch, quantized, ..
+        } = workspace;
+
         // Below a few rows per worker the spawn costs more than the work.
         if threads <= 1 || self.rows < threads * 4 {
-            return self.matvec(x, out, scratch);
+            return self.rows_into(out, 0, x, quantized, int8, scratch);
         }
 
         let chunk = self.rows.div_ceil(threads);
         let outcomes: Vec<Result<()>> = std::thread::scope(|scope| {
+            let quantized = &*quantized;
             let workers: Vec<_> = out
                 .chunks_mut(chunk)
                 .enumerate()
                 .map(|(index, rows)| {
                     scope.spawn(move || {
-                        // Only the fallback path needs a scratch row, so a
-                        // fused type allocates nothing per worker.
-                        let mut scratch = if quant::dot::supports(self.ty) {
+                        // Only the slow path needs a scratch row, so a type
+                        // with a kernel allocates nothing per worker.
+                        let mut scratch = if int8 || quant::dot::supports(self.ty) {
                             Vec::new()
                         } else {
                             vec![0.0; self.cols]
                         };
-                        let first = index * chunk;
-                        for (offset, slot) in rows.iter_mut().enumerate() {
-                            let row = self.row_slice(first + offset);
-                            *slot = match quant::dot::fused(self.ty, row, x) {
-                                Some(value) => value,
-                                None => {
-                                    quant::dequantize(self.ty, row, &mut scratch)?;
-                                    ops::dot(&scratch, x)
-                                }
-                            };
-                        }
-                        Ok(())
+                        self.rows_into(rows, index * chunk, x, quantized, int8, &mut scratch)
                     })
                 })
                 .collect();
@@ -238,6 +265,34 @@ impl<'a> Weight<'a> {
         });
 
         outcomes.into_iter().collect::<Result<Vec<()>>>()?;
+        Ok(())
+    }
+
+    /// Fill `out` with rows `first..first + out.len()`, by whichever path this
+    /// type is fastest on.
+    fn rows_into(
+        &self,
+        out: &mut [f32],
+        first: usize,
+        x: &[f32],
+        quantized: &quant::activation::Quantized,
+        int8: bool,
+        scratch: &mut [f32],
+    ) -> Result<()> {
+        for (offset, slot) in out.iter_mut().enumerate() {
+            let row = self.row_slice(first + offset);
+            *slot = if int8 {
+                quant::idot::integer(self.ty, row, quantized).expect("type was checked")
+            } else {
+                match quant::dot::fused(self.ty, row, x) {
+                    Some(value) => value,
+                    None => {
+                        quant::dequantize(self.ty, row, scratch)?;
+                        ops::dot(scratch, x)
+                    }
+                }
+            };
+        }
         Ok(())
     }
 
@@ -260,6 +315,21 @@ impl<'a> Weight<'a> {
             };
         }
         Ok(())
+    }
+
+    /// `out = self * x`, with the activation already quantized to int8.
+    ///
+    /// Returns `false` and leaves `out` untouched when this type has no integer
+    /// kernel. Approximate — see [`crate::quant::idot`].
+    pub fn matvec_int8(&self, x: &quant::activation::Quantized, out: &mut [f32]) -> bool {
+        if !quant::idot::supports(self.ty) {
+            return false;
+        }
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = quant::idot::integer(self.ty, self.row_slice(index), x)
+                .expect("type was just checked");
+        }
+        true
     }
 
     /// The unfused path, always. Kept so the fused kernels have something to be
@@ -371,7 +441,7 @@ impl<'a> Model<'a> {
             v,
             att,
             logits,
-            scratch,
+            workspace,
             key_cache,
             value_cache,
             context,
@@ -383,15 +453,9 @@ impl<'a> Model<'a> {
 
         for (index, layer) in self.layers.iter().enumerate() {
             ops::rms_norm(x, &layer.attn_norm, c.eps, xb);
-            layer
-                .wq
-                .matvec_threaded(xb, q, *threads, &mut scratch[..c.embedding])?;
-            layer
-                .wk
-                .matvec_threaded(xb, k, *threads, &mut scratch[..c.embedding])?;
-            layer
-                .wv
-                .matvec_threaded(xb, v, *threads, &mut scratch[..c.embedding])?;
+            layer.wq.matvec_threaded(xb, q, *threads, workspace)?;
+            layer.wk.matvec_threaded(xb, k, *threads, workspace)?;
+            layer.wv.matvec_threaded(xb, v, *threads, workspace)?;
 
             // Position is baked into the query and key, never into the value.
             for head in 0..c.heads {
@@ -435,27 +499,19 @@ impl<'a> Model<'a> {
                 }
             }
 
-            layer
-                .wo
-                .matvec_threaded(xb, xb2, *threads, &mut scratch[..c.embedding])?;
+            layer.wo.matvec_threaded(xb, xb2, *threads, workspace)?;
             for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
                 *slot += delta;
             }
 
             ops::rms_norm(x, &layer.ffn_norm, c.eps, xb);
-            layer
-                .gate
-                .matvec_threaded(xb, hb, *threads, &mut scratch[..c.embedding])?;
-            layer
-                .up
-                .matvec_threaded(xb, hb2, *threads, &mut scratch[..c.embedding])?;
+            layer.gate.matvec_threaded(xb, hb, *threads, workspace)?;
+            layer.up.matvec_threaded(xb, hb2, *threads, workspace)?;
             // SwiGLU: the gate is squashed, the up projection is not.
             for (gate, up) in hb.iter_mut().zip(hb2.iter()) {
                 *gate = ops::silu(*gate) * up;
             }
-            layer
-                .down
-                .matvec_threaded(hb, xb2, *threads, &mut scratch[..c.ffn])?;
+            layer.down.matvec_threaded(hb, xb2, *threads, workspace)?;
             for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
                 *slot += delta;
             }
@@ -463,7 +519,7 @@ impl<'a> Model<'a> {
 
         ops::rms_norm(x, &self.output_norm, c.eps, xb);
         self.output
-            .matvec(xb, logits, &mut scratch[..c.embedding])?;
+            .matvec_threaded(xb, logits, *threads, workspace)?;
         Ok(())
     }
 }
@@ -484,7 +540,7 @@ pub struct State {
     att: Vec<f32>,
     /// Scores for the last token processed, one per vocabulary entry.
     pub logits: Vec<f32>,
-    scratch: Vec<f32>,
+    workspace: Workspace,
     key_cache: Vec<f32>,
     value_cache: Vec<f32>,
     context: usize,
@@ -519,7 +575,7 @@ impl State {
             v: vec![0.0; config.kv_dim()],
             att: vec![0.0; context],
             logits: vec![0.0; config.vocab],
-            scratch: vec![0.0; config.embedding.max(config.ffn)],
+            workspace: Workspace::new(config.embedding.max(config.ffn)),
             key_cache: vec![0.0; kv],
             value_cache: vec![0.0; kv],
             context,
@@ -530,6 +586,15 @@ impl State {
     /// How many tokens fit before `forward` refuses.
     pub fn context(&self) -> usize {
         self.context
+    }
+
+    /// Turn the integer kernels on or off.
+    ///
+    /// On by default. Off gives the exact f32 arithmetic — slower, and the
+    /// thing to reach for when deciding whether a numerical oddity comes from
+    /// the activation quantization or from somewhere else.
+    pub fn set_int8(&mut self, enabled: bool) {
+        self.workspace.int8 = enabled;
     }
 
     /// Bytes held by the KV cache, which dominates everything else here.
