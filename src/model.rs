@@ -287,6 +287,10 @@ impl<'a> Weight<'a> {
                 match quant::dot::fused(self.ty, row, x) {
                     Some(value) => value,
                     None => {
+                        // The workspace is sized for the widest matrix in the
+                        // model, so it has to be cut to this one's width —
+                        // `dequantize` takes the element count from the slice.
+                        let scratch = &mut scratch[..self.cols];
                         quant::dequantize(self.ty, row, scratch)?;
                         ops::dot(scratch, x)
                     }

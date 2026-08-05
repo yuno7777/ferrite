@@ -15,6 +15,11 @@ use ferrite::synth::Builder;
 
 const DIM: usize = 4;
 const VOCAB: usize = 4;
+/// Deliberately not equal to DIM: the matvec workspace is sized for the widest
+/// matrix in the model, so a narrower one has to be sliced down to its own
+/// width. When those were the same number, that slicing could be — and was —
+/// omitted without any test noticing.
+const FFN: usize = 8;
 const EPS: f32 = 1e-5;
 
 fn bytes(values: &[f32]) -> Vec<u8> {
@@ -59,7 +64,7 @@ fn fixture(kv_heads: usize, value_path: bool) -> Builder {
         .meta("general.architecture", Value::String("llama".into()))
         .meta("llama.block_count", Value::U32(1))
         .meta("llama.embedding_length", Value::U32(DIM as u32))
-        .meta("llama.feed_forward_length", Value::U32(DIM as u32))
+        .meta("llama.feed_forward_length", Value::U32(FFN as u32))
         .meta("llama.attention.head_count", Value::U32(heads))
         .meta("llama.attention.head_count_kv", Value::U32(kv_heads as u32))
         .meta("llama.context_length", Value::U32(16))
@@ -129,21 +134,21 @@ fn fixture(kv_heads: usize, value_path: bool) -> Builder {
         // A zeroed gate makes the whole feed-forward branch contribute nothing.
         .tensor(
             "blk.0.ffn_gate.weight",
-            &[DIM as u64, DIM as u64],
+            &[DIM as u64, FFN as u64],
             GgmlType::F32,
-            bytes(&zero),
+            bytes(&vec![0.0; DIM * FFN]),
         )
         .tensor(
             "blk.0.ffn_up.weight",
-            &[DIM as u64, DIM as u64],
+            &[DIM as u64, FFN as u64],
             GgmlType::F32,
-            bytes(&zero),
+            bytes(&vec![0.0; DIM * FFN]),
         )
         .tensor(
             "blk.0.ffn_down.weight",
-            &[DIM as u64, DIM as u64],
+            &[FFN as u64, DIM as u64],
             GgmlType::F32,
-            bytes(&zero),
+            bytes(&vec![0.0; FFN * DIM]),
         )
         .tensor(
             "output_norm.weight",
@@ -342,6 +347,8 @@ fn quantized_fixture() -> Builder {
         .meta("general.architecture", Value::String("llama".into()))
         .meta("llama.block_count", Value::U32(2))
         .meta("llama.embedding_length", Value::U32(DIM as u32))
+        // This fixture's own width, not the module-level FFN: the integer path
+        // needs every matrix to be a whole number of 32-element blocks.
         .meta("llama.feed_forward_length", Value::U32(DIM as u32))
         .meta("llama.attention.head_count", Value::U32(2))
         .meta("llama.attention.head_count_kv", Value::U32(2))
