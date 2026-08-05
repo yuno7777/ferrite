@@ -7,6 +7,14 @@ everything below is unreleased.
 
 ### Added
 
+- **int8 activations and integer dot products.** The activation is quantized
+  once per matvec and every row dots against it in i32. Selected for `Q8_0`
+  (2.2x over the reference) and `Q4_K` (1.3x) — the latter being the first path
+  that beats plain expand-then-dot for the format most models ship as.
+  `State::set_int8(false)` restores the exact arithmetic
+- `Workspace`, holding the reusable scratch row and the quantized activation,
+  so a decode step allocates nothing
+
 - **GGUF v2/v3 reader** — all 13 metadata value types, tensor table,
   alignment-aware data offsets, zero-copy tensor access off a memory mapping.
   Corrupt and truncated files are rejected rather than half-read
@@ -31,10 +39,13 @@ everything below is unreleased.
 
 ### Notes
 
-- Fusion is **not** used for `Q4_K` despite it being the most common format.
-  Measured at 0.67x, because its unpacking is cheap enough that the unfused
-  path's two long vectorized loops beat eight short fused ones. The kernel is
-  kept and tested; only the selection is off
+- Every matvec strategy wins for some weight type and loses for another, so the
+  choice is made per type by measurement. f32 fusion is **not** used for `Q4_K`
+  (0.67x); int8 is **not** used for `Q4_0` (0.67x). Both kernels are kept and
+  tested — only the selection differs
+- The int8 path is the one place the numbers change rather than just the speed.
+  Bounded at half a step per element, verified against the exact path through a
+  whole forward pass, and switchable
 - The first version of the fused kernels was *slower* than the code it
   replaced. `lanes[index & 3]` is correct and unvectorizable; `chunks_exact(4)`
   with a constant lane index computes the same thing and is not

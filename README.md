@@ -28,11 +28,14 @@ It generates text. What works today:
   and literal special-token matching
 - **Inference** — llama-architecture forward pass: RMSNorm, RoPE,
   grouped-query attention with a KV cache, SwiGLU. Threaded matvec
+- **Three matvec strategies** — expand-then-dot, fused dequantize-and-dot, and
+  int8 activations with integer accumulation. Chosen per weight type by
+  measurement; see [Performance](#performance)
 - **Sampling** — greedy, temperature, top-k, top-p, seeded and reproducible
 - **LM Studio** — reads the models you already downloaded
 
-Not yet: SIMD kernels, quantized activations, batched prefill, and
-architectures other than `llama`. See the [roadmap](#roadmap).
+Not yet: explicit SIMD intrinsics, batched prefill, and architectures other
+than `llama`. See the [roadmap](#roadmap).
 
 ## Usage
 
@@ -95,9 +98,14 @@ would need 16 GB of f32.
 
 **Correctness gates speed.** A transposed weight or a wrong RoPE produces
 *fluent garbage*, not a crash. So the f32 reference path came first, and the
-threaded path is required to be **bit-identical** to it rather than merely
-close — a kernel that only approximates the reference can't be diffed against
-it, which is exactly what you need when hunting a numerical bug.
+fused and threaded paths are required to be **bit-identical** to it rather than
+merely close — a kernel that only approximates the reference can't be diffed
+against it, which is exactly what you need when hunting a numerical bug.
+
+The int8 path is the deliberate exception, since quantizing an activation
+cannot be lossless. It gets bounded-error tests instead of equality ones, a
+whole-forward-pass comparison against the exact path, and a switch to turn it
+off.
 
 **Tests compute the answer.** The forward-pass fixtures zero out most of the
 network, leaving a path with a closed-form result: attention with identity
@@ -111,30 +119,39 @@ output looks like English.
 cargo run --release --example bench
 ```
 
-Fused dequantize-and-dot against expand-then-dot, single-threaded, at shapes
-from Llama-3.2-1B and Llama-3.1-8B on a 16-thread x86-64 machine:
+One matvec, single-threaded, at a 2048×2048 shape from Llama-3.2-1B, on a
+16-thread x86-64 machine. Three paths: expand-then-dot (the reference), the
+fused f32 kernel, and the integer kernel against an int8-quantized activation.
 
-| type | 2048×2048 | 4096×4096 | fused? |
-| --- | --- | --- | --- |
-| Q6_K | 2.2x | 2.3x | yes |
-| Q8_0 | 1.6x | 1.5x | yes |
-| Q5_K | 1.2x | 1.1x | yes |
-| Q4_0 | 1.2x | 1.1x | yes |
-| Q4_K | **0.67x** | **0.67x** | no — falls back |
+| type | reference | fused f32 | int8 | chosen | speedup |
+| --- | --- | --- | --- | --- | --- |
+| Q8_0 | 0.99 ms | 0.70 ms | **0.45 ms** | int8 | 2.2x |
+| Q6_K | 3.94 ms | **1.76 ms** | – | fused | 2.2x |
+| Q4_K | 1.29 ms | 2.14 ms | **0.99 ms** | int8 | 1.3x |
+| Q5_K | 1.58 ms | **1.51 ms** | – | fused | 1.05x |
+| Q4_0 | 1.17 ms | **1.09 ms** | 1.62 ms | fused | 1.08x |
 
-Q4_K losing is the interesting result, and it is not a bug. Its unpacking is
-one mask and one shift per byte, which the unfused path spends in two long,
-cleanly vectorized loops. Fusing chops those into eight short runs per
-super-block and the loop overhead exceeds what the saved memory traffic is
-worth. Q6_K wins for exactly the mirror reason. So fusion is enabled per type
-by measurement, not by assumption — see the table on `quant::dot::supports`.
+Every one of those columns has a case where it wins, which is why the choice is
+made per type by measurement rather than by picking one strategy and applying
+it everywhere. Two results are worth spelling out:
 
-The honest absolute number: 1–4 GB/s of weights per core, which puts a 4.5 GB
-8B model somewhere around a few tokens per second on all cores. llama.cpp is
-several times faster than that, and the gap is not mysterious — it quantizes
-*activations* to int8 and does integer dot products, where this still converts
-everything to f32 and multiplies in floating point. That is the next real
-optimization, and it is a bigger one than SIMD intrinsics would be.
+**Q4_K fused is *slower* than not fusing.** Its unpacking is one mask and one
+shift per byte, cheap enough that the unfused path's two long vectorized loops
+beat eight short fused ones per super-block. Q6_K wins for the mirror reason —
+its unpacking is expensive enough that halving memory traffic dominates. Q4_K
+only got faster once the activation went to int8.
+
+**Q4_0 int8 is slower than Q4_0 fused.** Its f32 unpacking is already trivial,
+so paying to quantize the activation buys nothing back.
+
+The integer path is the only approximation in the crate — everything else is
+bit-identical to the reference. Quantizing the activation costs half a step per
+element, bounded and small next to a 4-bit weight's own error, and it is the
+same trade every fast inference engine makes. `State::set_int8(false)` turns it
+off.
+
+Absolute numbers are still modest: 2–9 GB/s of weights per core. llama.cpp
+remains faster, now mostly on hand-written SIMD rather than on algorithm.
 
 ## Roadmap
 
@@ -145,14 +162,12 @@ optimization, and it is a bigger one than SIMD intrinsics would be.
 | 3 | f32 forward pass, KV cache, sampling, `run` | done |
 | 4 | K-quant dequantization, threaded matvec | done |
 | 5 | Fused quantized GEMV, benchmark harness | done |
-| 6 | int8 activations and integer dot products | next |
-| 7 | AVX2 via `std::arch`, batched prefill, more architectures | |
+| 6 | int8 activations and integer dot products | done |
+| 7 | AVX2 via `std::arch`, batched prefill, more architectures | next |
 
-Phase 6 is where the remaining multiple lives. Converting weights to f32 to
-multiply against f32 activations wastes most of the arithmetic width the
-hardware has; quantizing activations to int8 and accumulating in i32 is how
-llama.cpp gets its numbers, and it matters more than hand-written intrinsics
-would.
+With the algorithm-level wins taken, what is left really is instruction-level:
+explicit AVX2 through `std::arch`, and processing more than one token at a
+time during prefill so the weights are read once for many activations.
 
 ## Development
 
@@ -162,7 +177,7 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-70 tests, none of which need a model file — the crate ships a small GGUF
+90 tests, none of which need a model file — the crate ships a small GGUF
 *writer* (`src/synth.rs`) so fixtures are built rather than downloaded.
 
 CI runs the suite on Linux, Windows, and macOS, and fails the build if anyone
