@@ -205,18 +205,23 @@ impl<'a> Weight<'a> {
                 .enumerate()
                 .map(|(index, rows)| {
                     scope.spawn(move || {
-                        // One scratch row per worker. The allocation is dwarfed
-                        // by the dequantize it feeds.
-                        let mut scratch = vec![0.0; self.cols];
+                        // Only the fallback path needs a scratch row, so a
+                        // fused type allocates nothing per worker.
+                        let mut scratch = if quant::dot::supports(self.ty) {
+                            Vec::new()
+                        } else {
+                            vec![0.0; self.cols]
+                        };
                         let first = index * chunk;
                         for (offset, slot) in rows.iter_mut().enumerate() {
-                            let at = (first + offset) * self.row_bytes;
-                            quant::dequantize(
-                                self.ty,
-                                &self.bytes[at..at + self.row_bytes],
-                                &mut scratch,
-                            )?;
-                            *slot = ops::dot(&scratch, x);
+                            let row = self.row_slice(first + offset);
+                            *slot = match quant::dot::fused(self.ty, row, x) {
+                                Some(value) => value,
+                                None => {
+                                    quant::dequantize(self.ty, row, &mut scratch)?;
+                                    ops::dot(&scratch, x)
+                                }
+                            };
                         }
                         Ok(())
                     })
@@ -236,18 +241,42 @@ impl<'a> Weight<'a> {
         Ok(())
     }
 
-    /// `out = self * x`, expanding one row at a time through `scratch`.
+    /// `out = self * x`.
+    ///
+    /// Takes the fused kernel where one exists, otherwise expands each row
+    /// through `scratch` and dots that. The two agree bit for bit.
     pub fn matvec(&self, x: &[f32], out: &mut [f32], scratch: &mut [f32]) -> Result<()> {
         debug_assert_eq!(x.len(), self.cols);
         debug_assert_eq!(out.len(), self.rows);
-        debug_assert_eq!(scratch.len(), self.cols);
 
         for (index, slot) in out.iter_mut().enumerate() {
-            let start = index * self.row_bytes;
-            quant::dequantize(self.ty, &self.bytes[start..start + self.row_bytes], scratch)?;
+            let row = self.row_slice(index);
+            *slot = match quant::dot::fused(self.ty, row, x) {
+                Some(value) => value,
+                None => {
+                    quant::dequantize(self.ty, row, scratch)?;
+                    ops::dot(scratch, x)
+                }
+            };
+        }
+        Ok(())
+    }
+
+    /// The unfused path, always. Kept so the fused kernels have something to be
+    /// diffed against — in tests, and in `examples/bench.rs`.
+    pub fn matvec_reference(&self, x: &[f32], out: &mut [f32], scratch: &mut [f32]) -> Result<()> {
+        debug_assert_eq!(scratch.len(), self.cols);
+        for (index, slot) in out.iter_mut().enumerate() {
+            quant::dequantize(self.ty, self.row_slice(index), scratch)?;
             *slot = ops::dot(scratch, x);
         }
         Ok(())
+    }
+
+    #[inline]
+    fn row_slice(&self, index: usize) -> &'a [u8] {
+        let start = index * self.row_bytes;
+        &self.bytes[start..start + self.row_bytes]
     }
 }
 

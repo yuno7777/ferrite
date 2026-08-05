@@ -22,6 +22,20 @@ fn total(lanes: [f32; 4]) -> f32 {
     lanes[0] + lanes[1] + lanes[2] + lanes[3]
 }
 
+/// Whether a fused kernel exists, so callers can skip allocating the scratch
+/// row they would only need for the fallback.
+pub fn supports(ty: GgmlType) -> bool {
+    matches!(
+        ty,
+        GgmlType::F32
+            | GgmlType::Q8_0
+            | GgmlType::Q4_0
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+    )
+}
+
 /// Dot one weight row, still quantized, against an activation vector.
 ///
 /// `None` for types without a fused kernel; the caller falls back to

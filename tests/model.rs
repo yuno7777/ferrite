@@ -292,6 +292,29 @@ fn threading_does_not_change_the_answer() {
 }
 
 #[test]
+fn the_fused_matvec_agrees_with_the_reference() {
+    // Same guarantee as the threading test, one level down: fusing the
+    // dequantize into the dot must not move a single bit.
+    let path = write("fused", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let x: Vec<f32> = (0..DIM).map(|i| (i as f32 * 0.7).cos()).collect();
+    let weight = &model.layers[0].wo;
+    let mut scratch = vec![0.0; weight.cols];
+    let (mut fused, mut reference) = (vec![0.0; weight.rows], vec![0.0; weight.rows]);
+
+    weight.matvec(&x, &mut fused, &mut scratch).expect("fused");
+    weight
+        .matvec_reference(&x, &mut reference, &mut scratch)
+        .expect("reference");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&fused), bits(&reference));
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn running_past_the_cache_is_an_error_not_a_corruption() {
     let path = write("overflow", &fixture(2, false));
     let gguf = Gguf::open(&path).expect("open");
