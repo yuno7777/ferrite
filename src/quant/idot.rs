@@ -53,6 +53,18 @@ pub fn supports(ty: GgmlType) -> bool {
 /// — `supports` is the policy, this is the capability. Callers that want the
 /// fast path should ask `supports` first.
 pub fn integer(ty: GgmlType, row: &[u8], x: &Quantized) -> Option<f32> {
+    // The vector kernels compute the same integer products in a different
+    // order, which for i32 is the same total exactly. Checked at run time
+    // because AVX2 is not in the x86-64 baseline.
+    #[cfg(target_arch = "x86_64")]
+    if super::avx2::available() {
+        match ty {
+            GgmlType::Q8_0 => return Some(unsafe { super::avx2::q8_0(row, x) }),
+            GgmlType::Q4_K => return Some(unsafe { super::avx2::q4_k(row, x) }),
+            _ => {}
+        }
+    }
+
     Some(match ty {
         GgmlType::Q8_0 => q8_0(row, x),
         GgmlType::Q4_0 => q4_0(row, x),

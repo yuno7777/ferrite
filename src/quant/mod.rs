@@ -13,6 +13,8 @@ use std::io::{Error, ErrorKind, Result};
 use crate::gguf::GgmlType;
 
 pub mod activation;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2;
 pub mod dot;
 pub mod half;
 pub mod idot;
