@@ -28,14 +28,14 @@ It generates text. What works today:
   and literal special-token matching
 - **Inference** — llama-architecture forward pass: RMSNorm, RoPE,
   grouped-query attention with a KV cache, SwiGLU. Threaded matvec
-- **Three matvec strategies** — expand-then-dot, fused dequantize-and-dot, and
-  int8 activations with integer accumulation. Chosen per weight type by
-  measurement; see [Performance](#performance)
+- **Four matvec strategies** — expand-then-dot, fused dequantize-and-dot, int8
+  activations with integer accumulation, and AVX2 integer kernels. Chosen per
+  weight type by measurement; see [Performance](#performance)
 - **Sampling** — greedy, temperature, top-k, top-p, seeded and reproducible
 - **LM Studio** — reads the models you already downloaded
 
-Not yet: explicit SIMD intrinsics, batched prefill, and architectures other
-than `llama`. See the [roadmap](#roadmap).
+Not yet: batched prefill, and architectures other than `llama`. See the
+[roadmap](#roadmap).
 
 ## Usage
 
@@ -119,30 +119,40 @@ output looks like English.
 cargo run --release --example bench
 ```
 
-One matvec, single-threaded, at a 2048×2048 shape from Llama-3.2-1B, on a
-16-thread x86-64 machine. Three paths: expand-then-dot (the reference), the
-fused f32 kernel, and the integer kernel against an int8-quantized activation.
+One matvec, single-threaded, at a 2048×2048 shape from Llama-3.2-1B, on an
+x86-64 machine. Four paths: expand-then-dot (the reference), the fused f32
+kernel, the integer kernel against an int8-quantized activation, and that
+kernel again with AVX2.
 
-| type | reference | fused f32 | int8 | chosen | speedup |
-| --- | --- | --- | --- | --- | --- |
-| Q8_0 | 0.99 ms | 0.70 ms | **0.45 ms** | int8 | 2.2x |
-| Q6_K | 3.94 ms | **1.76 ms** | – | fused | 2.2x |
-| Q4_K | 1.29 ms | 2.14 ms | **0.99 ms** | int8 | 1.3x |
-| Q5_K | 1.58 ms | **1.51 ms** | – | fused | 1.05x |
-| Q4_0 | 1.17 ms | **1.09 ms** | 1.62 ms | fused | 1.08x |
+| type | reference | fused f32 | int8 | + AVX2 | chosen | speedup |
+| --- | --- | --- | --- | --- | --- | --- |
+| Q4_K | 1.40 ms | 1.33 ms | 0.99 ms | **0.36 ms** | int8 | **3.9x** |
+| Q8_0 | 1.23 ms | 0.93 ms | **0.45 ms** | 0.46 ms | int8 | 2.7x |
+| Q6_K | 3.94 ms | **1.76 ms** | – | – | fused | 2.2x |
+| Q5_K | 1.58 ms | **1.51 ms** | – | – | fused | 1.05x |
+| Q4_0 | 1.17 ms | **1.09 ms** | 1.62 ms | – | fused | 1.08x |
 
-Every one of those columns has a case where it wins, which is why the choice is
-made per type by measurement rather than by picking one strategy and applying
-it everywhere. Two results are worth spelling out:
+Every column wins somewhere and loses somewhere, which is why the strategy is
+picked per weight type by measurement rather than by choosing one and applying
+it everywhere. Four results are worth spelling out, because three of them are
+the opposite of what you would guess:
 
-**Q4_K fused is *slower* than not fusing.** Its unpacking is one mask and one
-shift per byte, cheap enough that the unfused path's two long vectorized loops
-beat eight short fused ones per super-block. Q6_K wins for the mirror reason —
-its unpacking is expensive enough that halving memory traffic dominates. Q4_K
-only got faster once the activation went to int8.
+**Q4_K fused f32 is *slower* than not fusing.** Its unpacking is one mask and
+one shift per byte, cheap enough that the unfused path's two long vectorized
+loops beat eight short fused ones per super-block. Q6_K wins for the mirror
+reason — its unpacking is expensive enough that halving memory traffic
+dominates.
 
 **Q4_0 int8 is slower than Q4_0 fused.** Its f32 unpacking is already trivial,
 so paying to quantize the activation buys nothing back.
+
+**AVX2 does nothing for Q8_0.** Its scalar inner loop is a flat
+multiply-accumulate and LLVM had already vectorized it. Hand-written intrinsics
+pay where autovectorization has failed, and nowhere else.
+
+**Q4_K needed all three.** It is the format most models ship as, and it was the
+one type the f32 work could not improve at all. Quantizing the activation got
+it to 1.3x; AVX2 on top got it to 3.9x.
 
 The integer path is the only approximation in the crate — everything else is
 bit-identical to the reference. Quantizing the activation costs half a step per
@@ -150,8 +160,8 @@ element, bounded and small next to a 4-bit weight's own error, and it is the
 same trade every fast inference engine makes. `State::set_int8(false)` turns it
 off.
 
-Absolute numbers are still modest: 2–9 GB/s of weights per core. llama.cpp
-remains faster, now mostly on hand-written SIMD rather than on algorithm.
+Effective bandwidth is now 5–9 GB/s of weights per core on the selected paths,
+single-threaded, before the matvec is split across cores at all.
 
 ## Roadmap
 
@@ -163,11 +173,13 @@ remains faster, now mostly on hand-written SIMD rather than on algorithm.
 | 4 | K-quant dequantization, threaded matvec | done |
 | 5 | Fused quantized GEMV, benchmark harness | done |
 | 6 | int8 activations and integer dot products | done |
-| 7 | AVX2 via `std::arch`, batched prefill, more architectures | next |
+| 7 | AVX2 integer kernels via `std::arch` | done |
+| 8 | Batched prefill, more architectures | next |
 
-With the algorithm-level wins taken, what is left really is instruction-level:
-explicit AVX2 through `std::arch`, and processing more than one token at a
-time during prefill so the weights are read once for many activations.
+Next is batched prefill: during prompt processing the same weight row is dotted
+against every token's activation, so reading it once for many tokens turns a
+memory-bound GEMV into a compute-bound GEMM. That is a bigger win for long
+prompts than anything left in the single-token path.
 
 ## Development
 
@@ -177,7 +189,7 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-90 tests, none of which need a model file — the crate ships a small GGUF
+93 tests, none of which need a model file — the crate ships a small GGUF
 *writer* (`src/synth.rs`) so fixtures are built rather than downloaded.
 
 CI runs the suite on Linux, Windows, and macOS, and fails the build if anyone

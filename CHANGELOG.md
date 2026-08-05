@@ -7,6 +7,11 @@ everything below is unreleased.
 
 ### Added
 
+- **AVX2 kernels for the integer dots**, behind a cfg gate and a cached runtime
+  check. `Q4_K` drops from 0.99 ms to 0.36 ms — 3.9x against the plain
+  reference. Only the integer paths are vectorized, because i32 addition is
+  associative so a regrouped vector sum is *identical* to the scalar one, and
+  the tests assert exactly that
 - **int8 activations and integer dot products.** The activation is quantized
   once per matvec and every row dots against it in i32. Selected for `Q8_0`
   (2.2x over the reference) and `Q4_K` (1.3x) — the latter being the first path
@@ -43,6 +48,10 @@ everything below is unreleased.
   choice is made per type by measurement. f32 fusion is **not** used for `Q4_K`
   (0.67x); int8 is **not** used for `Q4_0` (0.67x). Both kernels are kept and
   tested — only the selection differs
+- AVX2 changed `Q8_0` by nothing at all: LLVM had already vectorized its flat
+  inner loop. Intrinsics paid 2.7x on `Q4_K`, whose nibble masking
+  autovectorization handles badly. They pay where the compiler has already
+  failed, and nowhere else
 - The int8 path is the one place the numbers change rather than just the speed.
   Bounded at half a step per element, verified against the exact path through a
   whole forward pass, and switchable
