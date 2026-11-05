@@ -11,6 +11,17 @@ use std::path::Path;
 #[cfg(not(any(windows, unix)))]
 compile_error!("ferrite needs mmap: supported on windows and unix only");
 
+/// Read-only memory mapped file.
+///
+/// # Safety and Invariants
+/// The mapping is created with read-only permissions (`PROT_READ` on Unix / `PAGE_READONLY` on Windows)
+/// and private copy-on-write backing (`MAP_PRIVATE` on Unix / `FILE_MAP_READ` on Windows).
+/// The mapped memory slice remains valid for `len` bytes for the entire lifetime of `Mmap`.
+///
+/// Concurrent truncation: Accessing mapped pages beyond the end of the file if an external
+/// process truncates the underlying file will raise a hardware fault (`SIGBUS` on Unix,
+/// `STATUS_IN_PAGE_ERROR` on Windows).
+#[derive(Debug)]
 pub struct Mmap {
     ptr: *const u8,
     len: usize,
@@ -170,5 +181,46 @@ impl Drop for Mmap {
         unsafe {
             sys::munmap(self.ptr as *mut core::ffi::c_void, self.len);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn maps_file_contents_and_len() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ferrite_test_mmap.bin");
+        let content = b"hello ferrite mmap test payload 1234567890";
+        let mut file = File::create(&path).expect("create");
+        file.write_all(content).expect("write");
+        drop(file);
+
+        let mmap = Mmap::open(&path).expect("open mmap");
+        assert_eq!(mmap.len(), content.len());
+        assert!(!mmap.is_empty());
+        assert_eq!(mmap.as_slice(), content);
+        drop(mmap);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rejects_empty_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ferrite_test_mmap_empty.bin");
+        File::create(&path).expect("create empty");
+        let err = Mmap::open(&path).expect_err("empty must fail");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("empty"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn fails_on_nonexistent_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ferrite_nonexistent_file_xyz_1234.bin");
+        assert!(Mmap::open(&path).is_err());
     }
 }

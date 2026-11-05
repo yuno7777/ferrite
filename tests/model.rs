@@ -319,6 +319,39 @@ fn the_fused_matvec_agrees_with_the_reference() {
     fs::remove_file(path).ok();
 }
 
+#[test]
+fn the_batched_matmul_agrees_with_the_matvec() {
+    let path = write("batched_matmul", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let batch = 3;
+    let weight = &model.layers[0].wo;
+    let mut x_batch = Vec::new();
+    for b in 0..batch {
+        for i in 0..weight.cols {
+            x_batch.push(((b * 10 + i) as f32 * 0.7).cos());
+        }
+    }
+
+    let mut scratch = vec![0.0; weight.cols];
+    let mut out_matmul = vec![0.0; batch * weight.rows];
+    weight
+        .matmul(&x_batch, &mut out_matmul, batch, &mut scratch)
+        .expect("matmul");
+
+    let mut out_sequential = vec![0.0; batch * weight.rows];
+    for b in 0..batch {
+        let x_tok = &x_batch[b * weight.cols..(b + 1) * weight.cols];
+        let out_tok = &mut out_sequential[b * weight.rows..(b + 1) * weight.rows];
+        weight.matvec(x_tok, out_tok, &mut scratch).expect("matvec");
+    }
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&out_matmul), bits(&out_sequential));
+    fs::remove_file(path).ok();
+}
+
 /// A model whose matmuls are `Q8_0`, so the integer kernels are actually
 /// reached. Dimensions are multiples of 32 because that is the block size.
 fn quantized_fixture() -> Builder {
@@ -472,6 +505,210 @@ fn running_past_the_cache_is_an_error_not_a_corruption() {
     assert!(model.forward(&mut state, 0, 1).is_ok());
     let err = model.forward(&mut state, 0, 2).expect_err("must refuse");
     assert!(err.to_string().contains("past the 2 token cache"), "{err}");
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn batched_prefill_matches_sequential_forward() {
+    let path = write("prefill_test", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = [1u32, 2, 3];
+
+    // 1. Sequential single-token forward:
+    let mut state_seq = State::new(&model.config);
+    for (pos, &token) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, token, pos).expect("forward");
+    }
+
+    // 2. Batched prefill in one pass:
+    let mut state_batch = State::new(&model.config);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_batch.logits),
+        bits(&state_seq.logits),
+        "prefill final logits must be bit-identical to sequential forward"
+    );
+
+    // KV caches must match across the prompt tokens:
+    let kv_len = model.config.layers * prompt.len() * model.config.kv_dim();
+    assert_eq!(
+        bits(&state_batch.key_cache()[..kv_len]),
+        bits(&state_seq.key_cache()[..kv_len]),
+        "key cache must be bit-identical"
+    );
+    assert_eq!(
+        bits(&state_batch.value_cache()[..kv_len]),
+        bits(&state_seq.value_cache()[..kv_len]),
+        "value cache must be bit-identical"
+    );
+
+    // Subsequent single-token decoding from prefilled state must match exactly:
+    model
+        .forward(&mut state_seq, 0, 3)
+        .expect("forward seq next");
+    model
+        .forward(&mut state_batch, 0, 3)
+        .expect("forward batch next");
+    assert_eq!(
+        bits(&state_batch.logits),
+        bits(&state_seq.logits),
+        "post-prefill decode step must be bit-identical"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+fn qwen2_fixture() -> Builder {
+    let kv_heads = 2;
+    let kv_dim = kv_heads * (DIM / 2);
+
+    Builder::new()
+        .meta("general.architecture", Value::String("qwen2".into()))
+        .meta("qwen2.block_count", Value::U32(1))
+        .meta("qwen2.embedding_length", Value::U32(DIM as u32))
+        .meta("qwen2.feed_forward_length", Value::U32(FFN as u32))
+        .meta("qwen2.attention.head_count", Value::U32(2))
+        .meta("qwen2.attention.head_count_kv", Value::U32(kv_heads as u32))
+        .meta("qwen2.context_length", Value::U32(16))
+        .meta("qwen2.attention.layer_norm_rms_epsilon", Value::F32(EPS))
+        .meta("qwen2.rope.freq_base", Value::F32(1_000_000.0))
+        .meta("tokenizer.ggml.model", Value::String("qwen2".into()))
+        .meta(
+            "tokenizer.ggml.tokens",
+            Value::Array((0..VOCAB).map(|i| Value::String(format!("t{i}"))).collect()),
+        )
+        .meta(
+            "tokenizer.ggml.merges",
+            Value::Array(vec![Value::String("t 0".into())]),
+        )
+        .tensor(
+            "token_embd.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&embeddings()),
+        )
+        .tensor(
+            "blk.0.attn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_q.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_q.bias",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.5; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_k.weight",
+            &[DIM as u64, kv_dim as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_k.bias",
+            &[kv_dim as u64],
+            GgmlType::F32,
+            bytes(&vec![0.25; kv_dim]),
+        )
+        .tensor(
+            "blk.0.attn_v.weight",
+            &[DIM as u64, kv_dim as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_v.bias",
+            &[kv_dim as u64],
+            GgmlType::F32,
+            bytes(&vec![0.1; kv_dim]),
+        )
+        .tensor(
+            "blk.0.attn_output.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.ffn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.ffn_gate.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.0; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_up.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.0; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_down.weight",
+            &[FFN as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.0; FFN * DIM]),
+        )
+        .tensor(
+            "output_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "output.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+}
+
+#[test]
+fn qwen2_runs_with_attention_biases_and_prefill() {
+    let path = write("qwen2_test", &qwen2_fixture());
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    assert_eq!(model.config.arch, "qwen2");
+    assert_eq!(model.config.rope_base, 1_000_000.0);
+    assert!(model.layers[0].bq.is_some());
+    assert!(model.layers[0].bk.is_some());
+    assert!(model.layers[0].bv.is_some());
+
+    let prompt = [0u32, 1, 2];
+
+    // 1. Sequential forward
+    let mut state_seq = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+    assert!(state_seq.logits.iter().all(|v| v.is_finite()));
+
+    // 2. Batched prefill
+    let mut state_batch = State::new(&model.config);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&state_batch.logits), bits(&state_seq.logits));
 
     fs::remove_file(path).ok();
 }

@@ -13,7 +13,7 @@ fn bad(msg: impl Into<String>) -> Error {
 /// Architectures whose tensor names and layer shape this implements. Others
 /// are rejected by name rather than half-loaded — a model that runs with the
 /// wrong layer structure produces fluent nonsense, not an error.
-const SUPPORTED: [&str; 1] = ["llama"];
+const SUPPORTED: [&str; 2] = ["llama", "qwen2"];
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -93,7 +93,7 @@ impl Config {
             .ok_or_else(|| bad("cannot determine vocabulary size"))?;
 
         Ok(Self {
-            arch,
+            arch: arch.clone(),
             layers,
             embedding,
             heads,
@@ -108,7 +108,13 @@ impl Config {
             eps: model
                 .arch_f32("attention.layer_norm_rms_epsilon")
                 .unwrap_or(1e-5),
-            rope_base: model.arch_f32("rope.freq_base").unwrap_or(10000.0),
+            rope_base: model.arch_f32("rope.freq_base").unwrap_or_else(|| {
+                if arch == "qwen2" {
+                    1_000_000.0
+                } else {
+                    10000.0
+                }
+            }),
         })
     }
 
@@ -307,6 +313,7 @@ impl<'a> Weight<'a> {
     pub fn matvec(&self, x: &[f32], out: &mut [f32], scratch: &mut [f32]) -> Result<()> {
         debug_assert_eq!(x.len(), self.cols);
         debug_assert_eq!(out.len(), self.rows);
+        let scratch = &mut scratch[..self.cols];
 
         for (index, slot) in out.iter_mut().enumerate() {
             let row = self.row_slice(index);
@@ -317,6 +324,49 @@ impl<'a> Weight<'a> {
                     ops::dot(scratch, x)
                 }
             };
+        }
+        Ok(())
+    }
+
+    /// `out = self * x` across `batch` tokens simultaneously.
+    ///
+    /// `x` has shape `[batch, cols]`.
+    /// `out` has shape `[batch, rows]`.
+    /// `scratch` has length at least `cols`.
+    ///
+    /// Evaluates all `batch` tokens against each weight row while the row
+    /// is hot in cache, amortizing weight decompression across the batch.
+    pub fn matmul(
+        &self,
+        x: &[f32],
+        out: &mut [f32],
+        batch: usize,
+        scratch: &mut [f32],
+    ) -> Result<()> {
+        if batch == 0 {
+            return Ok(());
+        }
+        debug_assert_eq!(x.len(), batch * self.cols);
+        debug_assert_eq!(out.len(), batch * self.rows);
+        let scratch = &mut scratch[..self.cols];
+
+        let has_fused = quant::dot::supports(self.ty);
+
+        for (r, row_idx) in (0..self.rows).enumerate() {
+            let row = self.row_slice(row_idx);
+            if has_fused {
+                for b in 0..batch {
+                    let x_tok = &x[b * self.cols..(b + 1) * self.cols];
+                    out[b * self.rows + r] = quant::dot::fused(self.ty, row, x_tok).unwrap();
+                }
+            } else {
+                // Dequantize row ONCE for all batch tokens!
+                quant::dequantize(self.ty, row, scratch)?;
+                for b in 0..batch {
+                    let x_tok = &x[b * self.cols..(b + 1) * self.cols];
+                    out[b * self.rows + r] = ops::dot(scratch, x_tok);
+                }
+            }
         }
         Ok(())
     }
@@ -357,8 +407,11 @@ impl<'a> Weight<'a> {
 pub struct Layer<'a> {
     pub attn_norm: Vec<f32>,
     pub wq: Weight<'a>,
+    pub bq: Option<Vec<f32>>,
     pub wk: Weight<'a>,
+    pub bk: Option<Vec<f32>>,
     pub wv: Weight<'a>,
+    pub bv: Option<Vec<f32>>,
     pub wo: Weight<'a>,
     pub ffn_norm: Vec<f32>,
     pub gate: Weight<'a>,
@@ -383,6 +436,13 @@ fn load_vector(model: &Gguf, name: &str) -> Result<Vec<f32>> {
     quant::dequantize_to_vec(info.ty, model.tensor_bytes(info)?, info.elements() as usize)
 }
 
+fn load_vector_optional(model: &Gguf, name: &str) -> Result<Option<Vec<f32>>> {
+    let Some(info) = model.tensor(name) else {
+        return Ok(None);
+    };
+    quant::dequantize_to_vec(info.ty, model.tensor_bytes(info)?, info.elements() as usize).map(Some)
+}
+
 impl<'a> Model<'a> {
     pub fn load(gguf: &'a Gguf) -> Result<Self> {
         let config = Config::from_gguf(gguf)?;
@@ -393,8 +453,11 @@ impl<'a> Model<'a> {
             layers.push(Layer {
                 attn_norm: load_vector(gguf, &format!("blk.{index}.attn_norm.weight"))?,
                 wq: Weight::bind(gguf, &format!("blk.{index}.attn_q.weight"))?,
+                bq: load_vector_optional(gguf, &format!("blk.{index}.attn_q.bias"))?,
                 wk: Weight::bind(gguf, &format!("blk.{index}.attn_k.weight"))?,
+                bk: load_vector_optional(gguf, &format!("blk.{index}.attn_k.bias"))?,
                 wv: Weight::bind(gguf, &format!("blk.{index}.attn_v.weight"))?,
+                bv: load_vector_optional(gguf, &format!("blk.{index}.attn_v.bias"))?,
                 wo: Weight::bind(gguf, &format!("blk.{index}.attn_output.weight"))?,
                 ffn_norm: load_vector(gguf, &format!("blk.{index}.ffn_norm.weight"))?,
                 gate: Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))?,
@@ -458,8 +521,23 @@ impl<'a> Model<'a> {
         for (index, layer) in self.layers.iter().enumerate() {
             ops::rms_norm(x, &layer.attn_norm, c.eps, xb);
             layer.wq.matvec_threaded(xb, q, *threads, workspace)?;
+            if let Some(bq) = &layer.bq {
+                for (slot, b) in q.iter_mut().zip(bq) {
+                    *slot += b;
+                }
+            }
             layer.wk.matvec_threaded(xb, k, *threads, workspace)?;
+            if let Some(bk) = &layer.bk {
+                for (slot, b) in k.iter_mut().zip(bk) {
+                    *slot += b;
+                }
+            }
             layer.wv.matvec_threaded(xb, v, *threads, workspace)?;
+            if let Some(bv) = &layer.bv {
+                for (slot, b) in v.iter_mut().zip(bv) {
+                    *slot += b;
+                }
+            }
 
             // Position is baked into the query and key, never into the value.
             for head in 0..c.heads {
@@ -524,6 +602,195 @@ impl<'a> Model<'a> {
         ops::rms_norm(x, &self.output_norm, c.eps, xb);
         self.output
             .matvec_threaded(xb, logits, *threads, workspace)?;
+        Ok(())
+    }
+
+    /// Process a batch of prompt tokens in one pass.
+    ///
+    /// Evaluates each layer across the batch tokens simultaneously to turn
+    /// memory-bound weight reads into compute-bound matrix operations.
+    ///
+    /// Populates key/value caches for `start_pos..start_pos + tokens.len()`,
+    /// leaving `state.logits` holding the logits for the final token.
+    pub fn prefill(&self, state: &mut State, tokens: &[u32], start_pos: usize) -> Result<()> {
+        let n = tokens.len();
+        if n == 0 {
+            return Ok(());
+        }
+        if n == 1 {
+            return self.forward(state, tokens[0], start_pos);
+        }
+
+        let c = &self.config;
+        let end_pos = start_pos
+            .checked_add(n)
+            .ok_or_else(|| bad("prefill range overflows"))?;
+        if end_pos > state.context {
+            return Err(bad(format!(
+                "prefill end position {end_pos} exceeds {} token cache",
+                state.context
+            )));
+        }
+
+        let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
+
+        // Batch activation buffers:
+        let mut x_batch = vec![0.0f32; n * c.embedding];
+        for (b, &tok) in tokens.iter().enumerate() {
+            let row = &mut x_batch[b * c.embedding..(b + 1) * c.embedding];
+            self.token_embd.row(tok as usize, row)?;
+        }
+
+        let mut xb_batch = vec![0.0f32; n * c.embedding];
+        let mut xb2_batch = vec![0.0f32; n * c.embedding];
+        let mut q_batch = vec![0.0f32; n * c.heads * head_dim];
+        let mut k_batch = vec![0.0f32; n * kv_dim];
+        let mut v_batch = vec![0.0f32; n * kv_dim];
+        let mut hb_batch = vec![0.0f32; n * c.ffn];
+        let mut hb2_batch = vec![0.0f32; n * c.ffn];
+
+        let State {
+            att,
+            logits,
+            workspace,
+            key_cache,
+            value_cache,
+            context,
+            ..
+        } = state;
+
+        for (index, layer) in self.layers.iter().enumerate() {
+            for b in 0..n {
+                let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                ops::rms_norm(x_tok, &layer.attn_norm, c.eps, xb_tok);
+            }
+
+            layer
+                .wq
+                .matmul(&xb_batch, &mut q_batch, n, &mut workspace.scratch)?;
+            if let Some(bq) = &layer.bq {
+                for b in 0..n {
+                    let q_tok =
+                        &mut q_batch[b * (c.heads * head_dim)..(b + 1) * (c.heads * head_dim)];
+                    for (slot, val) in q_tok.iter_mut().zip(bq) {
+                        *slot += val;
+                    }
+                }
+            }
+            layer
+                .wk
+                .matmul(&xb_batch, &mut k_batch, n, &mut workspace.scratch)?;
+            if let Some(bk) = &layer.bk {
+                for b in 0..n {
+                    let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
+                    for (slot, val) in k_tok.iter_mut().zip(bk) {
+                        *slot += val;
+                    }
+                }
+            }
+            layer
+                .wv
+                .matmul(&xb_batch, &mut v_batch, n, &mut workspace.scratch)?;
+            if let Some(bv) = &layer.bv {
+                for b in 0..n {
+                    let v_tok = &mut v_batch[b * kv_dim..(b + 1) * kv_dim];
+                    for (slot, val) in v_tok.iter_mut().zip(bv) {
+                        *slot += val;
+                    }
+                }
+            }
+
+            for b in 0..n {
+                let pos = start_pos + b;
+                let q_tok = &mut q_batch[b * (c.heads * head_dim)..(b + 1) * (c.heads * head_dim)];
+                let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
+                let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
+
+                for head in 0..c.heads {
+                    ops::rope(
+                        &mut q_tok[head * head_dim..(head + 1) * head_dim],
+                        pos,
+                        c.rope_base,
+                    );
+                }
+                for head in 0..c.kv_heads {
+                    ops::rope(
+                        &mut k_tok[head * head_dim..(head + 1) * head_dim],
+                        pos,
+                        c.rope_base,
+                    );
+                }
+
+                let slot = (index * *context + pos) * kv_dim;
+                key_cache[slot..slot + kv_dim].copy_from_slice(k_tok);
+                value_cache[slot..slot + kv_dim].copy_from_slice(v_tok);
+            }
+
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            for b in 0..n {
+                let pos = start_pos + b;
+                let q_tok = &q_batch[b * (c.heads * head_dim)..(b + 1) * (c.heads * head_dim)];
+                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+
+                for head in 0..c.heads {
+                    let kv_head = head / group;
+                    let query = &q_tok[head * head_dim..(head + 1) * head_dim];
+
+                    for (past, score) in att[..=pos].iter_mut().enumerate() {
+                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
+                        *score = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
+                    }
+                    ops::softmax(&mut att[..=pos]);
+
+                    let out = &mut xb_tok[head * head_dim..(head + 1) * head_dim];
+                    out.fill(0.0);
+                    for (past, weight) in att[..=pos].iter().enumerate() {
+                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
+                        for (slot, value) in out.iter_mut().zip(&value_cache[at..at + head_dim]) {
+                            *slot += weight * value;
+                        }
+                    }
+                }
+            }
+
+            layer
+                .wo
+                .matmul(&xb_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+            for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                *slot += delta;
+            }
+
+            for b in 0..n {
+                let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                ops::rms_norm(x_tok, &layer.ffn_norm, c.eps, xb_tok);
+            }
+
+            layer
+                .gate
+                .matmul(&xb_batch, &mut hb_batch, n, &mut workspace.scratch)?;
+            layer
+                .up
+                .matmul(&xb_batch, &mut hb2_batch, n, &mut workspace.scratch)?;
+            for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
+                *gate = ops::silu(*gate) * up;
+            }
+
+            layer
+                .down
+                .matmul(&hb_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+            for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                *slot += delta;
+            }
+        }
+
+        let last_b = n - 1;
+        let last_x = &x_batch[last_b * c.embedding..(last_b + 1) * c.embedding];
+        let last_xb = &mut xb_batch[..c.embedding];
+        ops::rms_norm(last_x, &self.output_norm, c.eps, last_xb);
+        self.output
+            .matvec(last_xb, logits, &mut workspace.scratch)?;
         Ok(())
     }
 }
@@ -604,5 +871,13 @@ impl State {
     /// Bytes held by the KV cache, which dominates everything else here.
     pub fn cache_bytes(&self) -> usize {
         (self.key_cache.len() + self.value_cache.len()) * std::mem::size_of::<f32>()
+    }
+
+    pub fn key_cache(&self) -> &[f32] {
+        &self.key_cache
+    }
+
+    pub fn value_cache(&self) -> &[f32] {
+        &self.value_cache
     }
 }

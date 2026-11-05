@@ -305,9 +305,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     stdout.flush().ok();
 
     let prefill_start = Instant::now();
-    for (position, token) in prompt_tokens.iter().enumerate() {
-        model.forward(&mut state, *token, position)?;
-    }
+    model.prefill(&mut state, &prompt_tokens, 0)?;
     let prefill = prefill_start.elapsed();
 
     // A multi-byte character can straddle two tokens, so bytes accumulate

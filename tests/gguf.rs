@@ -99,6 +99,16 @@ fn round_trips_metadata_and_tensors() {
 }
 
 #[test]
+fn tensor_bytes_rejects_forged_out_of_bounds_info() {
+    let path = write("forged_tensor", &fixture().build());
+    let model = Gguf::open(&path).expect("open");
+    let mut tensor = model.tensor("token_embd.weight").unwrap().clone();
+    tensor.offset = u64::MAX;
+    assert!(model.tensor_bytes(&tensor).is_err());
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn rejects_bad_magic() {
     let mut bytes = fixture().build();
     bytes[0..4].copy_from_slice(b"XXXX");
@@ -152,5 +162,50 @@ fn rejects_absurd_metadata_count() {
     // an implausible length or a plain end-of-file. Either is a clean error
     // rather than an allocation the size of the count.
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rejects_nested_metadata_array_type() {
+    let bytes = Builder::new()
+        .meta(
+            "invalid.array",
+            Value::Array(vec![Value::Array(vec![Value::U8(1)])]),
+        )
+        .build();
+    let path = write("nested_array", &bytes);
+    let err = Gguf::open(&path).expect_err("nested arrays must be rejected");
+    assert!(err.to_string().contains("array element type 9"), "{err}");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rejects_absurd_tensor_count() {
+    let mut bytes = fixture().build();
+    bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+    let path = write("absurd_tensor_count", &bytes);
+    let err = Gguf::open(&path).expect_err("must reject absurd tensor count");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn rejects_zero_dimension_tensor() {
+    let mut custom = Vec::new();
+    custom.extend_from_slice(b"GGUF");
+    custom.extend_from_slice(&3u32.to_le_bytes()); // version
+    custom.extend_from_slice(&1u64.to_le_bytes()); // 1 tensor
+    custom.extend_from_slice(&0u64.to_le_bytes()); // 0 metadata
+                                                   // Tensor info:
+    let name = "bad_tensor";
+    custom.extend_from_slice(&(name.len() as u64).to_le_bytes());
+    custom.extend_from_slice(name.as_bytes());
+    custom.extend_from_slice(&1u32.to_le_bytes()); // n_dims = 1
+    custom.extend_from_slice(&0u64.to_le_bytes()); // dim = 0!
+    custom.extend_from_slice(&0u32.to_le_bytes()); // F32
+    custom.extend_from_slice(&0u64.to_le_bytes()); // offset = 0
+    let path = write("zero_dim", &custom);
+    let err = Gguf::open(&path).expect_err("must reject zero dimension");
+    assert!(err.to_string().contains("zero dimension"), "{err}");
     fs::remove_file(path).ok();
 }

@@ -290,10 +290,20 @@ impl<'a> Cursor<'a> {
     read_prim!(f32_, f32);
     read_prim!(f64_, f64);
 
+    fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+
     fn string(&mut self) -> Result<String> {
         let n = self.u64_()?;
         if n > MAX_STRING {
             return Err(bad(format!("implausible string length {n}")));
+        }
+        if n > self.remaining() as u64 {
+            return Err(bad(format!(
+                "string length {n} exceeds remaining buffer ({})",
+                self.remaining()
+            )));
         }
         let bytes = self.take(n as usize)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| bad("metadata string is not utf-8"))
@@ -315,7 +325,27 @@ impl<'a> Cursor<'a> {
                     return Err(bad("nested arrays are not valid GGUF"));
                 }
                 let inner = self.u32_()?;
+                if inner > 12 || inner == 9 {
+                    return Err(bad(format!("invalid GGUF array element type {inner}")));
+                }
                 let count = self.u64_()?;
+                let min_elem_size = match inner {
+                    0 | 1 | 7 => 1u64, // U8, I8, Bool
+                    2 | 3 => 2,        // U16, I16
+                    4..=6 => 4,        // U32, I32, F32
+                    8 => 8,            // String (8-byte length prefix)
+                    10..=12 => 8,      // U64, I64, F64
+                    _ => 1,
+                };
+                let min_bytes = count
+                    .checked_mul(min_elem_size)
+                    .ok_or_else(|| bad(format!("array element count {count} overflows")))?;
+                if min_bytes > self.remaining() as u64 {
+                    return Err(bad(format!(
+                        "array element count {count} exceeds remaining buffer ({})",
+                        self.remaining()
+                    )));
+                }
                 // Deliberately no `with_capacity`: `count` is attacker-controlled
                 // and `take` is what bounds each element.
                 let mut items = Vec::new();
@@ -401,6 +431,25 @@ impl Gguf {
         let tensor_count = cur.u64_()?;
         let meta_count = cur.u64_()?;
 
+        // Minimum wire size:
+        // - Each metadata entry: key len (8) + type (4) + value (min 1) = 13 bytes
+        // - Each tensor info: name len (8) + n_dims (4) + dims (min 8) + type (4) + offset (8) = 32 bytes
+        let min_meta_bytes = meta_count
+            .checked_mul(13)
+            .ok_or_else(|| bad("metadata count overflows"))?;
+        let min_tensor_bytes = tensor_count
+            .checked_mul(32)
+            .ok_or_else(|| bad("tensor count overflows"))?;
+        let min_header_bytes = min_meta_bytes
+            .checked_add(min_tensor_bytes)
+            .ok_or_else(|| bad("header count overflows"))?;
+        if min_header_bytes > cur.remaining() as u64 {
+            return Err(bad(format!(
+                "file too small for declared {meta_count} metadata and {tensor_count} tensor entries (needs at least {min_header_bytes} bytes, have {})",
+                cur.remaining()
+            )));
+        }
+
         let mut meta = BTreeMap::new();
         for _ in 0..meta_count {
             let key = cur.string()?;
@@ -430,6 +479,9 @@ impl Gguf {
             let mut dims = Vec::with_capacity(n_dims);
             for _ in 0..n_dims {
                 dims.push(cur.u64_()?);
+            }
+            if dims.contains(&0) {
+                return Err(bad(format!("tensor {name} has zero dimension")));
             }
             let ty = GgmlType::from_id(cur.u32_()?);
             let offset = cur.u64_()?;
@@ -548,8 +600,16 @@ impl Gguf {
                 t.ty.name()
             ))
         })?;
-        let start = (self.data_offset + t.offset) as usize;
-        let end = start + len as usize;
+        let start = self
+            .data_offset
+            .checked_add(t.offset)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| bad(format!("tensor {} offset overflows", t.name)))?;
+        let len = usize::try_from(len)
+            .map_err(|_| bad(format!("tensor {} length exceeds address space", t.name)))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| bad(format!("tensor {} extent overflows", t.name)))?;
         self.map
             .as_slice()
             .get(start..end)

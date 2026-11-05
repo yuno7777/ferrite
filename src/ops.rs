@@ -54,6 +54,32 @@ pub fn matvec(matrix: &[f32], x: &[f32], out: &mut [f32]) {
     }
 }
 
+/// Batched matrix-vector multiplication: `out[b, r] = dot(matrix row r, x[b])`.
+///
+/// `matrix`: row-major with shape `[rows, cols]`.
+/// `x`: row-major batch with shape `[batch, cols]`.
+/// `out`: row-major batch with shape `[batch, rows]`.
+///
+/// Reuses each weight row across all `batch` tokens to transform memory-bound
+/// GEMV into compute-bound GEMM during prompt prefill.
+pub fn matmul(matrix: &[f32], x: &[f32], out: &mut [f32], batch: usize) {
+    if batch == 0 {
+        return;
+    }
+    let cols = x.len() / batch;
+    let rows = out.len() / batch;
+    debug_assert_eq!(matrix.len(), rows * cols);
+    debug_assert_eq!(x.len(), batch * cols);
+    debug_assert_eq!(out.len(), batch * rows);
+
+    for (r, row) in matrix.chunks_exact(cols).enumerate() {
+        for b in 0..batch {
+            let x_tok = &x[b * cols..(b + 1) * cols];
+            out[b * rows + r] = dot(row, x_tok);
+        }
+    }
+}
+
 /// Plain dot product, accumulated in four lanes.
 ///
 /// The lanes exist so the compiler can vectorize: a single accumulator forces a
@@ -171,6 +197,24 @@ mod tests {
         let mut out = [0.0; 3];
         matvec(&matrix, &[1.0, 10.0], &mut out);
         assert_eq!(out, [21.0, 43.0, -10.0]);
+    }
+
+    #[test]
+    fn matmul_matches_batched_matvec() {
+        // 3 rows, 2 cols matrix
+        let matrix = [1.0, 2.0, 3.0, 4.0, 0.0, -1.0];
+        // 2 tokens: [1.0, 10.0] and [-2.0, 5.0]
+        let x_batch = [1.0, 10.0, -2.0, 5.0];
+        let mut out = [0.0; 6];
+        matmul(&matrix, &x_batch, &mut out, 2);
+
+        let mut expected0 = [0.0; 3];
+        let mut expected1 = [0.0; 3];
+        matvec(&matrix, &[1.0, 10.0], &mut expected0);
+        matvec(&matrix, &[-2.0, 5.0], &mut expected1);
+
+        assert_eq!(&out[0..3], &expected0);
+        assert_eq!(&out[3..6], &expected1);
     }
 
     #[test]
