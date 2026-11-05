@@ -936,6 +936,260 @@ impl<'a> Model<'a> {
         }
         Ok(())
     }
+
+    /// Process a batch of prompt/speculative tokens in one pass and emit the logits
+    /// for *every* token in the batch into `all_logits` (sized `n * c.vocab`).
+    ///
+    /// Leaves `state.logits` with the final token's logits.
+    pub fn prefill_all_logits(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        start_pos: usize,
+        all_logits: &mut [f32],
+    ) -> Result<()> {
+        let n = tokens.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let c = &self.config;
+        if all_logits.len() != n * c.vocab {
+            return Err(bad(format!(
+                "all_logits length {} does not match batch {} * vocab {}",
+                all_logits.len(),
+                n,
+                c.vocab
+            )));
+        }
+
+        if n == 1 {
+            self.forward(state, tokens[0], start_pos)?;
+            all_logits.copy_from_slice(&state.logits);
+            return Ok(());
+        }
+
+        let end_pos = start_pos
+            .checked_add(n)
+            .ok_or_else(|| bad("prefill range overflows"))?;
+        if end_pos > state.context {
+            return Err(bad(format!(
+                "prefill end position {end_pos} exceeds {} token cache",
+                state.context
+            )));
+        }
+
+        let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
+        let att_dim = c.heads * head_dim;
+
+        // Batch activation buffers:
+        let mut x_batch = vec![0.0f32; n * c.embedding];
+        for (b, &tok) in tokens.iter().enumerate() {
+            let row = &mut x_batch[b * c.embedding..(b + 1) * c.embedding];
+            self.token_embd.row(tok as usize, row)?;
+        }
+        if let Some(scale) = c.embedding_scale {
+            for v in x_batch.iter_mut() {
+                *v *= scale;
+            }
+        }
+
+        let mut xb_batch = vec![0.0f32; n * c.embedding];
+        let mut xb2_batch = vec![0.0f32; n * c.embedding];
+        let mut att_batch = vec![0.0f32; n * att_dim];
+        let mut q_batch = vec![0.0f32; n * att_dim];
+        let mut k_batch = vec![0.0f32; n * kv_dim];
+        let mut v_batch = vec![0.0f32; n * kv_dim];
+        let mut hb_batch = vec![0.0f32; n * c.ffn];
+        let mut hb2_batch = vec![0.0f32; n * c.ffn];
+
+        let State {
+            att,
+            logits,
+            workspace,
+            key_cache,
+            value_cache,
+            context,
+            ..
+        } = state;
+
+        let is_sliding_layer = |idx: usize| (idx % 2 == 0) && c.sliding_window.is_some();
+        let window = c.sliding_window.unwrap_or(usize::MAX);
+
+        for (index, layer) in self.layers.iter().enumerate() {
+            for b in 0..n {
+                let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                ops::rms_norm(x_tok, &layer.attn_norm, c.eps, xb_tok);
+            }
+
+            layer
+                .wq
+                .matmul(&xb_batch, &mut q_batch, n, &mut workspace.scratch)?;
+            if let Some(bq) = &layer.bq {
+                for b in 0..n {
+                    let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
+                    for (slot, val) in q_tok.iter_mut().zip(bq) {
+                        *slot += val;
+                    }
+                }
+            }
+            layer
+                .wk
+                .matmul(&xb_batch, &mut k_batch, n, &mut workspace.scratch)?;
+            if let Some(bk) = &layer.bk {
+                for b in 0..n {
+                    let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
+                    for (slot, val) in k_tok.iter_mut().zip(bk) {
+                        *slot += val;
+                    }
+                }
+            }
+            layer
+                .wv
+                .matmul(&xb_batch, &mut v_batch, n, &mut workspace.scratch)?;
+            if let Some(bv) = &layer.bv {
+                for b in 0..n {
+                    let v_tok = &mut v_batch[b * kv_dim..(b + 1) * kv_dim];
+                    for (slot, val) in v_tok.iter_mut().zip(bv) {
+                        *slot += val;
+                    }
+                }
+            }
+
+            for b in 0..n {
+                let pos = start_pos + b;
+                let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
+                let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
+                let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
+
+                for head in 0..c.heads {
+                    ops::rope(
+                        &mut q_tok[head * head_dim..(head + 1) * head_dim],
+                        pos,
+                        c.rope_base,
+                    );
+                }
+                for head in 0..c.kv_heads {
+                    ops::rope(
+                        &mut k_tok[head * head_dim..(head + 1) * head_dim],
+                        pos,
+                        c.rope_base,
+                    );
+                }
+
+                let slot = (index * *context + pos) * kv_dim;
+                key_cache[slot..slot + kv_dim].copy_from_slice(k_tok);
+                value_cache[slot..slot + kv_dim].copy_from_slice(v_tok);
+            }
+
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let is_sliding = is_sliding_layer(index);
+            for b in 0..n {
+                let pos = start_pos + b;
+                let q_tok = &q_batch[b * att_dim..(b + 1) * att_dim];
+                let att_tok = &mut att_batch[b * att_dim..(b + 1) * att_dim];
+
+                for head in 0..c.heads {
+                    let kv_head = head / group;
+                    let query = &q_tok[head * head_dim..(head + 1) * head_dim];
+
+                    for (past, score) in att[..=pos].iter_mut().enumerate() {
+                        if is_sliding && pos.saturating_sub(past) >= window {
+                            *score = f32::NEG_INFINITY;
+                            continue;
+                        }
+                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
+                        let mut raw = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
+                        if let Some(cap) = c.attn_logit_softcapping {
+                            raw = cap * (raw / cap).tanh();
+                        }
+                        *score = raw;
+                    }
+                    ops::softmax(&mut att[..=pos]);
+
+                    let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
+                    out.fill(0.0);
+                    for (past, weight) in att[..=pos].iter().enumerate() {
+                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
+                        for (slot, value) in out.iter_mut().zip(&value_cache[at..at + head_dim]) {
+                            *slot += weight * value;
+                        }
+                    }
+                }
+            }
+
+            layer
+                .wo
+                .matmul(&att_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+            if let Some(post_attn_norm) = &layer.post_attn_norm {
+                for b in 0..n {
+                    let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
+                    let tok_out = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                    ops::rms_norm(tok_in, post_attn_norm, c.eps, tok_out);
+                }
+                for (slot, delta) in x_batch.iter_mut().zip(xb_batch.iter()) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                    *slot += delta;
+                }
+            }
+
+            for b in 0..n {
+                let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                ops::rms_norm(x_tok, &layer.ffn_norm, c.eps, xb_tok);
+            }
+
+            layer
+                .gate
+                .matmul(&xb_batch, &mut hb_batch, n, &mut workspace.scratch)?;
+            layer
+                .up
+                .matmul(&xb_batch, &mut hb2_batch, n, &mut workspace.scratch)?;
+            for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
+                *gate = ops::silu(*gate) * up;
+            }
+
+            layer
+                .down
+                .matmul(&hb_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+            if let Some(post_ffn_norm) = &layer.post_ffn_norm {
+                for b in 0..n {
+                    let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
+                    let tok_out = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                    ops::rms_norm(tok_in, post_ffn_norm, c.eps, tok_out);
+                }
+                for (slot, delta) in x_batch.iter_mut().zip(xb_batch.iter()) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                    *slot += delta;
+                }
+            }
+        }
+
+        for b in 0..n {
+            let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+            let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+            ops::rms_norm(x_tok, &self.output_norm, c.eps, xb_tok);
+        }
+
+        self.output
+            .matmul(&xb_batch, all_logits, n, &mut workspace.scratch)?;
+
+        if let Some(cap) = c.final_logit_softcapping {
+            for logit in all_logits.iter_mut() {
+                *logit = cap * (*logit / cap).tanh();
+            }
+        }
+
+        let last_logits = &all_logits[(n - 1) * c.vocab..n * c.vocab];
+        logits.copy_from_slice(last_logits);
+        Ok(())
+    }
 }
 
 /// Everything one sequence needs that is not a weight.
@@ -1026,5 +1280,25 @@ impl State {
 
     pub fn value_cache(&self) -> &[f32] {
         &self.value_cache
+    }
+
+    /// Zero out KV-cache slots from `keep_pos` up to `end_pos`.
+    ///
+    /// Used by speculative decoding to roll back candidate KV-cache entries when
+    /// speculative tokens are rejected by the target model.
+    pub fn truncate_cache(&mut self, config: &Config, keep_pos: usize, end_pos: usize) {
+        let kv_dim = config.kv_dim();
+        for layer in 0..config.layers {
+            for pos in keep_pos..end_pos.min(self.context) {
+                let slot = (layer * self.context + pos) * kv_dim;
+                self.key_cache[slot..slot + kv_dim].fill(0.0);
+                self.value_cache[slot..slot + kv_dim].fill(0.0);
+            }
+        }
+    }
+
+    /// Set `logits` buffer to the given slice.
+    pub fn set_logits(&mut self, new_logits: &[f32]) {
+        self.logits.copy_from_slice(new_logits);
     }
 }

@@ -18,9 +18,11 @@ pub mod model;
 pub mod ops;
 pub mod quant;
 pub mod sample;
+pub mod speculative;
 pub mod synth;
 pub mod tokenizer;
 
 pub use gguf::{GgmlType, Gguf, TensorInfo, Value};
 pub use map::Mmap;
+pub use speculative::{SpeculativeEngine, SpeculativeStats};
 pub use tokenizer::Tokenizer;

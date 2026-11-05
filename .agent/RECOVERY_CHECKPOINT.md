@@ -42,11 +42,18 @@
    - Implemented alternating sliding window causal attention masking.
    - Implemented 4-stage layer normalization with optional `post_attention_norm` and `post_ffn_norm` across both decode `forward` and `prefill`.
    - Added `gemma2_fixture` and regression test `gemma2_runs_with_softcapping_and_norms` in `tests/model.rs`.
-7. Code Quality:
-   - All 105 tests pass across all targets (`cargo test --all-targets`).
+7. Phase 11 Continuous Speculative Decoding:
+   - Added `Model::prefill_all_logits` for batched evaluation emitting all intermediate candidate logits.
+   - Added `State::truncate_cache` and `State::set_logits` for precise rollback and state synchronization.
+   - Built zero-dependency `SpeculativeEngine` and `SpeculativeStats` in `src/speculative.rs`.
+   - Wired CLI flags `--draft <model>` and `--spec-k <k>` into `src/main.rs` with token streaming and acceptance tracking.
+   - Added integration test suite `tests/speculative.rs` verifying 100% acceptance on identical models and guaranteed exact baseline parity on divergent models.
+8. Code Quality:
+   - All 107 tests pass across all targets (`cargo test --all-targets`).
    - `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `git diff --check` pass with zero errors.
 
 ## Next Up in Work Queue
-- Phase 11: Continuous Speculative Decoding (Draft-Target Speculation Engine with batched prefill verification).
+- Phase 12: Multithreaded Prefill & SIMD Portability (Row-partitioned GEMM across worker threads + ARM NEON / AVX-512 kernels).
+
 
 

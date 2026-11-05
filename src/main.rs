@@ -27,6 +27,8 @@ run options:
   --seed <s>      sampling seed (default 1)
   --ctx <n>       KV cache size in tokens (default 2048)
   --threads <n>   workers per matvec (default: machine parallelism)
+  --draft <model> draft model for speculative decoding acceleration
+  --spec-k <k>    speculative candidate count (default 3)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -245,6 +247,12 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
     let threads: usize = flag(args, "--threads", 0)?;
 
+    let draft_query: Option<String> = {
+        let at = args.iter().position(|a| a == "--draft");
+        at.and_then(|i| args.get(i + 1).cloned())
+    };
+    let spec_k: usize = flag(args, "--spec-k", 3)?;
+
     // Positionals are whatever is left once flags and their values are removed.
     let flags = [
         "-n",
@@ -254,6 +262,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--seed",
         "--ctx",
         "--threads",
+        "--draft",
+        "--spec-k",
     ];
     let mut positional = Vec::new();
     let mut index = 0;
@@ -285,6 +295,25 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     }
     let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
 
+    // Optional draft model for speculative decoding
+    let draft_gguf = if let Some(dq) = &draft_query {
+        let draft_path = lmstudio::resolve(dq)?;
+        Some(Gguf::open(&draft_path)?)
+    } else {
+        None
+    };
+
+    let mut draft_bundle = if let Some(gguf) = &draft_gguf {
+        let draft_model = Model::load(gguf)?;
+        let mut draft_state = State::with_context(&draft_model.config, context);
+        if threads > 0 {
+            draft_state.threads = threads;
+        }
+        Some((draft_model, draft_state))
+    } else {
+        None
+    };
+
     let prompt_tokens = tokenizer.encode(&prompt, true);
     if prompt_tokens.is_empty() {
         return Err(std::io::Error::new(
@@ -292,13 +321,24 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
             "prompt encoded to no tokens",
         ));
     }
-    eprintln!(
-        "{} · {} prompt tokens · {} kv cache · {} threads",
-        model.config.arch,
-        prompt_tokens.len(),
-        human(state.cache_bytes() as u64),
-        state.threads
-    );
+    if let Some((draft_model, _)) = &draft_bundle {
+        eprintln!(
+            "target: {} · draft: {} (k={spec_k}) · {} prompt tokens · {} kv cache · {} threads",
+            model.config.arch,
+            draft_model.config.arch,
+            prompt_tokens.len(),
+            human(state.cache_bytes() as u64),
+            state.threads
+        );
+    } else {
+        eprintln!(
+            "{} · {} prompt tokens · {} kv cache · {} threads",
+            model.config.arch,
+            prompt_tokens.len(),
+            human(state.cache_bytes() as u64),
+            state.threads
+        );
+    }
 
     let mut stdout = std::io::stdout();
     print!("{prompt}");
@@ -306,6 +346,9 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
 
     let prefill_start = Instant::now();
     model.prefill(&mut state, &prompt_tokens, 0)?;
+    if let Some((draft_model, draft_state)) = &mut draft_bundle {
+        draft_model.prefill(draft_state, &prompt_tokens, 0)?;
+    }
     let prefill = prefill_start.elapsed();
 
     // A multi-byte character can straddle two tokens, so bytes accumulate
@@ -315,32 +358,71 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let mut generated = 0;
     let decode_start = Instant::now();
 
-    while generated < limit && position < state.context() {
-        let token = sampler.sample(&mut state.logits);
-        if Some(token) == tokenizer.eos {
-            break;
+    if let Some((draft_model, draft_state)) = &mut draft_bundle {
+        let mut engine = ferrite::speculative::SpeculativeEngine::new(&model, draft_model, spec_k);
+        while generated < limit && position < state.context() {
+            let emitted = engine.step(&mut state, draft_state, position, &mut sampler)?;
+            let mut stopped = false;
+            for token in emitted {
+                if Some(token) == tokenizer.eos {
+                    stopped = true;
+                    break;
+                }
+                pending.extend(tokenizer.piece(token));
+                if let Ok(text) = std::str::from_utf8(&pending) {
+                    print!("{text}");
+                    stdout.flush().ok();
+                    pending.clear();
+                }
+                position += 1;
+                generated += 1;
+                if generated >= limit || position >= state.context() {
+                    stopped = true;
+                    break;
+                }
+            }
+            if stopped {
+                break;
+            }
         }
-        pending.extend(tokenizer.piece(token));
-        if let Ok(text) = std::str::from_utf8(&pending) {
-            print!("{text}");
-            stdout.flush().ok();
-            pending.clear();
-        }
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s) · acceptance rate {:.1}% ({:.2} tok/target-step)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+            engine.stats.acceptance_rate() * 100.0,
+            engine.stats.tokens_per_batch(),
+        );
+    } else {
+        while generated < limit && position < state.context() {
+            let token = sampler.sample(&mut state.logits);
+            if Some(token) == tokenizer.eos {
+                break;
+            }
+            pending.extend(tokenizer.piece(token));
+            if let Ok(text) = std::str::from_utf8(&pending) {
+                print!("{text}");
+                stdout.flush().ok();
+                pending.clear();
+            }
 
-        model.forward(&mut state, token, position)?;
-        position += 1;
-        generated += 1;
+            model.forward(&mut state, token, position)?;
+            position += 1;
+            generated += 1;
+        }
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+        );
     }
-    println!();
-
-    let decode = decode_start.elapsed();
-    eprintln!(
-        "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s)",
-        prefill.as_secs_f64(),
-        prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
-        decode.as_secs_f64(),
-        generated as f64 / decode.as_secs_f64().max(1e-9),
-    );
     Ok(())
 }
 
