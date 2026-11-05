@@ -70,22 +70,23 @@
 - Files: `src/model.rs`, `src/tokenizer/mod.rs`, `tests/model.rs`
 - Acceptance: Parse `qwen2` architecture config, load QKV bias tensors via `load_vector_optional`, adapt single-token decode and batched prefill forward passes, support byte-level BPE tokenizer for `qwen2`, add synthetic fixture test.
 - Tests: `tests/model.rs::qwen2_runs_with_attention_biases_and_prefill`.
-- Completion evidence: Full Qwen 2.5 forward pass and prefill pass verified on synthetic fixture with exact parity. All 104 tests pass.
+- Completion evidence: Full Qwen 2.5 forward pass and prefill pass verified on synthetic fixture with exact parity. All 103 tests pass; Clippy, formatting, and diff checks pass.
 
 ## Backlog
 
 ### Phase 10: Multi-Architecture Support - Gemma 2 (`gemma2`)
 - Priority: P1
-- Status: READY TO IMPLEMENT
-- Rationale: Gemma 2 is one of the most widely deployed open models, requiring unique architectural primitives: input embedding scaling (`* sqrt(dim)`), Gemma RMSNorm variant (`(1.0 + weight) * x`), explicit head dimension overrides, attention logit soft-capping, and post-attention feedforward normalization.
-- Files: `src/model.rs`, `src/ops.rs`, `tests/model.rs`
+- Status: COMPLETED
+- Rationale: Gemma 2 is one of the most widely deployed open models, requiring unique architectural primitives: input embedding scaling (`* sqrt(dim)`), decoupled head dimension and embedding dimension, attention logit soft-capping (`50.0 * tanh(raw / 50.0)`), final logit soft-capping (`30.0 * tanh(raw / 30.0)`), alternating sliding window attention, and 4-stage layer normalization (post-attention and post-FFN RMSNorms).
+- Files: `src/model.rs`, `src/tokenizer/mod.rs`, `tests/model.rs`
 - Acceptance:
   1. Parse `gemma2` / `gemma` architecture strings and configuration.
-  2. Implement embedding scaling and Gemma RMSNorm (`(1.0 + w) * x * rsqrt`).
-  3. Implement attention logit soft-capping and final logit soft-capping (`cap * tanh(x / cap)`).
-  4. Implement post-attention and post-FFN normalization layers where required.
+  2. Implement embedding scaling and decoupled head dimension.
+  3. Implement attention logit soft-capping and final logit soft-capping.
+  4. Implement post-attention and post-FFN normalization layers in forward pass and batched prefill.
   5. Add synthetic Gemma 2 fixture and end-to-end regression test in `tests/model.rs`.
-- Tests: `cargo test --all-targets`.
+- Tests: `tests/model.rs::gemma2_runs_with_softcapping_and_norms`. All 105 tests pass.
+- Completion evidence: Bit-identical agreement between batched prefill and sequential forward verified with softcapping bounds checked.
 
 ### Phase 11: Continuous Speculative Decoding (Draft-Target Speculation Engine)
 - Priority: P1

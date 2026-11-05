@@ -1,9 +1,10 @@
 # Recovery Checkpoint
 
-- Timestamp: 2026-11-06T04:20:20+05:30
+- Timestamp: 2026-11-06T04:34:38+05:30
 - Repository: `/home/abhishek/Projects/ferrite-audit`
 - Branch: `codex/audit-baseline`
 - Baseline commit: `e174548e30b36271c4302646cdb9fe861926321b`
+- Verified HEAD: `2787c52` (`feat: batched prefill, Qwen 2.5 support, GGUF hardening and autonomous runner`)
 
 ## Completed in this Execution
 1. GGUF Parser Hardening:
@@ -33,10 +34,19 @@
    - Added optional attention projection biases (`attn_q.bias`, `attn_k.bias`, `attn_v.bias`) dynamically loaded via `load_vector_optional`.
    - Updated byte-level BPE tokenizer to accept `"qwen2"`.
    - Added `qwen2_fixture` and regression test `qwen2_runs_with_attention_biases_and_prefill` in `tests/model.rs`.
-6. Code Quality:
-   - All 104 tests pass across all targets.
+6. Phase 10 Multi-Architecture Support for Gemma 2 (`gemma2` / `gemma`):
+   - Added `"gemma"` and `"gemma2"` to supported GGUF model architectures and tokenizer models.
+   - Implemented input embedding scaling by `sqrt(embedding_dim)`.
+   - Decoupled `head_dim` from `embedding` for architectures where `heads * head_dim != embedding`.
+   - Added `attn_logit_softcapping` and `final_logit_softcapping` (`cap * tanh(raw / cap)`).
+   - Implemented alternating sliding window causal attention masking.
+   - Implemented 4-stage layer normalization with optional `post_attention_norm` and `post_ffn_norm` across both decode `forward` and `prefill`.
+   - Added `gemma2_fixture` and regression test `gemma2_runs_with_softcapping_and_norms` in `tests/model.rs`.
+7. Code Quality:
+   - All 105 tests pass across all targets (`cargo test --all-targets`).
    - `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `git diff --check` pass with zero errors.
 
 ## Next Up in Work Queue
-- Phase 10: Multi-Architecture Support for Gemma 2 (`gemma2` / `gemma`: embedding scaling `* sqrt(dim)`, Gemma RMSNorm `(1.0 + w) * x * rsqrt`, attention logit soft-capping, post-attention & post-FFN norm).
+- Phase 11: Continuous Speculative Decoding (Draft-Target Speculation Engine with batched prefill verification).
+
 

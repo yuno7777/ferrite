@@ -712,3 +712,167 @@ fn qwen2_runs_with_attention_biases_and_prefill() {
 
     fs::remove_file(path).ok();
 }
+
+fn gemma2_fixture() -> Builder {
+    let mut builder = Builder::new()
+        .meta("general.architecture", Value::String("gemma2".into()))
+        .meta("gemma2.block_count", Value::U32(2))
+        .meta("gemma2.embedding_length", Value::U32(DIM as u32))
+        .meta("gemma2.feed_forward_length", Value::U32(FFN as u32))
+        .meta("gemma2.attention.head_count", Value::U32(2))
+        .meta("gemma2.attention.head_count_kv", Value::U32(2))
+        .meta("gemma2.attention.key_length", Value::U32((DIM / 2) as u32))
+        .meta("gemma2.context_length", Value::U32(16))
+        .meta("gemma2.attention.layer_norm_rms_epsilon", Value::F32(EPS))
+        .meta("gemma2.attention.logit_softcapping", Value::F32(50.0))
+        .meta("gemma2.final_logit_softcapping", Value::F32(30.0))
+        .meta("gemma2.attention.sliding_window", Value::U32(2))
+        .meta("tokenizer.ggml.model", Value::String("llama".into()))
+        .meta(
+            "tokenizer.ggml.tokens",
+            Value::Array((0..VOCAB).map(|i| Value::String(format!("t{i}"))).collect()),
+        )
+        .meta(
+            "tokenizer.ggml.scores",
+            Value::Array((0..VOCAB).map(|i| Value::F32(i as f32)).collect()),
+        )
+        .meta(
+            "tokenizer.ggml.token_type",
+            Value::Array((0..VOCAB).map(|_| Value::I32(1)).collect()),
+        )
+        .tensor(
+            "token_embd.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&embeddings()),
+        )
+        .tensor(
+            "output_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "output.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        );
+
+    for idx in 0..2 {
+        builder = builder
+            .tensor(
+                &format!("blk.{idx}.attn_norm.weight"),
+                &[DIM as u64],
+                GgmlType::F32,
+                bytes(&[1.0; DIM]),
+            )
+            .tensor(
+                &format!("blk.{idx}.post_attention_norm.weight"),
+                &[DIM as u64],
+                GgmlType::F32,
+                bytes(&[1.0; DIM]),
+            )
+            .tensor(
+                &format!("blk.{idx}.attn_q.weight"),
+                &[DIM as u64, DIM as u64],
+                GgmlType::F32,
+                bytes(&identity(DIM)),
+            )
+            .tensor(
+                &format!("blk.{idx}.attn_k.weight"),
+                &[DIM as u64, DIM as u64],
+                GgmlType::F32,
+                bytes(&identity(DIM)),
+            )
+            .tensor(
+                &format!("blk.{idx}.attn_v.weight"),
+                &[DIM as u64, DIM as u64],
+                GgmlType::F32,
+                bytes(&identity(DIM)),
+            )
+            .tensor(
+                &format!("blk.{idx}.attn_output.weight"),
+                &[DIM as u64, DIM as u64],
+                GgmlType::F32,
+                bytes(&identity(DIM)),
+            )
+            .tensor(
+                &format!("blk.{idx}.ffn_norm.weight"),
+                &[DIM as u64],
+                GgmlType::F32,
+                bytes(&[1.0; DIM]),
+            )
+            .tensor(
+                &format!("blk.{idx}.post_ffn_norm.weight"),
+                &[DIM as u64],
+                GgmlType::F32,
+                bytes(&[1.0; DIM]),
+            )
+            .tensor(
+                &format!("blk.{idx}.ffn_gate.weight"),
+                &[DIM as u64, FFN as u64],
+                GgmlType::F32,
+                bytes(&[0.0; DIM * FFN]),
+            )
+            .tensor(
+                &format!("blk.{idx}.ffn_up.weight"),
+                &[DIM as u64, FFN as u64],
+                GgmlType::F32,
+                bytes(&[0.0; DIM * FFN]),
+            )
+            .tensor(
+                &format!("blk.{idx}.ffn_down.weight"),
+                &[FFN as u64, DIM as u64],
+                GgmlType::F32,
+                bytes(&[0.0; FFN * DIM]),
+            );
+    }
+    builder
+}
+
+#[test]
+fn gemma2_runs_with_softcapping_and_norms() {
+    let path = write("gemma2_test", &gemma2_fixture());
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    assert_eq!(model.config.arch, "gemma2");
+    assert_eq!(model.config.attn_logit_softcapping, Some(50.0));
+    assert_eq!(model.config.final_logit_softcapping, Some(30.0));
+    assert_eq!(model.config.sliding_window, Some(2));
+    assert_eq!(model.config.embedding_scale, Some((DIM as f32).sqrt()));
+    assert!(model.layers[0].post_attn_norm.is_some());
+    assert!(model.layers[0].post_ffn_norm.is_some());
+
+    let prompt = [0u32, 1, 2, 3];
+
+    // 1. Sequential forward
+    let mut state_seq = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+    assert!(state_seq.logits.iter().all(|v| v.is_finite()));
+    // Final logits must be softcapped within [-30.0, 30.0]
+    for &l in &state_seq.logits {
+        assert!(
+            (-30.0..=30.0).contains(&l),
+            "logit {l} exceeded softcap 30.0"
+        );
+    }
+
+    // 2. Batched prefill
+    let mut state_batch = State::new(&model.config);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_batch.logits),
+        bits(&state_seq.logits),
+        "gemma2 prefill logits must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}

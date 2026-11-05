@@ -13,7 +13,7 @@ fn bad(msg: impl Into<String>) -> Error {
 /// Architectures whose tensor names and layer shape this implements. Others
 /// are rejected by name rather than half-loaded — a model that runs with the
 /// wrong layer structure produces fluent nonsense, not an error.
-const SUPPORTED: [&str; 2] = ["llama", "qwen2"];
+const SUPPORTED: [&str; 4] = ["llama", "qwen2", "gemma", "gemma2"];
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -29,6 +29,10 @@ pub struct Config {
     pub vocab: usize,
     pub eps: f32,
     pub rope_base: f32,
+    pub attn_logit_softcapping: Option<f32>,
+    pub final_logit_softcapping: Option<f32>,
+    pub sliding_window: Option<usize>,
+    pub embedding_scale: Option<f32>,
 }
 
 impl Config {
@@ -60,7 +64,9 @@ impl Config {
             .map(|v| v as usize)
             .unwrap_or(heads);
         let head_dim = model
-            .arch_u64("rope.dimension_count")
+            .arch_u64("attention.key_length")
+            .or_else(|| model.arch_u64("attention.head_dim"))
+            .or_else(|| model.arch_u64("rope.dimension_count"))
             .map(|v| v as usize)
             .unwrap_or_else(|| embedding.checked_div(heads).unwrap_or(0));
 
@@ -72,9 +78,10 @@ impl Config {
                 "{heads} heads is not a multiple of {kv_heads} kv heads"
             )));
         }
-        // The attention output projection consumes heads * head_dim and emits
-        // embedding, so the two have to agree.
-        if heads * head_dim != embedding {
+        // In LLaMA and Qwen, heads * head_dim == embedding. In Gemma 2, head_dim is decoupled
+        // from embedding (e.g., 8 heads * 256 = 2048 != 2304 embedding) and wo projects from
+        // heads * head_dim to embedding.
+        if arch != "gemma" && arch != "gemma2" && heads * head_dim != embedding {
             return Err(bad(format!(
                 "{heads} heads of {head_dim} do not add up to an embedding of {embedding}"
             )));
@@ -91,6 +98,19 @@ impl Config {
                     .map(|v| v as usize)
             })
             .ok_or_else(|| bad("cannot determine vocabulary size"))?;
+
+        let attn_logit_softcapping = model
+            .arch_f32("attention.logit_softcapping")
+            .or_else(|| model.arch_f32("attn_logit_softcapping"));
+        let final_logit_softcapping = model.arch_f32("final_logit_softcapping");
+        let sliding_window = model
+            .arch_u64("attention.sliding_window")
+            .map(|v| v as usize);
+        let embedding_scale = if arch == "gemma" || arch == "gemma2" {
+            Some((embedding as f32).sqrt())
+        } else {
+            None
+        };
 
         Ok(Self {
             arch: arch.clone(),
@@ -115,6 +135,10 @@ impl Config {
                     10000.0
                 }
             }),
+            attn_logit_softcapping,
+            final_logit_softcapping,
+            sliding_window,
+            embedding_scale,
         })
     }
 
@@ -406,6 +430,7 @@ impl<'a> Weight<'a> {
 
 pub struct Layer<'a> {
     pub attn_norm: Vec<f32>,
+    pub post_attn_norm: Option<Vec<f32>>,
     pub wq: Weight<'a>,
     pub bq: Option<Vec<f32>>,
     pub wk: Weight<'a>,
@@ -414,6 +439,7 @@ pub struct Layer<'a> {
     pub bv: Option<Vec<f32>>,
     pub wo: Weight<'a>,
     pub ffn_norm: Vec<f32>,
+    pub post_ffn_norm: Option<Vec<f32>>,
     pub gate: Weight<'a>,
     pub up: Weight<'a>,
     pub down: Weight<'a>,
@@ -452,6 +478,10 @@ impl<'a> Model<'a> {
         for index in 0..config.layers {
             layers.push(Layer {
                 attn_norm: load_vector(gguf, &format!("blk.{index}.attn_norm.weight"))?,
+                post_attn_norm: load_vector_optional(
+                    gguf,
+                    &format!("blk.{index}.post_attention_norm.weight"),
+                )?,
                 wq: Weight::bind(gguf, &format!("blk.{index}.attn_q.weight"))?,
                 bq: load_vector_optional(gguf, &format!("blk.{index}.attn_q.bias"))?,
                 wk: Weight::bind(gguf, &format!("blk.{index}.attn_k.weight"))?,
@@ -460,6 +490,10 @@ impl<'a> Model<'a> {
                 bv: load_vector_optional(gguf, &format!("blk.{index}.attn_v.bias"))?,
                 wo: Weight::bind(gguf, &format!("blk.{index}.attn_output.weight"))?,
                 ffn_norm: load_vector(gguf, &format!("blk.{index}.ffn_norm.weight"))?,
+                post_ffn_norm: load_vector_optional(
+                    gguf,
+                    &format!("blk.{index}.post_ffn_norm.weight"),
+                )?,
                 gate: Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))?,
                 up: Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))?,
                 down: Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))?,
@@ -516,23 +550,38 @@ impl<'a> Model<'a> {
         } = state;
 
         let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
+        let att_dim = c.heads * head_dim;
         self.token_embd.row(token as usize, x)?;
+        if let Some(scale) = c.embedding_scale {
+            for v in x.iter_mut() {
+                *v *= scale;
+            }
+        }
+
+        let is_sliding_layer = |idx: usize| (idx % 2 == 0) && c.sliding_window.is_some();
+        let window = c.sliding_window.unwrap_or(usize::MAX);
 
         for (index, layer) in self.layers.iter().enumerate() {
-            ops::rms_norm(x, &layer.attn_norm, c.eps, xb);
-            layer.wq.matvec_threaded(xb, q, *threads, workspace)?;
+            ops::rms_norm(x, &layer.attn_norm, c.eps, &mut xb[..c.embedding]);
+            layer
+                .wq
+                .matvec_threaded(&xb[..c.embedding], q, *threads, workspace)?;
             if let Some(bq) = &layer.bq {
                 for (slot, b) in q.iter_mut().zip(bq) {
                     *slot += b;
                 }
             }
-            layer.wk.matvec_threaded(xb, k, *threads, workspace)?;
+            layer
+                .wk
+                .matvec_threaded(&xb[..c.embedding], k, *threads, workspace)?;
             if let Some(bk) = &layer.bk {
                 for (slot, b) in k.iter_mut().zip(bk) {
                     *slot += b;
                 }
             }
-            layer.wv.matvec_threaded(xb, v, *threads, workspace)?;
+            layer
+                .wv
+                .matvec_threaded(&xb[..c.embedding], v, *threads, workspace)?;
             if let Some(bv) = &layer.bv {
                 for (slot, b) in v.iter_mut().zip(bv) {
                     *slot += b;
@@ -560,14 +609,23 @@ impl<'a> Model<'a> {
             value_cache[slot..slot + kv_dim].copy_from_slice(v);
 
             let scale = 1.0 / (head_dim as f32).sqrt();
+            let is_sliding = is_sliding_layer(index);
             for head in 0..c.heads {
                 // Grouped-query attention: several query heads share one KV head.
                 let kv_head = head / group;
                 let query = &q[head * head_dim..(head + 1) * head_dim];
 
                 for (past, score) in att[..=position].iter_mut().enumerate() {
+                    if is_sliding && position.saturating_sub(past) >= window {
+                        *score = f32::NEG_INFINITY;
+                        continue;
+                    }
                     let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                    *score = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
+                    let mut raw = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
+                    if let Some(cap) = c.attn_logit_softcapping {
+                        raw = cap * (raw / cap).tanh();
+                    }
+                    *score = raw;
                 }
                 ops::softmax(&mut att[..=position]);
 
@@ -581,27 +639,67 @@ impl<'a> Model<'a> {
                 }
             }
 
-            layer.wo.matvec_threaded(xb, xb2, *threads, workspace)?;
-            for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
-                *slot += delta;
+            layer.wo.matvec_threaded(
+                &xb[..att_dim],
+                &mut xb2[..c.embedding],
+                *threads,
+                workspace,
+            )?;
+            if let Some(post_attn_norm) = &layer.post_attn_norm {
+                ops::rms_norm(
+                    &xb2[..c.embedding],
+                    post_attn_norm,
+                    c.eps,
+                    &mut xb[..c.embedding],
+                );
+                for (slot, delta) in x.iter_mut().zip(&xb[..c.embedding]) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x.iter_mut().zip(&xb2[..c.embedding]) {
+                    *slot += delta;
+                }
             }
 
-            ops::rms_norm(x, &layer.ffn_norm, c.eps, xb);
-            layer.gate.matvec_threaded(xb, hb, *threads, workspace)?;
-            layer.up.matvec_threaded(xb, hb2, *threads, workspace)?;
+            ops::rms_norm(x, &layer.ffn_norm, c.eps, &mut xb[..c.embedding]);
+            layer
+                .gate
+                .matvec_threaded(&xb[..c.embedding], hb, *threads, workspace)?;
+            layer
+                .up
+                .matvec_threaded(&xb[..c.embedding], hb2, *threads, workspace)?;
             // SwiGLU: the gate is squashed, the up projection is not.
             for (gate, up) in hb.iter_mut().zip(hb2.iter()) {
                 *gate = ops::silu(*gate) * up;
             }
-            layer.down.matvec_threaded(hb, xb2, *threads, workspace)?;
-            for (slot, delta) in x.iter_mut().zip(xb2.iter()) {
-                *slot += delta;
+            layer
+                .down
+                .matvec_threaded(hb, &mut xb2[..c.embedding], *threads, workspace)?;
+            if let Some(post_ffn_norm) = &layer.post_ffn_norm {
+                ops::rms_norm(
+                    &xb2[..c.embedding],
+                    post_ffn_norm,
+                    c.eps,
+                    &mut xb[..c.embedding],
+                );
+                for (slot, delta) in x.iter_mut().zip(&xb[..c.embedding]) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x.iter_mut().zip(&xb2[..c.embedding]) {
+                    *slot += delta;
+                }
             }
         }
 
-        ops::rms_norm(x, &self.output_norm, c.eps, xb);
+        ops::rms_norm(x, &self.output_norm, c.eps, &mut xb[..c.embedding]);
         self.output
-            .matvec_threaded(xb, logits, *threads, workspace)?;
+            .matvec_threaded(&xb[..c.embedding], logits, *threads, workspace)?;
+        if let Some(cap) = c.final_logit_softcapping {
+            for logit in logits.iter_mut() {
+                *logit = cap * (*logit / cap).tanh();
+            }
+        }
         Ok(())
     }
 
@@ -633,6 +731,7 @@ impl<'a> Model<'a> {
         }
 
         let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
+        let att_dim = c.heads * head_dim;
 
         // Batch activation buffers:
         let mut x_batch = vec![0.0f32; n * c.embedding];
@@ -640,10 +739,16 @@ impl<'a> Model<'a> {
             let row = &mut x_batch[b * c.embedding..(b + 1) * c.embedding];
             self.token_embd.row(tok as usize, row)?;
         }
+        if let Some(scale) = c.embedding_scale {
+            for v in x_batch.iter_mut() {
+                *v *= scale;
+            }
+        }
 
         let mut xb_batch = vec![0.0f32; n * c.embedding];
         let mut xb2_batch = vec![0.0f32; n * c.embedding];
-        let mut q_batch = vec![0.0f32; n * c.heads * head_dim];
+        let mut att_batch = vec![0.0f32; n * att_dim];
+        let mut q_batch = vec![0.0f32; n * att_dim];
         let mut k_batch = vec![0.0f32; n * kv_dim];
         let mut v_batch = vec![0.0f32; n * kv_dim];
         let mut hb_batch = vec![0.0f32; n * c.ffn];
@@ -659,6 +764,9 @@ impl<'a> Model<'a> {
             ..
         } = state;
 
+        let is_sliding_layer = |idx: usize| (idx % 2 == 0) && c.sliding_window.is_some();
+        let window = c.sliding_window.unwrap_or(usize::MAX);
+
         for (index, layer) in self.layers.iter().enumerate() {
             for b in 0..n {
                 let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -671,8 +779,7 @@ impl<'a> Model<'a> {
                 .matmul(&xb_batch, &mut q_batch, n, &mut workspace.scratch)?;
             if let Some(bq) = &layer.bq {
                 for b in 0..n {
-                    let q_tok =
-                        &mut q_batch[b * (c.heads * head_dim)..(b + 1) * (c.heads * head_dim)];
+                    let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
                     for (slot, val) in q_tok.iter_mut().zip(bq) {
                         *slot += val;
                     }
@@ -703,7 +810,7 @@ impl<'a> Model<'a> {
 
             for b in 0..n {
                 let pos = start_pos + b;
-                let q_tok = &mut q_batch[b * (c.heads * head_dim)..(b + 1) * (c.heads * head_dim)];
+                let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
                 let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
                 let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
 
@@ -728,22 +835,31 @@ impl<'a> Model<'a> {
             }
 
             let scale = 1.0 / (head_dim as f32).sqrt();
+            let is_sliding = is_sliding_layer(index);
             for b in 0..n {
                 let pos = start_pos + b;
-                let q_tok = &q_batch[b * (c.heads * head_dim)..(b + 1) * (c.heads * head_dim)];
-                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                let q_tok = &q_batch[b * att_dim..(b + 1) * att_dim];
+                let att_tok = &mut att_batch[b * att_dim..(b + 1) * att_dim];
 
                 for head in 0..c.heads {
                     let kv_head = head / group;
                     let query = &q_tok[head * head_dim..(head + 1) * head_dim];
 
                     for (past, score) in att[..=pos].iter_mut().enumerate() {
+                        if is_sliding && pos.saturating_sub(past) >= window {
+                            *score = f32::NEG_INFINITY;
+                            continue;
+                        }
                         let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                        *score = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
+                        let mut raw = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
+                        if let Some(cap) = c.attn_logit_softcapping {
+                            raw = cap * (raw / cap).tanh();
+                        }
+                        *score = raw;
                     }
                     ops::softmax(&mut att[..=pos]);
 
-                    let out = &mut xb_tok[head * head_dim..(head + 1) * head_dim];
+                    let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
                     out.fill(0.0);
                     for (past, weight) in att[..=pos].iter().enumerate() {
                         let at = (index * *context + past) * kv_dim + kv_head * head_dim;
@@ -756,9 +872,20 @@ impl<'a> Model<'a> {
 
             layer
                 .wo
-                .matmul(&xb_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
-            for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
-                *slot += delta;
+                .matmul(&att_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+            if let Some(post_attn_norm) = &layer.post_attn_norm {
+                for b in 0..n {
+                    let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
+                    let tok_out = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                    ops::rms_norm(tok_in, post_attn_norm, c.eps, tok_out);
+                }
+                for (slot, delta) in x_batch.iter_mut().zip(xb_batch.iter()) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                    *slot += delta;
+                }
             }
 
             for b in 0..n {
@@ -780,8 +907,19 @@ impl<'a> Model<'a> {
             layer
                 .down
                 .matmul(&hb_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
-            for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
-                *slot += delta;
+            if let Some(post_ffn_norm) = &layer.post_ffn_norm {
+                for b in 0..n {
+                    let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
+                    let tok_out = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                    ops::rms_norm(tok_in, post_ffn_norm, c.eps, tok_out);
+                }
+                for (slot, delta) in x_batch.iter_mut().zip(xb_batch.iter()) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                    *slot += delta;
+                }
             }
         }
 
@@ -791,6 +929,11 @@ impl<'a> Model<'a> {
         ops::rms_norm(last_x, &self.output_norm, c.eps, last_xb);
         self.output
             .matvec(last_xb, logits, &mut workspace.scratch)?;
+        if let Some(cap) = c.final_logit_softcapping {
+            for logit in logits.iter_mut() {
+                *logit = cap * (*logit / cap).tanh();
+            }
+        }
         Ok(())
     }
 }
@@ -835,10 +978,14 @@ impl State {
     pub fn with_context(config: &Config, context: usize) -> Self {
         let context = context.clamp(1, config.context);
         let kv = config.layers * context * config.kv_dim();
+        let widest = config
+            .embedding
+            .max(config.ffn)
+            .max(config.heads * config.head_dim);
         Self {
             x: vec![0.0; config.embedding],
-            xb: vec![0.0; config.embedding],
-            xb2: vec![0.0; config.embedding],
+            xb: vec![0.0; widest],
+            xb2: vec![0.0; widest],
             hb: vec![0.0; config.ffn],
             hb2: vec![0.0; config.ffn],
             q: vec![0.0; config.heads * config.head_dim],
@@ -846,7 +993,7 @@ impl State {
             v: vec![0.0; config.kv_dim()],
             att: vec![0.0; context],
             logits: vec![0.0; config.vocab],
-            workspace: Workspace::new(config.embedding.max(config.ffn)),
+            workspace: Workspace::new(widest),
             key_cache: vec![0.0; kv],
             value_cache: vec![0.0; kv],
             context,
