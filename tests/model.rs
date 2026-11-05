@@ -876,3 +876,42 @@ fn gemma2_runs_with_softcapping_and_norms() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn threaded_prefill_matches_single_thread() {
+    let path = write("threaded_prefill", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = [1u32, 2, 3, 0];
+
+    let run_prefill = |threads: usize| {
+        let mut state = State::new(&model.config);
+        state.threads = threads;
+        model.prefill(&mut state, &prompt, 0).expect("prefill");
+        let mut all_logits = vec![0.0f32; prompt.len() * model.config.vocab];
+        let mut state_all = State::new(&model.config);
+        state_all.threads = threads;
+        model
+            .prefill_all_logits(&mut state_all, &prompt, 0, &mut all_logits)
+            .expect("prefill_all");
+        (state.logits, all_logits)
+    };
+
+    let (logits_1, all_1) = run_prefill(1);
+    let (logits_4, all_4) = run_prefill(4);
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&logits_1),
+        bits(&logits_4),
+        "threaded prefill logits match 1 thread"
+    );
+    assert_eq!(
+        bits(&all_1),
+        bits(&all_4),
+        "threaded all_logits match 1 thread"
+    );
+
+    fs::remove_file(path).ok();
+}

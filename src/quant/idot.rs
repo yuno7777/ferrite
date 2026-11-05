@@ -57,11 +57,31 @@ pub fn integer(ty: GgmlType, row: &[u8], x: &Quantized) -> Option<f32> {
     // order, which for i32 is the same total exactly. Checked at run time
     // because AVX2 is not in the x86-64 baseline.
     #[cfg(target_arch = "x86_64")]
-    if super::avx2::available() {
-        match ty {
-            GgmlType::Q8_0 => return Some(unsafe { super::avx2::q8_0(row, x) }),
-            GgmlType::Q4_K => return Some(unsafe { super::avx2::q4_k(row, x) }),
-            _ => {}
+    {
+        if super::avx512::available() {
+            match ty {
+                GgmlType::Q8_0 => return Some(unsafe { super::avx512::q8_0(row, x) }),
+                GgmlType::Q4_K => return Some(unsafe { super::avx512::q4_k(row, x) }),
+                _ => {}
+            }
+        }
+        if super::avx2::available() {
+            match ty {
+                GgmlType::Q8_0 => return Some(unsafe { super::avx2::q8_0(row, x) }),
+                GgmlType::Q4_K => return Some(unsafe { super::avx2::q4_k(row, x) }),
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if super::neon::available() {
+            match ty {
+                GgmlType::Q8_0 => return Some(unsafe { super::neon::q8_0(row, x) }),
+                GgmlType::Q4_K => return Some(unsafe { super::neon::q4_k(row, x) }),
+                _ => {}
+            }
         }
     }
 

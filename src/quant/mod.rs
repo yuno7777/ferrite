@@ -15,11 +15,15 @@ use crate::gguf::GgmlType;
 pub mod activation;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "x86_64")]
+pub mod avx512;
 pub mod dot;
 pub mod half;
 pub mod idot;
 pub mod k;
 pub mod legacy;
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
 
 fn unsupported(ty: GgmlType) -> Error {
     Error::new(

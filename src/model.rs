@@ -181,6 +181,11 @@ impl Workspace {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SyncMutPtr(*mut f32);
+unsafe impl Send for SyncMutPtr {}
+unsafe impl Sync for SyncMutPtr {}
+
 /// A weight matrix left in its stored, quantized form.
 ///
 /// Rows are expanded one at a time during a matvec rather than up front: a
@@ -373,22 +378,118 @@ impl<'a> Weight<'a> {
         debug_assert_eq!(x.len(), batch * self.cols);
         debug_assert_eq!(out.len(), batch * self.rows);
         let scratch = &mut scratch[..self.cols];
+        self.matmul_rows_into(x, out, 0, self.rows, batch, scratch)
+    }
 
+    /// Parallel `matmul` distributing row ranges across `threads` worker threads.
+    pub fn matmul_threaded(
+        &self,
+        x: &[f32],
+        out: &mut [f32],
+        batch: usize,
+        threads: usize,
+        workspace: &mut Workspace,
+    ) -> Result<()> {
+        if batch == 0 {
+            return Ok(());
+        }
+        debug_assert_eq!(x.len(), batch * self.cols);
+        debug_assert_eq!(out.len(), batch * self.rows);
+
+        if threads <= 1 || self.rows < threads * 4 {
+            let scratch = &mut workspace.scratch[..self.cols];
+            return self.matmul_rows_into(x, out, 0, self.rows, batch, scratch);
+        }
+
+        let chunk = self.rows.div_ceil(threads);
+        let out_ptr = SyncMutPtr(out.as_mut_ptr());
+        let outcomes: Vec<Result<()>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..self.rows)
+                .step_by(chunk)
+                .map(|first_row| {
+                    let num_rows = (self.rows - first_row).min(chunk);
+                    scope.spawn(move || {
+                        let mut scratch = if quant::dot::supports(self.ty) {
+                            Vec::new()
+                        } else {
+                            vec![0.0f32; self.cols]
+                        };
+                        self.matmul_row_range(x, out_ptr, first_row, num_rows, batch, &mut scratch)
+                    })
+                })
+                .collect();
+
+            workers
+                .into_iter()
+                .map(|w| w.join().unwrap_or_else(|_| Err(bad("worker panicked"))))
+                .collect()
+        });
+
+        outcomes.into_iter().collect::<Result<Vec<()>>>()?;
+        Ok(())
+    }
+
+    fn matmul_rows_into(
+        &self,
+        x: &[f32],
+        out: &mut [f32],
+        first_row: usize,
+        num_rows: usize,
+        batch: usize,
+        scratch: &mut [f32],
+    ) -> Result<()> {
         let has_fused = quant::dot::supports(self.ty);
 
-        for (r, row_idx) in (0..self.rows).enumerate() {
+        for r_offset in 0..num_rows {
+            let row_idx = first_row + r_offset;
             let row = self.row_slice(row_idx);
             if has_fused {
                 for b in 0..batch {
                     let x_tok = &x[b * self.cols..(b + 1) * self.cols];
-                    out[b * self.rows + r] = quant::dot::fused(self.ty, row, x_tok).unwrap();
+                    out[b * self.rows + row_idx] =
+                        quant::dot::fused(self.ty, row, x_tok).expect("supported");
                 }
             } else {
-                // Dequantize row ONCE for all batch tokens!
                 quant::dequantize(self.ty, row, scratch)?;
                 for b in 0..batch {
                     let x_tok = &x[b * self.cols..(b + 1) * self.cols];
-                    out[b * self.rows + r] = ops::dot(scratch, x_tok);
+                    out[b * self.rows + row_idx] = ops::dot(scratch, x_tok);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn matmul_row_range(
+        &self,
+        x: &[f32],
+        out: SyncMutPtr,
+        first_row: usize,
+        num_rows: usize,
+        batch: usize,
+        scratch: &mut [f32],
+    ) -> Result<()> {
+        let has_fused = quant::dot::supports(self.ty);
+
+        for r_offset in 0..num_rows {
+            let row_idx = first_row + r_offset;
+            let row = self.row_slice(row_idx);
+            if has_fused {
+                for b in 0..batch {
+                    let x_tok = &x[b * self.cols..(b + 1) * self.cols];
+                    let val = quant::dot::fused(self.ty, row, x_tok).expect("supported");
+                    unsafe {
+                        *out.0.add(b * self.rows + row_idx) = val;
+                    }
+                }
+            } else {
+                quant::dequantize(self.ty, row, scratch)?;
+                for b in 0..batch {
+                    let x_tok = &x[b * self.cols..(b + 1) * self.cols];
+                    let val = ops::dot(scratch, x_tok);
+                    unsafe {
+                        *out.0.add(b * self.rows + row_idx) = val;
+                    }
                 }
             }
         }
@@ -761,6 +862,7 @@ impl<'a> Model<'a> {
             key_cache,
             value_cache,
             context,
+            threads,
             ..
         } = state;
 
@@ -776,7 +878,7 @@ impl<'a> Model<'a> {
 
             layer
                 .wq
-                .matmul(&xb_batch, &mut q_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut q_batch, n, *threads, workspace)?;
             if let Some(bq) = &layer.bq {
                 for b in 0..n {
                     let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
@@ -787,7 +889,7 @@ impl<'a> Model<'a> {
             }
             layer
                 .wk
-                .matmul(&xb_batch, &mut k_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut k_batch, n, *threads, workspace)?;
             if let Some(bk) = &layer.bk {
                 for b in 0..n {
                     let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
@@ -798,7 +900,7 @@ impl<'a> Model<'a> {
             }
             layer
                 .wv
-                .matmul(&xb_batch, &mut v_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut v_batch, n, *threads, workspace)?;
             if let Some(bv) = &layer.bv {
                 for b in 0..n {
                     let v_tok = &mut v_batch[b * kv_dim..(b + 1) * kv_dim];
@@ -872,7 +974,7 @@ impl<'a> Model<'a> {
 
             layer
                 .wo
-                .matmul(&att_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&att_batch, &mut xb2_batch, n, *threads, workspace)?;
             if let Some(post_attn_norm) = &layer.post_attn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -896,17 +998,17 @@ impl<'a> Model<'a> {
 
             layer
                 .gate
-                .matmul(&xb_batch, &mut hb_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut hb_batch, n, *threads, workspace)?;
             layer
                 .up
-                .matmul(&xb_batch, &mut hb2_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut hb2_batch, n, *threads, workspace)?;
             for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
                 *gate = ops::silu(*gate) * up;
             }
 
             layer
                 .down
-                .matmul(&hb_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&hb_batch, &mut xb2_batch, n, *threads, workspace)?;
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -928,7 +1030,7 @@ impl<'a> Model<'a> {
         let last_xb = &mut xb_batch[..c.embedding];
         ops::rms_norm(last_x, &self.output_norm, c.eps, last_xb);
         self.output
-            .matvec(last_xb, logits, &mut workspace.scratch)?;
+            .matvec_threaded(last_xb, logits, *threads, workspace)?;
         if let Some(cap) = c.final_logit_softcapping {
             for logit in logits.iter_mut() {
                 *logit = cap * (*logit / cap).tanh();
@@ -1009,6 +1111,7 @@ impl<'a> Model<'a> {
             key_cache,
             value_cache,
             context,
+            threads,
             ..
         } = state;
 
@@ -1024,7 +1127,7 @@ impl<'a> Model<'a> {
 
             layer
                 .wq
-                .matmul(&xb_batch, &mut q_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut q_batch, n, *threads, workspace)?;
             if let Some(bq) = &layer.bq {
                 for b in 0..n {
                     let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
@@ -1035,7 +1138,7 @@ impl<'a> Model<'a> {
             }
             layer
                 .wk
-                .matmul(&xb_batch, &mut k_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut k_batch, n, *threads, workspace)?;
             if let Some(bk) = &layer.bk {
                 for b in 0..n {
                     let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
@@ -1046,7 +1149,7 @@ impl<'a> Model<'a> {
             }
             layer
                 .wv
-                .matmul(&xb_batch, &mut v_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut v_batch, n, *threads, workspace)?;
             if let Some(bv) = &layer.bv {
                 for b in 0..n {
                     let v_tok = &mut v_batch[b * kv_dim..(b + 1) * kv_dim];
@@ -1120,7 +1223,7 @@ impl<'a> Model<'a> {
 
             layer
                 .wo
-                .matmul(&att_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&att_batch, &mut xb2_batch, n, *threads, workspace)?;
             if let Some(post_attn_norm) = &layer.post_attn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -1144,17 +1247,17 @@ impl<'a> Model<'a> {
 
             layer
                 .gate
-                .matmul(&xb_batch, &mut hb_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut hb_batch, n, *threads, workspace)?;
             layer
                 .up
-                .matmul(&xb_batch, &mut hb2_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&xb_batch, &mut hb2_batch, n, *threads, workspace)?;
             for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
                 *gate = ops::silu(*gate) * up;
             }
 
             layer
                 .down
-                .matmul(&hb_batch, &mut xb2_batch, n, &mut workspace.scratch)?;
+                .matmul_threaded(&hb_batch, &mut xb2_batch, n, *threads, workspace)?;
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -1178,7 +1281,7 @@ impl<'a> Model<'a> {
         }
 
         self.output
-            .matmul(&xb_batch, all_logits, n, &mut workspace.scratch)?;
+            .matmul_threaded(&xb_batch, all_logits, n, *threads, workspace)?;
 
         if let Some(cap) = c.final_logit_softcapping {
             for logit in all_logits.iter_mut() {
