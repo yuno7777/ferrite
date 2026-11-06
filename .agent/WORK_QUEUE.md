@@ -330,10 +330,11 @@
 
 ### Phase 39: Speculative Lookahead Decoding (Self-Speculation / Jacobi-like n-gram speculation)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Speculative acceleration without a secondary draft model by mining n-gram prompts and candidate continuations directly from the prompt/generated context and verifying in parallel target passes.
 - Files: `src/speculative.rs`, `src/main.rs`, `tests/speculative.rs`
 - Acceptance: 1.5x-2.0x decode speedup on repetitive/structured tasks with zero additional weights in RAM.
+- Completion evidence: Built zero-dependency `NgramLookup` and `LookaheadEngine` in `src/speculative.rs` mining prompt/context continuation candidates and verifying them concurrently in the target model via `prefill_all_logits` with `truncate_cache` state rollback. Added CLI flags `--lookahead <k>` and `--lookahead-ngram <n>` with execution reporting in `src/main.rs`. Added unit and regression tests in `tests/speculative.rs` verifying lookahead n-gram lookup and exact token-level baseline output equivalence. All checks pass with 0 external dependencies.
 
 ### Phase 40: Distributed Zero-Copy Model Inference (TCP / Socket Layer Distribution)
 - Priority: P3

@@ -358,3 +358,181 @@ impl<'a> SpeculativeTreeEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// N-gram candidate miner for self-speculative lookahead decoding.
+///
+/// Mines candidate sequences directly from the prompt and generated context history
+/// without requiring a secondary draft model in memory.
+#[derive(Clone, Debug)]
+pub struct NgramLookup {
+    pub ngram_size: usize,
+    pub max_draft_tokens: usize,
+}
+
+impl NgramLookup {
+    pub fn new(ngram_size: usize, max_draft_tokens: usize) -> Self {
+        Self {
+            ngram_size: ngram_size.clamp(1, 8),
+            max_draft_tokens: max_draft_tokens.max(1),
+        }
+    }
+
+    /// Search `history` for an occurrence of the suffix `history[len-n+1..] + [next_token]`
+    /// and return up to `max_draft_tokens` following that match.
+    pub fn find_candidates(&self, history: &[u32], next_token: u32) -> Vec<u32> {
+        let mut query = Vec::with_capacity(self.ngram_size);
+        let prefix_len = self.ngram_size.saturating_sub(1);
+        if history.len() >= prefix_len && prefix_len > 0 {
+            query.extend_from_slice(&history[history.len() - prefix_len..]);
+        }
+        query.push(next_token);
+
+        let q_len = query.len();
+        if history.len() < q_len {
+            return Vec::new();
+        }
+
+        // Search backward for the most recent prior occurrence of `query` in `history`
+        let search_limit = history.len().saturating_sub(prefix_len);
+        for i in (0..search_limit).rev() {
+            if i + q_len <= history.len() && history[i..i + q_len] == query[..] {
+                let cand_start = i + q_len;
+                let cand_end = (cand_start + self.max_draft_tokens).min(history.len());
+                if cand_start < cand_end {
+                    return history[cand_start..cand_end].to_vec();
+                }
+            }
+        }
+
+        // Fallback: match single `next_token` earlier
+        if q_len > 1 {
+            for i in (0..history.len()).rev() {
+                if history[i] == next_token {
+                    let cand_start = i + 1;
+                    let cand_end = (cand_start + self.max_draft_tokens).min(history.len());
+                    if cand_start < cand_end {
+                        return history[cand_start..cand_end].to_vec();
+                    }
+                }
+            }
+        }
+
+        Vec::new()
+    }
+}
+
+/// Speculative lookahead decoding engine using n-gram self-speculation.
+///
+/// Mines candidate continuation tokens directly from generation history, verifies
+/// them in parallel in the target model via batched GEMM prefill, and rolls back
+/// any mispredictions with `truncate_cache`. Requires zero additional weights in memory.
+pub struct LookaheadEngine<'a> {
+    pub model: &'a Model<'a>,
+    pub lookup: NgramLookup,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> LookaheadEngine<'a> {
+    pub fn new(model: &'a Model<'a>, ngram_size: usize, max_draft_tokens: usize) -> Self {
+        Self {
+            model,
+            lookup: NgramLookup::new(ngram_size, max_draft_tokens),
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Perform one lookahead decoding step.
+    ///
+    /// - `state`: KV-cache and state for target model.
+    /// - `history`: sequence tokens up to `position`.
+    /// - `position`: current sequence position.
+    /// - `sampler`: token sampler.
+    ///
+    /// Returns the vector of accepted / emitted tokens (at least 1 token is always produced).
+    pub fn step(
+        &mut self,
+        state: &mut State,
+        history: &[u32],
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut state.logits);
+        let mut emitted = vec![first_tok];
+
+        let max_k = self
+            .lookup
+            .max_draft_tokens
+            .min(state.context().saturating_sub(position + 2));
+
+        if max_k == 0 {
+            self.model.forward(state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        let candidates = self.lookup.find_candidates(history, first_tok);
+        let candidates = if candidates.len() > max_k {
+            &candidates[..max_k]
+        } else {
+            &candidates[..]
+        };
+
+        if candidates.is_empty() {
+            self.model.forward(state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        self.stats.proposed += candidates.len();
+
+        let mut target_batch = Vec::with_capacity(1 + candidates.len());
+        target_batch.push(first_tok);
+        target_batch.extend_from_slice(candidates);
+
+        let vocab = self.model.config.vocab;
+        let mut target_all_logits = vec![0.0f32; target_batch.len() * vocab];
+
+        self.model
+            .prefill_all_logits(state, &target_batch, position, &mut target_all_logits)?;
+        self.stats.target_batches += 1;
+
+        let mut accepted_count = 0;
+        let total_drafted = candidates.len();
+
+        for i in 0..total_drafted {
+            let target_tok_logits = &mut target_all_logits[i * vocab..(i + 1) * vocab];
+            let target_pred = sampler.sample(target_tok_logits);
+
+            if target_pred == candidates[i] {
+                emitted.push(candidates[i]);
+                accepted_count += 1;
+            } else {
+                emitted.push(target_pred);
+                break;
+            }
+        }
+
+        self.stats.accepted += accepted_count;
+
+        if accepted_count < total_drafted {
+            let accepted_total = emitted.len();
+            let rollback_from = position + accepted_total;
+            let rollback_to = position + target_batch.len();
+
+            state.truncate_cache(&self.model.config, rollback_from, rollback_to);
+
+            let corrective_pos = position + accepted_total - 1;
+            let corrective_tok = emitted[accepted_total - 1];
+            self.model.forward(state, corrective_tok, corrective_pos)?;
+        } else {
+            let last_logits =
+                &target_all_logits[total_drafted * vocab..(total_drafted + 1) * vocab];
+            state.set_logits(last_logits);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}

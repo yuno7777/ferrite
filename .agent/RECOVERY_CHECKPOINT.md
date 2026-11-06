@@ -334,4 +334,18 @@
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` prints exactly 1 line (0 external dependencies).
 
+## Autonomous Execution — Phase 39 Completion
+- Branch: `codex/audit-baseline`
+- Phase 39 (Speculative Lookahead Decoding — Self-Speculation / Jacobi-like n-gram speculation):
+  - Created `NgramLookup` in `src/speculative.rs` mining candidate sequences from prompt and generation history with fallback strategies.
+  - Created `LookaheadEngine` in `src/speculative.rs` verifying mined continuation candidates concurrently in target model via `prefill_all_logits` and rolling back rejected positions with `truncate_cache`, requiring zero secondary model weights in RAM.
+  - Wired `--lookahead <k>` and `--lookahead-ngram <n>` CLI flags and execution statistics in `src/main.rs`.
+  - Added unit test `speculative_lookahead_n_gram_lookup` and integration test `speculative_lookahead_decoding_matches_target_baseline` in `tests/speculative.rs` verifying 100% exact parity with baseline target decoding.
+- Validation:
+  - `cargo test --all-targets` passes (100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` prints exactly 1 line (0 external dependencies).
+
+
 

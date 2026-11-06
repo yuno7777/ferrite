@@ -366,3 +366,88 @@ fn speculative_tree_drafting_matches_target_baseline() {
     fs::remove_file(target_path).ok();
     fs::remove_file(draft_path).ok();
 }
+
+#[test]
+fn speculative_lookahead_n_gram_lookup() {
+    let lookup = ferrite::speculative::NgramLookup::new(2, 3);
+    // History with repetitive pattern: [1, 2, 3, 4, 1, 2, 3, 4]
+    let history = vec![1, 2, 3, 4, 1, 2, 3, 4];
+    // Suffix query: history ends with 4. If next_token is 1, ngram [4, 1] appeared at index [3, 4]
+    // The tokens following [3, 4] were [2, 3, 4]
+    let candidates = lookup.find_candidates(&history, 1);
+    assert_eq!(candidates, vec![2, 3, 4]);
+
+    // Test with novel token that only appears once earlier
+    let history2 = vec![0, 1, 2, 3, 0];
+    let candidates2 = lookup.find_candidates(&history2, 1);
+    assert_eq!(candidates2, vec![2, 3, 0]);
+}
+
+#[test]
+fn speculative_lookahead_decoding_matches_target_baseline() {
+    let target_path = make_model_fixture("target_lookahead", 0.0);
+    let target_gguf = Gguf::open(&target_path).expect("open target");
+    let target_model = Model::load(&target_gguf).expect("load target");
+
+    // Prompt with a repeating token structure to allow lookahead draft matches
+    let prompt = vec![0u32, 1, 2, 0, 1];
+    let total_to_generate = 8;
+
+    // 1. Direct autoregressive baseline from target model
+    let mut baseline_state = State::new(&target_model.config);
+    target_model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill target");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        target_model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. Lookahead self-speculation (zero additional weights in RAM)
+    let mut lookahead_state = State::new(&target_model.config);
+    target_model
+        .prefill(&mut lookahead_state, &prompt, 0)
+        .expect("prefill target");
+
+    let mut lookahead_engine = ferrite::speculative::LookaheadEngine::new(
+        &target_model,
+        2, // ngram_size
+        3, // max_draft_tokens
+    );
+    let mut lookahead_tokens = Vec::new();
+    let mut lookahead_sampler = Sampler::greedy();
+    let mut lookahead_pos = prompt.len();
+    let mut history = prompt.clone();
+
+    while lookahead_tokens.len() < total_to_generate {
+        let emitted = lookahead_engine
+            .step(
+                &mut lookahead_state,
+                &history,
+                lookahead_pos,
+                &mut lookahead_sampler,
+            )
+            .expect("lookahead step");
+        lookahead_pos += emitted.len();
+        history.extend(&emitted);
+        lookahead_tokens.extend(emitted);
+    }
+    lookahead_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        lookahead_tokens, baseline_tokens,
+        "lookahead decoding must strictly match target model baseline"
+    );
+    assert!(lookahead_engine.stats.total_emitted >= total_to_generate);
+
+    fs::remove_file(target_path).ok();
+}

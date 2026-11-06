@@ -616,6 +616,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     };
     let spec_k: usize = flag(args, "--spec-k", 3)?;
     let spec_tree: usize = flag(args, "--spec-tree", 0)?;
+    let lookahead: usize = flag(args, "--lookahead", 0)?;
+    let lookahead_ngram: usize = flag(args, "--lookahead-ngram", 3)?;
     let chunk_size: usize = flag(args, "--chunk-size", 512)?;
     let kv_cache: ferrite::kv::KvCacheType =
         flag(args, "--kv-cache", ferrite::kv::KvCacheType::F32)?;
@@ -643,6 +645,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--draft",
         "--spec-k",
         "--spec-tree",
+        "--lookahead",
+        "--lookahead-ngram",
         "--lora",
         "--chunk-size",
         "--kv-cache",
@@ -852,6 +856,47 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
             generated as f64 / decode.as_secs_f64().max(1e-9),
             acc_rate * 100.0,
             tok_per_batch,
+        );
+    } else if lookahead > 0 {
+        let mut engine =
+            ferrite::speculative::LookaheadEngine::new(&model, lookahead_ngram, lookahead);
+        let mut token_history = prompt_tokens.clone();
+        while generated < limit && position < state.context() {
+            let emitted = engine.step(&mut state, &token_history, position, &mut sampler)?;
+            let mut stopped = false;
+            for token in emitted {
+                if Some(token) == tokenizer.eos {
+                    stopped = true;
+                    break;
+                }
+                token_history.push(token);
+                pending.extend(tokenizer.piece(token));
+                if let Ok(text) = std::str::from_utf8(&pending) {
+                    print!("{text}");
+                    stdout.flush().ok();
+                    pending.clear();
+                }
+                position += 1;
+                generated += 1;
+                if generated >= limit || position >= state.context() {
+                    stopped = true;
+                    break;
+                }
+            }
+            if stopped {
+                break;
+            }
+        }
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s) · lookahead acceptance rate {:.1}% ({:.2} tok/target-step)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+            engine.stats.acceptance_rate() * 100.0,
+            engine.stats.tokens_per_batch(),
         );
     } else {
         let mut token_history = prompt_tokens.clone();
