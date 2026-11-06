@@ -409,6 +409,88 @@ pub fn matmul(matrix: &[f32], x: &[f32], out: &mut [f32], batch: usize) {
     }
 }
 
+/// Dynamically quantizes an activation vector to signed INT8 with symmetric scaling.
+pub fn quantize_int8_dynamic(x: &[f32], q_out: &mut [i8]) -> f32 {
+    debug_assert_eq!(x.len(), q_out.len());
+    let mut max_abs = 0.0f32;
+    for &val in x {
+        let abs = val.abs();
+        if abs > max_abs {
+            max_abs = abs;
+        }
+    }
+    if max_abs == 0.0 {
+        q_out.fill(0);
+        return 0.0;
+    }
+    let scale = max_abs / 127.0;
+    let inv_scale = 127.0 / max_abs;
+    for (src, dst) in x.iter().zip(q_out.iter_mut()) {
+        let q = (*src * inv_scale).round().clamp(-128.0, 127.0) as i8;
+        *dst = q;
+    }
+    scale
+}
+
+/// Evaluates integer dot product between two signed INT8 slices using 4-lane 32-bit accumulation.
+pub fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut acc = [0i32; 4];
+    for (chunk_a, chunk_b) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        acc[0] += (chunk_a[0] as i32) * (chunk_b[0] as i32);
+        acc[1] += (chunk_a[1] as i32) * (chunk_b[1] as i32);
+        acc[2] += (chunk_a[2] as i32) * (chunk_b[2] as i32);
+        acc[3] += (chunk_a[3] as i32) * (chunk_b[3] as i32);
+    }
+    let full = a.len() - (a.len() % 4);
+    let mut tail = 0i32;
+    for (x, y) in a[full..].iter().zip(&b[full..]) {
+        tail += (*x as i32) * (*y as i32);
+    }
+    acc[0] + acc[1] + acc[2] + acc[3] + tail
+}
+
+/// High-performance dynamic INT8 fused matrix-matrix multiplication (GEMM) for batched prefill.
+///
+/// Multiplies weight matrix `w_q` (INT8 with per-row scales `w_scales`) by activation batch `x` (F32),
+/// writing the result to `out` with shape `[batch, rows]`.
+pub fn gemm_int8_fused(
+    w_q: &[i8],
+    w_scales: &[f32],
+    x: &[f32],
+    out: &mut [f32],
+    rows: usize,
+    cols: usize,
+    batch: usize,
+) {
+    if batch == 0 || rows == 0 || cols == 0 {
+        return;
+    }
+    debug_assert_eq!(w_q.len(), rows * cols);
+    debug_assert_eq!(w_scales.len(), rows);
+    debug_assert_eq!(x.len(), batch * cols);
+    debug_assert_eq!(out.len(), batch * rows);
+
+    let mut q_x = vec![0i8; batch * cols];
+    let mut x_scales = vec![0.0f32; batch];
+
+    for b in 0..batch {
+        let x_slice = &x[b * cols..(b + 1) * cols];
+        let q_slice = &mut q_x[b * cols..(b + 1) * cols];
+        x_scales[b] = quantize_int8_dynamic(x_slice, q_slice);
+    }
+
+    for (r, w_row) in w_q.chunks_exact(cols).enumerate() {
+        let w_scale = w_scales[r];
+        for b in 0..batch {
+            let x_tok = &q_x[b * cols..(b + 1) * cols];
+            let i32_dot = dot_i8(w_row, x_tok);
+            let combined_scale = w_scale * x_scales[b];
+            out[b * rows + r] = (i32_dot as f32) * combined_scale;
+        }
+    }
+}
+
 /// Plain dot product, accumulated in four lanes.
 ///
 /// The lanes exist so the compiler can vectorize: a single accumulator forces a
@@ -1291,5 +1373,57 @@ mod tests {
         let mut v5 = [1.0; 8];
         cache.apply(&mut v5, 10, RoPEType::Normal);
         assert_eq!(v3, v5);
+    }
+
+    #[test]
+    fn gemm_int8_fused_agrees_with_float_reference() {
+        let rows = 4;
+        let cols = 8;
+        let batch = 3;
+
+        // Weights: signed int8 values and per-row scales
+        let mut w_q = vec![0i8; rows * cols];
+        for (i, val) in w_q.iter_mut().enumerate() {
+            *val = ((i as i32 * 17) % 255 - 127) as i8;
+        }
+        let w_scales = vec![0.02f32, 0.05f32, 0.01f32, 0.03f32];
+
+        // Dequantize weights to float for reference matmul
+        let mut w_f32 = vec![0.0f32; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                w_f32[r * cols + c] = (w_q[r * cols + c] as f32) * w_scales[r];
+            }
+        }
+
+        // Activations: float values
+        let mut x = vec![0.0f32; batch * cols];
+        for b in 0..batch {
+            for c in 0..cols {
+                x[b * cols + c] = ((b as f32 + 1.0) * 0.3) + ((c as f32) * 0.1) - 0.4;
+            }
+        }
+
+        let mut expected = vec![0.0f32; batch * rows];
+        matmul(&w_f32, &x, &mut expected, batch);
+
+        let mut actual = vec![0.0f32; batch * rows];
+        gemm_int8_fused(&w_q, &w_scales, &x, &mut actual, rows, cols, batch);
+
+        // Dynamic int8 quantization error is bounded by quantization step size
+        for b in 0..batch {
+            for r in 0..rows {
+                let diff = (expected[b * rows + r] - actual[b * rows + r]).abs();
+                let mag = expected[b * rows + r].abs().max(1.0);
+                let rel_err = diff / mag;
+                assert!(
+                    rel_err < 0.08,
+                    "batch {b}, row {r}: expected {}, got {}, rel_err {}",
+                    expected[b * rows + r],
+                    actual[b * rows + r],
+                    rel_err
+                );
+            }
+        }
     }
 }
