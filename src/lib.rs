@@ -13,6 +13,7 @@
 
 pub mod convert;
 pub mod distributed;
+pub mod dualpipe;
 pub mod edit;
 pub mod embed;
 pub mod eval;
@@ -44,6 +45,9 @@ pub mod tp;
 pub mod vision;
 
 pub use convert::{convert_safetensors_to_gguf, JsonValue, SafeTensorsHeader};
+pub use dualpipe::{
+    DualPipeDirection, DualPipeEngine, DualPipeOp, DualPipeSchedule, DualPipeStep, LayerPartition,
+};
 pub use edit::GgufEditor;
 pub use embed::{cosine_similarity, l2_normalize, pool, EmbedEngine, Pooling};
 pub use eval::{cross_entropy_loss, ChunkPerplexity, PerplexityEvaluator, PerplexityReport};
