@@ -363,7 +363,7 @@
 - Status: IN_PROGRESS
 - Rationale: DeepSeek-V2 and DeepSeek-V3 employ Multi-Head Latent Attention (MLA), which compresses KV cache into a low-dimensional latent vector $c^{KV}$ and decouples RoPE. Implementing MLA reduces KV cache memory consumption by 5-10x for long-context models.
 - Files: `src/model.rs`, `src/kv.rs`, `tests/model.rs`
-- Progress: Added MLA GGUF rank/dimension metadata fields to `Config`, optional MLA projection tensor bindings, and F32 KV-cache support for independent key/value row widths, with an attention regression test. Remaining work: implement compressed latent-cache attention across decode, prefill, paged execution, and supported cache formats.
+- Progress: MLA projection and decode/prefill parity paths exist in `Model::forward` and `Model::prefill_embeddings`, but they reconstruct full per-head K/V vectors and store those in the ordinary KV cache. This does not yet provide the advertised latent-cache memory reduction. Current tests cover numerical parity and asymmetric F32 K/V widths, but do not measure MLA cache footprint. Quantized cache allocation still requires equal K/V widths, and paged execution has no compressed latent representation. Keep this item `IN_PROGRESS` until latent K/V storage and attention are implemented across decode, prefill, paged sequences, and supported cache formats; add memory-footprint and numerical parity tests.
 
 ### Phase 43: Dynamic Intra-Node Multi-Threaded Tensor Parallelism (TP / Row-Column Sharding)
 - Priority: P2
@@ -421,14 +421,20 @@
 - Existing `.agent/maintenance.log` modifications were preserved. `src/quant/quantize.rs` also appeared modified during the run; its unrelated `pub(crate)` change was preserved.
 
 ## Phase 42: DeepSeek Multi-Head Latent Attention (MLA)
-- Status: COMPLETED
-- Rationale: High-performance low-rank KV compression and decoupled rotary key architecture for DeepSeek-V2/V3/R1.
-- Implemented asymmetric F32 KV-cache storage, online attention with decoupled key/value head dimensions, MLA projection layer weights, and bit-identical batched prefill vs decode paths.
-- Integration test `deepseek_mla_forward_and_prefill_match` passed with zero external dependencies and zero warnings.
+- Status: SUPERSEDED — PARTIAL IMPLEMENTATION; see active Phase 42 above.
+- Implemented low-rank KV projections and decode/prefill parity, but expanded K/V are still stored in the ordinary cache. This does not deliver latent-cache compression, so Phase 42 remains `IN_PROGRESS`.
+- Integration test `deepseek_mla_forward_and_prefill_match` covers numerical parity; compressed-cache memory footprint and latent-cache attention remain unimplemented.
 
 ## Phase 43: Multimodal Rotary Position Embedding (M-RoPE) for Qwen2-VL
 - Status: COMPLETED
 - Rationale: Multi-axis 3D spatio-temporal rotary embeddings for Qwen2-VL vision-language models.
 - Implemented `ops::mrope`, GGUF metadata `dimension_sections` parsing, Neox/Normal pair layouts, and end-to-end forward/prefill numerical parity verification in `tests/model.rs`.
+
+## Phase 44: DeepSeek-V3 Multi-Token Prediction (MTP) Speculative Decoding Engine
+- Status: COMPLETED
+- Rationale: DeepSeek-V3 native Multi-Token Prediction (MTP / Next-N) module support and self-contained speculative decoding engine.
+- Implemented `Config::nextn_predict_layers` GGUF parsing, extended KV-cache layer sizing for MTP module depth, `MtpModule` weight binding, `Model::forward_mtp`, and `MtpEngine` speculative decoding in `src/speculative.rs` and CLI `--mtp` in `src/main.rs`.
+- Validated with end-to-end integration tests `mtp_speculative_decoding_matches_baseline_forward` (100% acceptance parity) and `mtp_rejection_recovery_matches_baseline_forward` (rollback and corrective recovery with exact baseline fidelity) with 0 external dependencies and 0 warnings.
+
 
 

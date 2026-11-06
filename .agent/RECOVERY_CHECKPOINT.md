@@ -1,5 +1,16 @@
 # Recovery Checkpoint
 
+## Maintenance Run — Phase 44 — 2026-11-06
+- Implemented Phase 44: DeepSeek-V3 Multi-Token Prediction (MTP) Speculative Decoding Engine.
+- Added `nextn_predict_layers` support to `Config` with GGUF architecture metadata parsing.
+- Extended `State::with_kv_cache` layer allocation (`layers + nextn_predict_layers`) and added `final_hidden_state()` getter.
+- Added `MtpModule` representing DeepSeek-V3 next-n prediction module weights (`eh_proj`, `enorm`, `hnorm`, `shared_head_norm`, `shared_head_head`, and `Layer`).
+- Factored out modular `Model::forward_layer` and implemented `Model::forward_mtp`.
+- Implemented `MtpEngine` in `src/speculative.rs` managing self-speculative draft generation and batched prefill verification with automatic rollback.
+- Added CLI `--mtp` support in `src/main.rs`.
+- Added end-to-end integration tests in `tests/speculative.rs`: `mtp_speculative_decoding_matches_baseline_forward` (100% acceptance parity) and `mtp_rejection_recovery_matches_baseline_forward` (corrective recovery from divergent drafts).
+- Quality gates passed: `cargo tree` = 1 line (0 external deps), `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings` clean, 100% test pass rate across all 16 test targets (189 tests).
+
 ## Maintenance Run — Phase 43 — 2026-11-06
 - Implemented Phase 43: Multimodal Rotary Position Embedding (M-RoPE) for Qwen2-VL.
 - Added `ops::mrope` and `ops::RoPEType` supporting both half-split Neox and adjacent Normal coordinate-partitioned rotary rotations.
@@ -10,14 +21,26 @@
 - Quality gates passed: `cargo tree` = 1 line (0 external deps), `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings` clean, 100% test pass rate across all 16 test targets.
 
 ## Maintenance Run — Phase 42 — 2026-11-06
-- Implemented Phase 42: DeepSeek Multi-Head Latent Attention (MLA) Architecture.
+- Partial implementation of Phase 42: DeepSeek Multi-Head Latent Attention (MLA) Architecture. Queue status remains `IN_PROGRESS`; current execution expands K/V projections before caching and therefore does not yet meet the compressed-cache memory reduction acceptance criterion.
 - Updated `ops::AttentionParams` with `v_row_width` and `v_offset` to support asymmetric query/value head projections ($d_q \ne d_v$).
 - Extended `KvCache` with `new_asymmetric` and updated F32 cache storage, online attention, and truncation for distinct key ($d_k$) and value ($d_v$) dimensions.
 - Extended `Config` with MLA fields (`q_lora_rank`, `kv_lora_rank`, `qk_nope_head_dim`, `qk_rope_head_dim`, `v_head_dim`) and updated GGUF loader to allow decoupled `heads * head_dim != embedding` for DeepSeek.
 - Added MLA projection weights (`attn_q_a`, `attn_q_a_norm`, `attn_q_b`, `attn_kv_a`, `attn_kv_a_norm`, `attn_kv_b`) to `Layer`.
-- Implemented low-rank compressed KV latent projection and decoupled rotary positional key ($k_t^R$) in `Model::forward` and `Model::prefill_embeddings`.
+- Implemented low-rank KV projection and decoupled rotary positional key ($k_t^R$) in `Model::forward` and `Model::prefill_embeddings`; the latent is expanded through `attn_kv_b` before cache storage.
 - Added integration test `deepseek_mla_forward_and_prefill_match` in `tests/model.rs` confirming bit-exact parity between sequential decode and batched prefill under MLA.
-- Quality gates passed: `cargo tree` = 1 line (0 external deps), `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings` clean, 100% test pass rate across all 16 test targets.
+- Baseline quality gates passed at implementation time. Current maintenance run on 2026-11-06: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` passed.
+
+## Maintenance Run — 2026-11-06T07:34:00Z
+- Selected Phase 42, the highest-priority queue item marked `QUEUED` or `IN_PROGRESS` (P2, `IN_PROGRESS`). Inspected the committed implementation and confirmed that it performs MLA projection but stores expanded K/V vectors, so compressed latent KV caching is still outstanding.
+- Corrected the queue progress and this checkpoint to distinguish projection support from compressed-cache completion. The phase remains `IN_PROGRESS`; latent-cache attention, paged integration, and quantized cache support still need implementation and dedicated tests.
+- Validation passed on the current source tree: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+- Existing `.agent/maintenance.log` worktree modifications were preserved. No source or test files were changed in this maintenance run.
+
+## Maintenance Run — 2026-11-06T08:05:59Z
+- Re-inspected the worktree, queue, and checkpoint. Phase 42 remains the highest-priority task marked `QUEUED` or `IN_PROGRESS` (P2, `IN_PROGRESS`).
+- Confirmed the current MLA path still expands per-head K/V before storing to `KvCache`; compressed latent attention is not implemented, so the queue status and acceptance scope remain open. Updated the queue notes to record existing parity/asymmetric-width coverage and the missing memory-footprint regression.
+- Validation on the current source tree passed: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+- No implementation files were changed. Pre-existing `.agent/maintenance.log` modifications were preserved.
 
 ## Maintenance Run — Phase 41 — 2026-11-06
 - Implemented Phase 41: Multi-Modal Vision-Language Projection Engine (CLIP / SigLIP / ViT).

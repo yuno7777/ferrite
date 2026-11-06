@@ -59,6 +59,7 @@ pub struct Config {
     pub qk_rope_head_dim: Option<usize>,
     pub v_head_dim: Option<usize>,
     pub mrope_sections: Option<[usize; 4]>,
+    pub nextn_predict_layers: Option<usize>,
 }
 
 impl Config {
@@ -260,6 +261,10 @@ impl Config {
                     }
                     secs
                 }),
+            nextn_predict_layers: model
+                .arch_u64("nextn_predict_layers")
+                .or_else(|| model.meta_u64("nextn_predict_layers"))
+                .map(|v| v as usize),
         })
     }
 
@@ -820,12 +825,143 @@ impl<'a> Layer<'a> {
         }
         Ok(())
     }
+    pub fn bind(gguf: &'a Gguf, config: &Config, index: usize) -> Result<Self> {
+        Ok(Self {
+            attn_norm: load_vector(gguf, &format!("blk.{index}.attn_norm.weight"))?,
+            post_attn_norm: load_vector_optional(
+                gguf,
+                &format!("blk.{index}.post_attention_norm.weight"),
+            )?,
+            wq: Weight::bind(gguf, &format!("blk.{index}.attn_q.weight"))
+                .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
+            bq: load_vector_optional(gguf, &format!("blk.{index}.attn_q.bias"))?,
+            lora_wq: None,
+            wk: Weight::bind(gguf, &format!("blk.{index}.attn_k.weight"))
+                .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
+            bk: load_vector_optional(gguf, &format!("blk.{index}.attn_k.bias"))?,
+            lora_wk: None,
+            wv: Weight::bind(gguf, &format!("blk.{index}.attn_v.weight"))
+                .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
+            bv: load_vector_optional(gguf, &format!("blk.{index}.attn_v.bias"))?,
+            lora_wv: None,
+            wo: Weight::bind(gguf, &format!("blk.{index}.attn_output.weight"))?,
+            lora_wo: None,
+            ffn_norm: load_vector(gguf, &format!("blk.{index}.ffn_norm.weight"))?,
+            post_ffn_norm: load_vector_optional(
+                gguf,
+                &format!("blk.{index}.post_ffn_norm.weight"),
+            )?,
+            gate: Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))
+                .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
+            lora_gate: None,
+            up: Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))
+                .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
+            lora_up: None,
+            down: Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))
+                .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
+            lora_down: None,
+            ffn_gate_inp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_inp.weight")).ok(),
+            moe_gate: if let Some(n_exp) = config.expert_count {
+                let mut gates = Vec::with_capacity(n_exp);
+                for exp in 0..n_exp {
+                    if let Ok(w) = Weight::bind(gguf, &format!("blk.{index}.ffn_gate.{exp}.weight"))
+                    {
+                        gates.push(w);
+                    } else if let Ok(w) =
+                        Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))
+                    {
+                        gates.push(w);
+                    }
+                }
+                if gates.len() == n_exp {
+                    Some(gates)
+                } else {
+                    None
+                }
+            } else {
+                None
+            },
+            moe_up: if let Some(n_exp) = config.expert_count {
+                let mut ups = Vec::with_capacity(n_exp);
+                for exp in 0..n_exp {
+                    if let Ok(w) = Weight::bind(gguf, &format!("blk.{index}.ffn_up.{exp}.weight")) {
+                        ups.push(w);
+                    } else if let Ok(w) = Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))
+                    {
+                        ups.push(w);
+                    }
+                }
+                if ups.len() == n_exp {
+                    Some(ups)
+                } else {
+                    None
+                }
+            } else {
+                None
+            },
+            moe_down: if let Some(n_exp) = config.expert_count {
+                let mut downs = Vec::with_capacity(n_exp);
+                for exp in 0..n_exp {
+                    if let Ok(w) = Weight::bind(gguf, &format!("blk.{index}.ffn_down.{exp}.weight"))
+                    {
+                        downs.push(w);
+                    } else if let Ok(w) =
+                        Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))
+                    {
+                        downs.push(w);
+                    }
+                }
+                if downs.len() == n_exp {
+                    Some(downs)
+                } else {
+                    None
+                }
+            } else {
+                None
+            },
+            moe_gate_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_shexp.weight"))
+                .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_gate.shexp.weight")))
+                .ok(),
+            moe_up_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_up_shexp.weight"))
+                .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_up.shexp.weight")))
+                .ok(),
+            moe_down_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_down_shexp.weight"))
+                .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_down.shexp.weight")))
+                .ok(),
+            attn_q_a: Weight::bind(gguf, &format!("blk.{index}.attn_q_a.weight")).ok(),
+            attn_q_a_norm: load_vector_optional(
+                gguf,
+                &format!("blk.{index}.attn_q_a_norm.weight"),
+            )?,
+            attn_q_b: Weight::bind(gguf, &format!("blk.{index}.attn_q_b.weight")).ok(),
+            attn_kv_a: Weight::bind(gguf, &format!("blk.{index}.attn_kv_a.weight")).ok(),
+            attn_kv_a_norm: load_vector_optional(
+                gguf,
+                &format!("blk.{index}.attn_kv_a_norm.weight"),
+            )?,
+            attn_kv_b: Weight::bind(gguf, &format!("blk.{index}.attn_kv_b.weight")).ok(),
+        })
+    }
+}
+
+/// Multi-Token Prediction (MTP) module for DeepSeek-V3 architectures.
+///
+/// Projects the concatenated representation of the trunk hidden state and token embedding
+/// through an MTP transformer layer to predict subsequent speculative tokens.
+pub struct MtpModule<'a> {
+    pub eh_proj: Weight<'a>,
+    pub enorm: Vec<f32>,
+    pub hnorm: Vec<f32>,
+    pub layer: Layer<'a>,
+    pub shared_head_norm: Vec<f32>,
+    pub shared_head_head: Option<Weight<'a>>,
 }
 
 pub struct Model<'a> {
     pub config: Config,
     pub token_embd: Weight<'a>,
     pub layers: Vec<Layer<'a>>,
+    pub mtp_module: Option<MtpModule<'a>>,
     pub output_norm: Vec<f32>,
     pub output: Weight<'a>,
     pub lora_output: Option<crate::lora::LoraPair<'a>>,
@@ -854,127 +990,35 @@ impl<'a> Model<'a> {
 
         let mut layers = Vec::with_capacity(config.layers);
         for index in 0..config.layers {
-            layers.push(Layer {
-                attn_norm: load_vector(gguf, &format!("blk.{index}.attn_norm.weight"))?,
-                post_attn_norm: load_vector_optional(
-                    gguf,
-                    &format!("blk.{index}.post_attention_norm.weight"),
-                )?,
-                wq: Weight::bind(gguf, &format!("blk.{index}.attn_q.weight"))
-                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
-                bq: load_vector_optional(gguf, &format!("blk.{index}.attn_q.bias"))?,
-                lora_wq: None,
-                wk: Weight::bind(gguf, &format!("blk.{index}.attn_k.weight"))
-                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
-                bk: load_vector_optional(gguf, &format!("blk.{index}.attn_k.bias"))?,
-                lora_wk: None,
-                wv: Weight::bind(gguf, &format!("blk.{index}.attn_v.weight"))
-                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
-                bv: load_vector_optional(gguf, &format!("blk.{index}.attn_v.bias"))?,
-                lora_wv: None,
-                wo: Weight::bind(gguf, &format!("blk.{index}.attn_output.weight"))?,
-                lora_wo: None,
-                ffn_norm: load_vector(gguf, &format!("blk.{index}.ffn_norm.weight"))?,
-                post_ffn_norm: load_vector_optional(
-                    gguf,
-                    &format!("blk.{index}.post_ffn_norm.weight"),
-                )?,
-                gate: Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))
-                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
-                lora_gate: None,
-                up: Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))
-                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
-                lora_up: None,
-                down: Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))
-                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
-                lora_down: None,
-                ffn_gate_inp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_inp.weight")).ok(),
-                moe_gate: if let Some(n_exp) = config.expert_count {
-                    let mut gates = Vec::with_capacity(n_exp);
-                    for exp in 0..n_exp {
-                        if let Ok(w) =
-                            Weight::bind(gguf, &format!("blk.{index}.ffn_gate.{exp}.weight"))
-                        {
-                            gates.push(w);
-                        } else if let Ok(w) =
-                            Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))
-                        {
-                            gates.push(w);
-                        }
-                    }
-                    if gates.len() == n_exp {
-                        Some(gates)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                },
-                moe_up: if let Some(n_exp) = config.expert_count {
-                    let mut ups = Vec::with_capacity(n_exp);
-                    for exp in 0..n_exp {
-                        if let Ok(w) =
-                            Weight::bind(gguf, &format!("blk.{index}.ffn_up.{exp}.weight"))
-                        {
-                            ups.push(w);
-                        } else if let Ok(w) =
-                            Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))
-                        {
-                            ups.push(w);
-                        }
-                    }
-                    if ups.len() == n_exp {
-                        Some(ups)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                },
-                moe_down: if let Some(n_exp) = config.expert_count {
-                    let mut downs = Vec::with_capacity(n_exp);
-                    for exp in 0..n_exp {
-                        if let Ok(w) =
-                            Weight::bind(gguf, &format!("blk.{index}.ffn_down.{exp}.weight"))
-                        {
-                            downs.push(w);
-                        } else if let Ok(w) =
-                            Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))
-                        {
-                            downs.push(w);
-                        }
-                    }
-                    if downs.len() == n_exp {
-                        Some(downs)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                },
-                moe_gate_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_shexp.weight"))
-                    .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_gate.shexp.weight")))
-                    .ok(),
-                moe_up_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_up_shexp.weight"))
-                    .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_up.shexp.weight")))
-                    .ok(),
-                moe_down_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_down_shexp.weight"))
-                    .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_down.shexp.weight")))
-                    .ok(),
-                attn_q_a: Weight::bind(gguf, &format!("blk.{index}.attn_q_a.weight")).ok(),
-                attn_q_a_norm: load_vector_optional(
-                    gguf,
-                    &format!("blk.{index}.attn_q_a_norm.weight"),
-                )?,
-                attn_q_b: Weight::bind(gguf, &format!("blk.{index}.attn_q_b.weight")).ok(),
-                attn_kv_a: Weight::bind(gguf, &format!("blk.{index}.attn_kv_a.weight")).ok(),
-                attn_kv_a_norm: load_vector_optional(
-                    gguf,
-                    &format!("blk.{index}.attn_kv_a_norm.weight"),
-                )?,
-                attn_kv_b: Weight::bind(gguf, &format!("blk.{index}.attn_kv_b.weight")).ok(),
-            });
+            layers.push(Layer::bind(gguf, &config, index)?);
         }
+
+        let mtp_module = if let Ok(eh_proj) =
+            Weight::bind(gguf, &format!("blk.{}.nextn.eh_proj.weight", config.layers))
+        {
+            let enorm = load_vector(gguf, &format!("blk.{}.nextn.enorm.weight", config.layers))?;
+            let hnorm = load_vector(gguf, &format!("blk.{}.nextn.hnorm.weight", config.layers))?;
+            let shared_head_norm = load_vector(
+                gguf,
+                &format!("blk.{}.nextn.shared_head_norm.weight", config.layers),
+            )?;
+            let shared_head_head = Weight::bind(
+                gguf,
+                &format!("blk.{}.nextn.shared_head_head.weight", config.layers),
+            )
+            .ok();
+            let layer = Layer::bind(gguf, &config, config.layers)?;
+            Some(MtpModule {
+                eh_proj,
+                enorm,
+                hnorm,
+                layer,
+                shared_head_norm,
+                shared_head_head,
+            })
+        } else {
+            None
+        };
 
         // Small models tie the output projection to the embedding table and
         // omit output.weight entirely.
@@ -987,6 +1031,7 @@ impl<'a> Model<'a> {
             config,
             token_embd,
             layers,
+            mtp_module,
             output_norm: load_vector(gguf, "output_norm.weight")?,
             output,
             lora_output: None,
@@ -1072,8 +1117,6 @@ impl<'a> Model<'a> {
             ..
         } = state;
 
-        let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
-        let att_dim = c.heads * head_dim;
         self.token_embd.row(token as usize, x)?;
         if let Some(scale) = c.embedding_scale {
             for v in x.iter_mut() {
@@ -1081,306 +1124,11 @@ impl<'a> Model<'a> {
             }
         }
 
-        let is_sliding_layer = |idx: usize| (idx % 2 == 0) && c.sliding_window.is_some();
-        let window = c.sliding_window.unwrap_or(usize::MAX);
-
         for (index, layer) in self.layers.iter().enumerate() {
-            ops::rms_norm(x, &layer.attn_norm, c.eps, &mut xb[..c.embedding]);
-            let is_mla = layer.attn_kv_a.is_some() && layer.attn_kv_b.is_some();
-            if is_mla {
-                let d_nope = c.qk_nope_head_dim.unwrap_or(head_dim);
-                let d_rope = c.qk_rope_head_dim.unwrap_or(0);
-                let v_hd = c.v_head_dim.unwrap_or(head_dim);
-                let kv_lora_rank = c.kv_lora_rank.unwrap_or(512);
-
-                if let (Some(attn_q_a), Some(attn_q_b)) = (&layer.attn_q_a, &layer.attn_q_b) {
-                    let mut q_lora = vec![0.0f32; attn_q_a.rows];
-                    attn_q_a.matvec_threaded(
-                        &xb[..c.embedding],
-                        &mut q_lora,
-                        *threads,
-                        workspace,
-                    )?;
-                    if let Some(norm) = &layer.attn_q_a_norm {
-                        let mut normed = vec![0.0f32; q_lora.len()];
-                        ops::rms_norm(&q_lora, norm, c.eps, &mut normed);
-                        q_lora = normed;
-                    }
-                    attn_q_b.matvec_threaded(&q_lora, q, *threads, workspace)?;
-                } else {
-                    layer
-                        .wq
-                        .matvec_threaded(&xb[..c.embedding], q, *threads, workspace)?;
-                    if let Some(bq) = &layer.bq {
-                        for (slot, b) in q.iter_mut().zip(bq) {
-                            *slot += b;
-                        }
-                    }
-                }
-
-                for head in 0..c.heads {
-                    let head_slice = &mut q[head * head_dim..(head + 1) * head_dim];
-                    if d_rope > 0 && d_nope + d_rope <= head_slice.len() {
-                        let rope_slice = &mut head_slice[d_nope..d_nope + d_rope];
-                        ops::rope_scaled(
-                            rope_slice,
-                            position,
-                            c.rope_base,
-                            c.rope_dim.min(d_rope),
-                            c.rope_scaling.as_ref(),
-                        );
-                    }
-                }
-
-                let attn_kv_a = layer.attn_kv_a.as_ref().unwrap();
-                let attn_kv_b = layer.attn_kv_b.as_ref().unwrap();
-                let mut kv_a_out = vec![0.0f32; attn_kv_a.rows];
-                attn_kv_a.matvec_threaded(
-                    &xb[..c.embedding],
-                    &mut kv_a_out,
-                    *threads,
-                    workspace,
-                )?;
-
-                let c_kv = &kv_a_out[..kv_lora_rank];
-                let mut c_kv_normed = vec![0.0f32; kv_lora_rank];
-                if let Some(norm) = &layer.attn_kv_a_norm {
-                    ops::rms_norm(c_kv, norm, c.eps, &mut c_kv_normed);
-                } else {
-                    c_kv_normed.copy_from_slice(c_kv);
-                }
-
-                let mut k_rope = if d_rope > 0 && kv_a_out.len() >= kv_lora_rank + d_rope {
-                    kv_a_out[kv_lora_rank..kv_lora_rank + d_rope].to_vec()
-                } else {
-                    Vec::new()
-                };
-                if !k_rope.is_empty() {
-                    ops::rope_scaled(
-                        &mut k_rope,
-                        position,
-                        c.rope_base,
-                        c.rope_dim.min(d_rope),
-                        c.rope_scaling.as_ref(),
-                    );
-                }
-
-                let mut kv_b_out = vec![0.0f32; attn_kv_b.rows];
-                attn_kv_b.matvec_threaded(&c_kv_normed, &mut kv_b_out, *threads, workspace)?;
-
-                let head_kv_b_dim = d_nope + v_hd;
-                for head in 0..c.heads {
-                    let kv_b_head = &kv_b_out[head * head_kv_b_dim..(head + 1) * head_kv_b_dim];
-                    let k_nope_part = &kv_b_head[..d_nope];
-                    let v_part = &kv_b_head[d_nope..d_nope + v_hd];
-
-                    let k_dest = &mut k[head * head_dim..(head + 1) * head_dim];
-                    k_dest[..d_nope].copy_from_slice(k_nope_part);
-                    if !k_rope.is_empty() {
-                        k_dest[d_nope..d_nope + d_rope].copy_from_slice(&k_rope);
-                    }
-
-                    let v_dest = &mut v[head * v_hd..(head + 1) * v_hd];
-                    v_dest.copy_from_slice(v_part);
-                }
-
-                kv_cache.store(index, position, k, v);
-
-                let scale = 1.0 / (head_dim as f32).sqrt();
-                let is_sliding = is_sliding_layer(index);
-                let v_dim = c.heads * v_hd;
-                let k_dim = c.heads * head_dim;
-
-                for head in 0..c.heads {
-                    let query = &q[head * head_dim..(head + 1) * head_dim];
-                    let out = &mut xb[head * v_hd..(head + 1) * v_hd];
-                    kv_cache.attention(
-                        index,
-                        query,
-                        out,
-                        ops::AttentionParams {
-                            row_width: k_dim,
-                            offset: head * head_dim,
-                            len: position + 1,
-                            scale,
-                            logit_cap: c.attn_logit_softcapping,
-                            window: is_sliding.then_some(window),
-                            position,
-                            tile_size: 64,
-                            v_row_width: Some(v_dim),
-                            v_offset: Some(head * v_hd),
-                        },
-                    );
-                }
-
-                layer.wo.matvec_threaded(
-                    &xb[..v_dim],
-                    &mut xb2[..c.embedding],
-                    *threads,
-                    workspace,
-                )?;
-                if let Some(l) = &layer.lora_wo {
-                    l.apply(&xb[..v_dim], &mut xb2[..c.embedding])?;
-                }
-            } else {
-                layer
-                    .wq
-                    .matvec_threaded(&xb[..c.embedding], q, *threads, workspace)?;
-                if let Some(bq) = &layer.bq {
-                    for (slot, b) in q.iter_mut().zip(bq) {
-                        *slot += b;
-                    }
-                }
-                if let Some(l) = &layer.lora_wq {
-                    l.apply(&xb[..c.embedding], q)?;
-                }
-
-                layer
-                    .wk
-                    .matvec_threaded(&xb[..c.embedding], k, *threads, workspace)?;
-                if let Some(bk) = &layer.bk {
-                    for (slot, b) in k.iter_mut().zip(bk) {
-                        *slot += b;
-                    }
-                }
-                if let Some(l) = &layer.lora_wk {
-                    l.apply(&xb[..c.embedding], k)?;
-                }
-
-                layer
-                    .wv
-                    .matvec_threaded(&xb[..c.embedding], v, *threads, workspace)?;
-                if let Some(bv) = &layer.bv {
-                    for (slot, b) in v.iter_mut().zip(bv) {
-                        *slot += b;
-                    }
-                }
-                if let Some(l) = &layer.lora_wv {
-                    l.apply(&xb[..c.embedding], v)?;
-                }
-
-                // Position is baked into the query and key, never into the value.
-                if let Some(sections) = c.mrope_sections {
-                    for head in 0..c.heads {
-                        ops::mrope(
-                            &mut q[head * head_dim..(head + 1) * head_dim],
-                            [position, position, position, position],
-                            sections,
-                            c.rope_base,
-                            ops::RoPEType::Neox,
-                        );
-                    }
-                    for head in 0..c.kv_heads {
-                        ops::mrope(
-                            &mut k[head * head_dim..(head + 1) * head_dim],
-                            [position, position, position, position],
-                            sections,
-                            c.rope_base,
-                            ops::RoPEType::Neox,
-                        );
-                    }
-                } else {
-                    for head in 0..c.heads {
-                        ops::rope_scaled(
-                            &mut q[head * head_dim..(head + 1) * head_dim],
-                            position,
-                            c.rope_base,
-                            c.rope_dim,
-                            c.rope_scaling.as_ref(),
-                        );
-                    }
-                    for head in 0..c.kv_heads {
-                        ops::rope_scaled(
-                            &mut k[head * head_dim..(head + 1) * head_dim],
-                            position,
-                            c.rope_base,
-                            c.rope_dim,
-                            c.rope_scaling.as_ref(),
-                        );
-                    }
-                }
-
-                kv_cache.store(index, position, k, v);
-
-                let scale = 1.0 / (head_dim as f32).sqrt();
-                let is_sliding = is_sliding_layer(index);
-                for head in 0..c.heads {
-                    // Grouped-query attention: several query heads share one KV head.
-                    let kv_head = head / group;
-                    let query = &q[head * head_dim..(head + 1) * head_dim];
-
-                    let out = &mut xb[head * head_dim..(head + 1) * head_dim];
-                    kv_cache.attention(
-                        index,
-                        query,
-                        out,
-                        ops::AttentionParams {
-                            row_width: kv_dim,
-                            offset: kv_head * head_dim,
-                            len: position + 1,
-                            scale,
-                            logit_cap: c.attn_logit_softcapping,
-                            window: is_sliding.then_some(window),
-                            position,
-                            tile_size: 64,
-                            v_row_width: None,
-                            v_offset: None,
-                        },
-                    );
-                }
-
-                layer.wo.matvec_threaded(
-                    &xb[..att_dim],
-                    &mut xb2[..c.embedding],
-                    *threads,
-                    workspace,
-                )?;
-                if let Some(l) = &layer.lora_wo {
-                    l.apply(&xb[..att_dim], &mut xb2[..c.embedding])?;
-                }
-            }
-            if let Some(post_attn_norm) = &layer.post_attn_norm {
-                ops::rms_norm(
-                    &xb2[..c.embedding],
-                    post_attn_norm,
-                    c.eps,
-                    &mut xb[..c.embedding],
-                );
-                for (slot, delta) in x.iter_mut().zip(&xb[..c.embedding]) {
-                    *slot += delta;
-                }
-            } else {
-                for (slot, delta) in x.iter_mut().zip(&xb2[..c.embedding]) {
-                    *slot += delta;
-                }
-            }
-
-            ops::rms_norm(x, &layer.ffn_norm, c.eps, &mut xb[..c.embedding]);
-            layer.eval_ffn(
-                c,
-                &xb[..c.embedding],
-                1,
-                &mut xb2[..c.embedding],
-                hb,
-                hb2,
-                *threads,
+            Self::forward_layer(
+                c, layer, index, position, x, xb, xb2, hb, hb2, q, k, v, kv_cache, *threads,
                 workspace,
             )?;
-            if let Some(post_ffn_norm) = &layer.post_ffn_norm {
-                ops::rms_norm(
-                    &xb2[..c.embedding],
-                    post_ffn_norm,
-                    c.eps,
-                    &mut xb[..c.embedding],
-                );
-                for (slot, delta) in x.iter_mut().zip(&xb[..c.embedding]) {
-                    *slot += delta;
-                }
-            } else {
-                for (slot, delta) in x.iter_mut().zip(&xb2[..c.embedding]) {
-                    *slot += delta;
-                }
-            }
         }
 
         ops::rms_norm(x, &self.output_norm, c.eps, &mut xb[..c.embedding]);
@@ -1394,6 +1142,421 @@ impl<'a> Model<'a> {
                 *logit = cap * (*logit / cap).tanh();
             }
         }
+        Ok(())
+    }
+
+    /// Forward pass through the DeepSeek-V3 Multi-Token Prediction (MTP) module.
+    ///
+    /// Consumes the main model trunk's hidden state at position `position` and the
+    /// predicted token `token` for `position + 1`, and predicts logits for `position + 2`.
+    pub fn forward_mtp(
+        &self,
+        state: &mut State,
+        hidden_state: &[f32],
+        token: u32,
+        position: usize,
+        out_logits: &mut [f32],
+    ) -> Result<()> {
+        let mtp = self
+            .mtp_module
+            .as_ref()
+            .ok_or_else(|| bad("model does not contain an MTP next-n prediction module"))?;
+        let c = &self.config;
+
+        if token >= c.vocab as u32 {
+            return Err(bad(format!("token {token} is past vocabulary {}", c.vocab)));
+        }
+        if position >= state.context {
+            return Err(bad(format!(
+                "position {position} is past context window {}",
+                state.context
+            )));
+        }
+        if out_logits.len() != c.vocab {
+            return Err(bad(format!(
+                "out_logits size {} != vocab {}",
+                out_logits.len(),
+                c.vocab
+            )));
+        }
+
+        let State {
+            x,
+            xb,
+            xb2,
+            hb,
+            hb2,
+            q,
+            k,
+            v,
+            workspace,
+            kv_cache,
+            threads,
+            ..
+        } = state;
+
+        // 1. Token embedding: E(w_{t+1})
+        self.token_embd
+            .row(token as usize, &mut xb[..c.embedding])?;
+        if let Some(scale) = c.embedding_scale {
+            for v in xb[..c.embedding].iter_mut() {
+                *v *= scale;
+            }
+        }
+
+        // 2. enorm on token embedding -> xb2
+        ops::rms_norm(
+            &xb[..c.embedding],
+            &mtp.enorm,
+            c.eps,
+            &mut xb2[..c.embedding],
+        );
+
+        // 3. hnorm on trunk hidden state -> xb
+        ops::rms_norm(hidden_state, &mtp.hnorm, c.eps, &mut xb[..c.embedding]);
+
+        // 4. Concatenate [hnorm; enorm] (length 2 * embedding)
+        let mut eh_concat = vec![0.0f32; 2 * c.embedding];
+        eh_concat[..c.embedding].copy_from_slice(&xb[..c.embedding]);
+        eh_concat[c.embedding..].copy_from_slice(&xb2[..c.embedding]);
+
+        // 5. eh_proj: project concatenated vector to hidden dim into x
+        mtp.eh_proj
+            .matvec_threaded(&eh_concat, x, *threads, workspace)?;
+
+        // 6. Forward MTP transformer layer (stored at layer index = c.layers in KV cache)
+        Self::forward_layer(
+            c, &mtp.layer, c.layers, position, x, xb, xb2, hb, hb2, q, k, v, kv_cache, *threads,
+            workspace,
+        )?;
+
+        // 7. Output RMSNorm (shared_head_norm) -> xb
+        ops::rms_norm(x, &mtp.shared_head_norm, c.eps, &mut xb[..c.embedding]);
+
+        // 8. Logit projection (shared_head_head or self.output)
+        if let Some(head) = &mtp.shared_head_head {
+            head.matvec_threaded(&xb[..c.embedding], out_logits, *threads, workspace)?;
+        } else {
+            self.output
+                .matvec_threaded(&xb[..c.embedding], out_logits, *threads, workspace)?;
+            if let Some(l) = &self.lora_output {
+                l.apply(&xb[..c.embedding], out_logits)?;
+            }
+        }
+
+        if let Some(cap) = c.final_logit_softcapping {
+            for logit in out_logits.iter_mut() {
+                *logit = cap * (*logit / cap).tanh();
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_layer(
+        c: &Config,
+        layer: &Layer<'a>,
+        index: usize,
+        position: usize,
+        x: &mut [f32],
+        xb: &mut [f32],
+        xb2: &mut [f32],
+        hb: &mut [f32],
+        hb2: &mut [f32],
+        q: &mut [f32],
+        k: &mut [f32],
+        v: &mut [f32],
+        kv_cache: &mut KvCache,
+        threads: usize,
+        workspace: &mut Workspace,
+    ) -> Result<()> {
+        let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
+        let att_dim = c.heads * head_dim;
+        let is_sliding = (index % 2 == 0) && c.sliding_window.is_some();
+        let window = c.sliding_window.unwrap_or(usize::MAX);
+
+        ops::rms_norm(x, &layer.attn_norm, c.eps, &mut xb[..c.embedding]);
+        let is_mla = layer.attn_kv_a.is_some() && layer.attn_kv_b.is_some();
+        if is_mla {
+            let d_nope = c.qk_nope_head_dim.unwrap_or(head_dim);
+            let d_rope = c.qk_rope_head_dim.unwrap_or(0);
+            let v_hd = c.v_head_dim.unwrap_or(head_dim);
+            let kv_lora_rank = c.kv_lora_rank.unwrap_or(512);
+
+            if let (Some(attn_q_a), Some(attn_q_b)) = (&layer.attn_q_a, &layer.attn_q_b) {
+                let mut q_lora = vec![0.0f32; attn_q_a.rows];
+                attn_q_a.matvec_threaded(&xb[..c.embedding], &mut q_lora, threads, workspace)?;
+                if let Some(norm) = &layer.attn_q_a_norm {
+                    let mut normed = vec![0.0f32; q_lora.len()];
+                    ops::rms_norm(&q_lora, norm, c.eps, &mut normed);
+                    q_lora = normed;
+                }
+                attn_q_b.matvec_threaded(&q_lora, q, threads, workspace)?;
+            } else {
+                layer
+                    .wq
+                    .matvec_threaded(&xb[..c.embedding], q, threads, workspace)?;
+                if let Some(bq) = &layer.bq {
+                    for (slot, b) in q.iter_mut().zip(bq) {
+                        *slot += b;
+                    }
+                }
+            }
+
+            for head in 0..c.heads {
+                let head_slice = &mut q[head * head_dim..(head + 1) * head_dim];
+                if d_rope > 0 && d_nope + d_rope <= head_slice.len() {
+                    let rope_slice = &mut head_slice[d_nope..d_nope + d_rope];
+                    ops::rope_scaled(
+                        rope_slice,
+                        position,
+                        c.rope_base,
+                        c.rope_dim.min(d_rope),
+                        c.rope_scaling.as_ref(),
+                    );
+                }
+            }
+
+            let attn_kv_a = layer.attn_kv_a.as_ref().unwrap();
+            let attn_kv_b = layer.attn_kv_b.as_ref().unwrap();
+            let mut kv_a_out = vec![0.0f32; attn_kv_a.rows];
+            attn_kv_a.matvec_threaded(&xb[..c.embedding], &mut kv_a_out, threads, workspace)?;
+
+            let c_kv = &kv_a_out[..kv_lora_rank];
+            let mut c_kv_normed = vec![0.0f32; kv_lora_rank];
+            if let Some(norm) = &layer.attn_kv_a_norm {
+                ops::rms_norm(c_kv, norm, c.eps, &mut c_kv_normed);
+            } else {
+                c_kv_normed.copy_from_slice(c_kv);
+            }
+
+            let mut k_rope = if d_rope > 0 && kv_a_out.len() >= kv_lora_rank + d_rope {
+                kv_a_out[kv_lora_rank..kv_lora_rank + d_rope].to_vec()
+            } else {
+                Vec::new()
+            };
+            if !k_rope.is_empty() {
+                ops::rope_scaled(
+                    &mut k_rope,
+                    position,
+                    c.rope_base,
+                    c.rope_dim.min(d_rope),
+                    c.rope_scaling.as_ref(),
+                );
+            }
+
+            let mut kv_b_out = vec![0.0f32; attn_kv_b.rows];
+            attn_kv_b.matvec_threaded(&c_kv_normed, &mut kv_b_out, threads, workspace)?;
+
+            let head_kv_b_dim = d_nope + v_hd;
+            for head in 0..c.heads {
+                let kv_b_head = &kv_b_out[head * head_kv_b_dim..(head + 1) * head_kv_b_dim];
+                let k_nope_part = &kv_b_head[..d_nope];
+                let v_part = &kv_b_head[d_nope..d_nope + v_hd];
+
+                let k_dest = &mut k[head * head_dim..(head + 1) * head_dim];
+                k_dest[..d_nope].copy_from_slice(k_nope_part);
+                if !k_rope.is_empty() {
+                    k_dest[d_nope..d_nope + d_rope].copy_from_slice(&k_rope);
+                }
+
+                let v_dest = &mut v[head * v_hd..(head + 1) * v_hd];
+                v_dest.copy_from_slice(v_part);
+            }
+
+            kv_cache.store(index, position, k, v);
+
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let v_dim = c.heads * v_hd;
+            let k_dim = c.heads * head_dim;
+
+            for head in 0..c.heads {
+                let query = &q[head * head_dim..(head + 1) * head_dim];
+                let out = &mut xb[head * v_hd..(head + 1) * v_hd];
+                kv_cache.attention(
+                    index,
+                    query,
+                    out,
+                    ops::AttentionParams {
+                        row_width: k_dim,
+                        offset: head * head_dim,
+                        len: position + 1,
+                        scale,
+                        logit_cap: c.attn_logit_softcapping,
+                        window: is_sliding.then_some(window),
+                        position,
+                        tile_size: 64,
+                        v_row_width: Some(v_dim),
+                        v_offset: Some(head * v_hd),
+                    },
+                );
+            }
+
+            layer
+                .wo
+                .matvec_threaded(&xb[..v_dim], &mut xb2[..c.embedding], threads, workspace)?;
+            if let Some(l) = &layer.lora_wo {
+                l.apply(&xb[..v_dim], &mut xb2[..c.embedding])?;
+            }
+        } else {
+            layer
+                .wq
+                .matvec_threaded(&xb[..c.embedding], q, threads, workspace)?;
+            if let Some(bq) = &layer.bq {
+                for (slot, b) in q.iter_mut().zip(bq) {
+                    *slot += b;
+                }
+            }
+            if let Some(l) = &layer.lora_wq {
+                l.apply(&xb[..c.embedding], q)?;
+            }
+
+            layer
+                .wk
+                .matvec_threaded(&xb[..c.embedding], k, threads, workspace)?;
+            if let Some(bk) = &layer.bk {
+                for (slot, b) in k.iter_mut().zip(bk) {
+                    *slot += b;
+                }
+            }
+            if let Some(l) = &layer.lora_wk {
+                l.apply(&xb[..c.embedding], k)?;
+            }
+
+            layer
+                .wv
+                .matvec_threaded(&xb[..c.embedding], v, threads, workspace)?;
+            if let Some(bv) = &layer.bv {
+                for (slot, b) in v.iter_mut().zip(bv) {
+                    *slot += b;
+                }
+            }
+            if let Some(l) = &layer.lora_wv {
+                l.apply(&xb[..c.embedding], v)?;
+            }
+
+            if let Some(sections) = c.mrope_sections {
+                for head in 0..c.heads {
+                    ops::mrope(
+                        &mut q[head * head_dim..(head + 1) * head_dim],
+                        [position, position, position, 0],
+                        sections,
+                        c.rope_base,
+                        ops::RoPEType::Neox,
+                    );
+                }
+                for head in 0..c.kv_heads {
+                    ops::mrope(
+                        &mut k[head * head_dim..(head + 1) * head_dim],
+                        [position, position, position, 0],
+                        sections,
+                        c.rope_base,
+                        ops::RoPEType::Neox,
+                    );
+                }
+            } else {
+                for head in 0..c.heads {
+                    ops::rope_scaled(
+                        &mut q[head * head_dim..(head + 1) * head_dim],
+                        position,
+                        c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
+                    );
+                }
+                for head in 0..c.kv_heads {
+                    ops::rope_scaled(
+                        &mut k[head * head_dim..(head + 1) * head_dim],
+                        position,
+                        c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
+                    );
+                }
+            }
+
+            kv_cache.store(index, position, k, v);
+
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            for head in 0..c.heads {
+                let kv_head = head / group;
+                let query = &q[head * head_dim..(head + 1) * head_dim];
+
+                let out = &mut xb[head * head_dim..(head + 1) * head_dim];
+                kv_cache.attention(
+                    index,
+                    query,
+                    out,
+                    ops::AttentionParams {
+                        row_width: kv_dim,
+                        offset: kv_head * head_dim,
+                        len: position + 1,
+                        scale,
+                        logit_cap: c.attn_logit_softcapping,
+                        window: is_sliding.then_some(window),
+                        position,
+                        tile_size: 64,
+                        v_row_width: None,
+                        v_offset: None,
+                    },
+                );
+            }
+
+            layer.wo.matvec_threaded(
+                &xb[..att_dim],
+                &mut xb2[..c.embedding],
+                threads,
+                workspace,
+            )?;
+            if let Some(l) = &layer.lora_wo {
+                l.apply(&xb[..att_dim], &mut xb2[..c.embedding])?;
+            }
+        }
+
+        if let Some(post_attn_norm) = &layer.post_attn_norm {
+            ops::rms_norm(
+                &xb2[..c.embedding],
+                post_attn_norm,
+                c.eps,
+                &mut xb[..c.embedding],
+            );
+            for (slot, delta) in x.iter_mut().zip(&xb[..c.embedding]) {
+                *slot += delta;
+            }
+        } else {
+            for (slot, delta) in x.iter_mut().zip(&xb2[..c.embedding]) {
+                *slot += delta;
+            }
+        }
+
+        ops::rms_norm(x, &layer.ffn_norm, c.eps, &mut xb[..c.embedding]);
+        layer.eval_ffn(
+            c,
+            &xb[..c.embedding],
+            1,
+            &mut xb2[..c.embedding],
+            hb,
+            hb2,
+            threads,
+            workspace,
+        )?;
+        if let Some(post_ffn_norm) = &layer.post_ffn_norm {
+            ops::rms_norm(
+                &xb2[..c.embedding],
+                post_ffn_norm,
+                c.eps,
+                &mut xb[..c.embedding],
+            );
+            for (slot, delta) in x.iter_mut().zip(&xb[..c.embedding]) {
+                *slot += delta;
+            }
+        } else {
+            for (slot, delta) in x.iter_mut().zip(&xb2[..c.embedding]) {
+                *slot += delta;
+            }
+        }
+
         Ok(())
     }
 
@@ -2662,6 +2825,7 @@ impl State {
             .max(v_dim)
             .max(mla_latent_dim)
             .max(q_latent_dim);
+        let total_layers = config.layers + config.nextn_predict_layers.unwrap_or(0);
         Self {
             x: vec![0.0; config.embedding],
             xb: vec![0.0; widest],
@@ -2673,10 +2837,16 @@ impl State {
             v: vec![0.0; v_dim],
             logits: vec![0.0; config.vocab],
             workspace: Workspace::new(widest),
-            kv_cache: KvCache::new_asymmetric(config.layers, context, k_dim, v_dim, cache_type),
+            kv_cache: KvCache::new_asymmetric(total_layers, context, k_dim, v_dim, cache_type),
             context,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
+    }
+
+    /// View the final hidden representation before output normalization from the last forward pass.
+    #[inline]
+    pub fn final_hidden_state(&self) -> &[f32] {
+        &self.x
     }
 
     /// How many tokens fit before `forward` refuses.

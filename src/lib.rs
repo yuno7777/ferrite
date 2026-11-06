@@ -53,7 +53,7 @@ pub use scheduler::{
     BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
 };
 pub use server::{Server, ServerConfig};
-pub use speculative::{SpeculativeEngine, SpeculativeStats, SpeculativeTreeEngine};
+pub use speculative::{MtpEngine, SpeculativeEngine, SpeculativeStats, SpeculativeTreeEngine};
 pub use template::{ChatMessage, ChatTemplate};
 pub use tokenizer::train::{
     train_bpe, train_vocab_file, write_vocab_gguf, TrainConfig, TrainedVocab,

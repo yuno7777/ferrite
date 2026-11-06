@@ -451,3 +451,316 @@ fn speculative_lookahead_decoding_matches_target_baseline() {
 
     fs::remove_file(target_path).ok();
 }
+
+fn mtp_eh_proj(dim: usize) -> Vec<f32> {
+    let mut out = vec![0.0; dim * (2 * dim)];
+    for r in 0..dim {
+        out[r * (2 * dim) + dim + r] = 1.0;
+    }
+    out
+}
+
+fn make_mtp_model_fixture(name: &str, divergent: bool) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("ferrite_mtp_{name}.gguf"));
+    let builder = Builder::new()
+        .meta("general.architecture", Value::String("deepseek".into()))
+        .meta("deepseek.block_count", Value::U32(1))
+        .meta("deepseek.nextn_predict_layers", Value::U32(1))
+        .meta("deepseek.embedding_length", Value::U32(DIM as u32))
+        .meta("deepseek.feed_forward_length", Value::U32(FFN as u32))
+        .meta("deepseek.attention.head_count", Value::U32(2))
+        .meta("deepseek.attention.head_count_kv", Value::U32(2))
+        .meta("deepseek.context_length", Value::U32(64))
+        .meta("deepseek.attention.layer_norm_rms_epsilon", Value::F32(EPS))
+        .meta("tokenizer.ggml.model", Value::String("llama".into()))
+        .meta(
+            "tokenizer.ggml.tokens",
+            Value::Array((0..VOCAB).map(|i| Value::String(format!("t{i}"))).collect()),
+        )
+        .meta(
+            "tokenizer.ggml.scores",
+            Value::Array((0..VOCAB).map(|i| Value::F32(i as f32)).collect()),
+        )
+        .meta(
+            "tokenizer.ggml.token_type",
+            Value::Array((0..VOCAB).map(|_| Value::I32(1)).collect()),
+        )
+        .tensor(
+            "token_embd.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&embeddings()),
+        )
+        .tensor(
+            "blk.0.attn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_q.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_k.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_v.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_output.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.ffn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.ffn_gate.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.5; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_up.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.5; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_down.weight",
+            &[FFN as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.1; FFN * DIM]),
+        )
+        .tensor(
+            "blk.1.nextn.eh_proj.weight",
+            &[(2 * DIM) as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&if divergent {
+                vec![-2.0; 2 * DIM * DIM]
+            } else {
+                mtp_eh_proj(DIM)
+            }),
+        )
+        .tensor(
+            "blk.1.nextn.enorm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.1.nextn.hnorm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.1.nextn.shared_head_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.1.attn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.1.attn_q.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.1.attn_k.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.1.attn_v.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.1.attn_output.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.1.ffn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.1.ffn_gate.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.5; DIM * FFN]),
+        )
+        .tensor(
+            "blk.1.ffn_up.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.5; DIM * FFN]),
+        )
+        .tensor(
+            "blk.1.ffn_down.weight",
+            &[FFN as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.1; FFN * DIM]),
+        )
+        .tensor(
+            "output_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "output.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        );
+    let bytes = builder.build();
+    fs::write(&path, bytes).expect("write mtp gguf");
+    path
+}
+
+#[test]
+fn mtp_speculative_decoding_matches_baseline_forward() {
+    let mtp_path = make_mtp_model_fixture("mtp_parity", false);
+    let gguf = Gguf::open(&mtp_path).expect("open mtp model");
+    let model = Model::load(&gguf).expect("load model");
+
+    assert_eq!(model.config.nextn_predict_layers, Some(1));
+    assert!(model.mtp_module.is_some());
+
+    let prompt = vec![0u32, 1u32];
+    let total_to_generate = 6;
+
+    // 1. Standard autoregressive baseline forward
+    let mut baseline_state = State::new(&model.config);
+    model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. MTP speculative decoding
+    let mut mtp_state = State::new(&model.config);
+    model
+        .prefill(&mut mtp_state, &prompt, 0)
+        .expect("prefill mtp");
+
+    let mut mtp_engine = ferrite::speculative::MtpEngine::new(&model);
+    let mut mtp_tokens = Vec::new();
+    let mut mtp_sampler = Sampler::greedy();
+    let mut mtp_pos = prompt.len();
+
+    while mtp_tokens.len() < total_to_generate {
+        let emitted = mtp_engine
+            .step(&mut mtp_state, mtp_pos, &mut mtp_sampler)
+            .expect("mtp step");
+        mtp_pos += emitted.len();
+        mtp_tokens.extend(emitted);
+    }
+    mtp_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        mtp_tokens, baseline_tokens,
+        "MTP speculative decoding must match baseline forward decode bit-identically"
+    );
+    assert!(mtp_engine.stats.proposed > 0);
+    assert!(mtp_engine.stats.accepted > 0);
+    assert_eq!(mtp_engine.stats.acceptance_rate(), 1.0);
+
+    fs::remove_file(mtp_path).ok();
+}
+
+#[test]
+fn mtp_rejection_recovery_matches_baseline_forward() {
+    let mtp_path = make_mtp_model_fixture("mtp_divergent", true);
+    let gguf = Gguf::open(&mtp_path).expect("open mtp model");
+    let model = Model::load(&gguf).expect("load model");
+
+    let prompt = vec![0u32, 1u32];
+    let total_to_generate = 6;
+
+    // 1. Standard autoregressive baseline forward
+    let mut baseline_state = State::new(&model.config);
+    model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. Divergent MTP speculative decoding with rollbacks
+    let mut mtp_state = State::new(&model.config);
+    model
+        .prefill(&mut mtp_state, &prompt, 0)
+        .expect("prefill mtp");
+
+    let mut mtp_engine = ferrite::speculative::MtpEngine::new(&model);
+    let mut mtp_tokens = Vec::new();
+    let mut mtp_sampler = Sampler::greedy();
+    let mut mtp_pos = prompt.len();
+
+    while mtp_tokens.len() < total_to_generate {
+        let emitted = mtp_engine
+            .step(&mut mtp_state, mtp_pos, &mut mtp_sampler)
+            .expect("mtp step");
+        mtp_pos += emitted.len();
+        mtp_tokens.extend(emitted);
+    }
+    mtp_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        mtp_tokens, baseline_tokens,
+        "Divergent MTP must recover and match baseline forward decode bit-identically"
+    );
+    assert!(mtp_engine.stats.proposed > 0);
+    // Verified that rejection occurred
+    assert!(mtp_engine.stats.accepted < mtp_engine.stats.proposed);
+
+    fs::remove_file(mtp_path).ok();
+}

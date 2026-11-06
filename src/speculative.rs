@@ -536,3 +536,103 @@ impl<'a> LookaheadEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// Speculative decoding engine powered by DeepSeek-V3 Multi-Token Prediction (MTP).
+///
+/// In standard autoregressive generation, each step evaluates one token.
+/// With MTP, the model evaluates `first_tok` at `position`, predicting `tok_1` at `position + 1`.
+/// Concurrently, the MTP module takes the trunk hidden state and `tok_1`, and predicts speculative candidate `draft_2` at `position + 2`.
+/// Target trunk then verifies `[tok_1, draft_2]` via batched GEMM prefill.
+/// If `draft_2` is accepted, 3 tokens are emitted; if rejected, the target model's corrective token
+/// is emitted and cache rolled back with zero state corruption.
+pub struct MtpEngine<'a> {
+    pub model: &'a Model<'a>,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> MtpEngine<'a> {
+    pub fn new(model: &'a Model<'a>) -> Self {
+        Self {
+            model,
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Reset internal performance statistics.
+    pub fn reset(&mut self) {
+        self.stats = SpeculativeStats::default();
+    }
+
+    /// Perform one speculative decoding step.
+    ///
+    /// - `state`: KV-cache and model state. At start of step, `state.logits` predicts token at `position`.
+    /// - `position`: current sequence position.
+    /// - `sampler`: token sampler.
+    ///
+    /// Returns the vector of accepted / emitted tokens (at least 1, up to 3 when MTP speculates).
+    pub fn step(
+        &mut self,
+        state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut state.logits);
+        let mut emitted = vec![first_tok];
+
+        if self.model.mtp_module.is_none() || position + 3 > state.context() {
+            // Cannot speculate with MTP; fall back to standard forward
+            self.model.forward(state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // 1. Forward first_tok through main trunk at position
+        self.model.forward(state, first_tok, position)?;
+        self.stats.target_batches += 1;
+
+        // 2. Sample verified next token (tok_1) predicted by trunk for position + 1
+        let tok_1 = sampler.sample(&mut state.logits);
+        emitted.push(tok_1);
+
+        // 3. Propose candidate for position + 2 via MTP module
+        let mut mtp_logits = vec![0.0f32; self.model.config.vocab];
+        let h_state = state.final_hidden_state().to_vec();
+        self.model
+            .forward_mtp(state, &h_state, tok_1, position, &mut mtp_logits)?;
+        let draft_2 = sampler.sample(&mut mtp_logits);
+        self.stats.proposed += 1;
+
+        // 4. Concurrently evaluate [tok_1, draft_2] in target trunk at position + 1
+        let vocab = self.model.config.vocab;
+        let mut target_all_logits = vec![0.0f32; 2 * vocab];
+        self.model.prefill_all_logits(
+            state,
+            &[tok_1, draft_2],
+            position + 1,
+            &mut target_all_logits,
+        )?;
+        self.stats.target_batches += 1;
+
+        // 5. Verify draft_2 against trunk's prediction for position + 2 (target_all_logits[0])
+        let target_pred = sampler.sample(&mut target_all_logits[..vocab]);
+        if target_pred == draft_2 {
+            // Accepted!
+            self.stats.accepted += 1;
+            emitted.push(draft_2);
+            // target_all_logits[1] predicts position + 3
+            state.set_logits(&target_all_logits[vocab..2 * vocab]);
+        } else {
+            // Rejected!
+            emitted.push(target_pred);
+            // Rollback draft_2 at position + 2
+            state.truncate_cache(&self.model.config, position + 2, position + 3);
+            // Resync trunk forward with target_pred at position + 2
+            self.model.forward(state, target_pred, position + 2)?;
+            self.stats.target_batches += 1;
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}

@@ -41,6 +41,7 @@ run/serve options:
   --draft <model> draft model for speculative decoding acceleration
   --spec-k <k>    speculative candidate count / depth (default 3)
   --spec-tree <b> speculative candidate branch count (default 0, disabled)
+  --mtp           enable DeepSeek Multi-Token Prediction (MTP) speculation
   --lora <adapter> apply GGUF LoRA adapter dynamically
   --chunk-size <n> chunk size for prompt prefill (default 512)
   --kv-cache <t>  KV cache quantization: f32, q8_0, q4_0 (default f32)
@@ -977,6 +978,46 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         let decode = decode_start.elapsed();
         eprintln!(
             "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s) · lookahead acceptance rate {:.1}% ({:.2} tok/target-step)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+            engine.stats.acceptance_rate() * 100.0,
+            engine.stats.tokens_per_batch(),
+        );
+    } else if (args.iter().any(|a| a == "--mtp") || model.mtp_module.is_some())
+        && model.mtp_module.is_some()
+    {
+        let mut engine = ferrite::speculative::MtpEngine::new(&model);
+        while generated < limit && position < state.context() {
+            let emitted = engine.step(&mut state, position, &mut sampler)?;
+            let mut stopped = false;
+            for token in emitted {
+                if Some(token) == tokenizer.eos {
+                    stopped = true;
+                    break;
+                }
+                pending.extend(tokenizer.piece(token));
+                if let Ok(text) = std::str::from_utf8(&pending) {
+                    print!("{text}");
+                    stdout.flush().ok();
+                    pending.clear();
+                }
+                position += 1;
+                generated += 1;
+                if generated >= limit || position >= state.context() {
+                    stopped = true;
+                    break;
+                }
+            }
+            if stopped {
+                break;
+            }
+        }
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s) · MTP acceptance rate {:.1}% ({:.2} tok/target-step)",
             prefill.as_secs_f64(),
             prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
             decode.as_secs_f64(),
