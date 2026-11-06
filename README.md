@@ -174,12 +174,13 @@ single-threaded, before the matvec is split across cores at all.
 | 5 | Fused quantized GEMV, benchmark harness | done |
 | 6 | int8 activations and integer dot products | done |
 | 7 | AVX2 integer kernels via `std::arch` | done |
-| 8 | Batched prefill, more architectures | next |
+| 8 | Batched prefill | done |
+| 9 | Multi-architecture support (Qwen2, Gemma, Mistral) | next |
 
-Next is batched prefill: during prompt processing the same weight row is dotted
-against every token's activation, so reading it once for many tokens turns a
-memory-bound GEMV into a compute-bound GEMM. That is a bigger win for long
-prompts than anything left in the single-token path.
+Batched prefill evaluates each layer's weights across the entire prompt in a
+single pass, reusing weight rows across all tokens to turn memory-bound GEMV
+into compute-bound GEMM during prompt ingestion.
+
 
 ## Development
 

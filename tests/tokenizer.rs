@@ -255,3 +255,64 @@ fn spm_falls_back_to_byte_tokens() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn test_train_bpe_vocabulary_and_round_trip() {
+    let corpus = "The quick brown fox jumps over the lazy dog. The quick fox loves to run and jump in the forest.";
+    let config = ferrite::TrainConfig {
+        vocab_size: 280,
+        special_tokens: vec!["<unk>".into(), "<s>".into(), "</s>".into()],
+    };
+
+    let vocab = ferrite::train_bpe(corpus, &config).expect("train BPE");
+    assert_eq!(vocab.tokens.len(), 280);
+    assert_eq!(vocab.merges.len(), 21);
+
+    let path = std::env::temp_dir().join("ferrite_test_trained_vocab.gguf");
+    ferrite::write_vocab_gguf(&vocab, &path).expect("write trained vocab GGUF");
+
+    let gguf = Gguf::open(&path).expect("open trained vocab GGUF");
+    let tok = Tokenizer::from_gguf(&gguf).expect("load Tokenizer from trained GGUF");
+    assert_eq!(tok.kind, Kind::Bpe);
+    assert_eq!(tok.tokens.len(), 280);
+
+    let sample_text = "The quick brown fox jumps over the lazy dog.";
+    let encoded = tok.encode(sample_text, false);
+    assert!(!encoded.is_empty());
+
+    let decoded = tok.decode(&encoded);
+    assert_eq!(decoded, sample_text);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_train_vocab_file_integration() {
+    let corpus_path = std::env::temp_dir().join("ferrite_test_corpus.txt");
+    let out_vocab_path = std::env::temp_dir().join("ferrite_test_file_vocab.gguf");
+
+    fs::write(
+        &corpus_path,
+        "Machine learning models require tokenizers. Tokenization converts text into subword token units.",
+    )
+    .expect("write test corpus");
+
+    let config = ferrite::TrainConfig {
+        vocab_size: 275,
+        ..Default::default()
+    };
+
+    let vocab = ferrite::train_vocab_file(&corpus_path, &out_vocab_path, &config)
+        .expect("train_vocab_file");
+    assert_eq!(vocab.tokens.len(), 275);
+
+    let gguf = Gguf::open(&out_vocab_path).expect("open GGUF");
+    let tok = Tokenizer::from_gguf(&gguf).expect("load Tokenizer");
+
+    let test_str = "Machine learning token units.";
+    let ids = tok.encode(test_str, false);
+    assert_eq!(tok.decode(&ids), test_str);
+
+    fs::remove_file(corpus_path).ok();
+    fs::remove_file(out_vocab_path).ok();
+}

@@ -135,3 +135,44 @@ fn unsupported_types_are_reported_not_guessed() {
     assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
     assert!(err.to_string().contains("Q2_K"), "{err}");
 }
+
+#[test]
+fn fp8_e4m3_tensor_survives_the_file_and_blockwise_scaling() {
+    let test_bytes: Vec<u8> = (0..128).map(|i| (i * 7) as u8).collect();
+    let path = write(
+        "f8_e4m3",
+        &Builder::new().tensor("fp8_weight", &[128], GgmlType::F8_E4M3, test_bytes.clone()),
+    );
+
+    let from_file = dequantize_tensor(&path, "fp8_weight");
+    let mut direct = vec![0.0f32; 128];
+    quant::fp8::dequantize_e4m3(&test_bytes, &mut direct);
+
+    assert_eq!(from_file.len(), 128);
+    for (a, b) in from_file.iter().zip(&direct) {
+        if a.is_nan() {
+            assert!(b.is_nan());
+        } else {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    // Verify blockwise scaling round-trip
+    let block_size = 64;
+    let original: Vec<f32> = (0..128).map(|i| (i as f32 * 0.1).sin() * 25.0).collect();
+    let mut quantized_bytes = vec![0u8; 128];
+    let mut scales = vec![0.0f32; 2];
+    quant::fp8::quantize_fp8_blockwise(&original, block_size, &mut quantized_bytes, &mut scales);
+
+    let mut restored = vec![0.0f32; 128];
+    quant::fp8::dequantize_fp8_blockwise(&quantized_bytes, &scales, block_size, &mut restored);
+
+    for (&orig, &rec) in original.iter().zip(&restored) {
+        assert!(
+            (orig - rec).abs() < 1.0,
+            "blockwise FP8 error too large: {orig} vs {rec}"
+        );
+    }
+
+    fs::remove_file(path).ok();
+}

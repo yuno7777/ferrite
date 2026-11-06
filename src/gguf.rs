@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{Error, ErrorKind, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::map::Mmap;
 
@@ -52,6 +52,7 @@ pub enum GgmlType {
     I64,
     F64,
     BF16,
+    F8_E4M3,
     /// A type we can name but not size — the IQ family, mostly. Inspecting a
     /// model that uses one works; reading its bytes does not.
     Other(u32),
@@ -80,6 +81,7 @@ impl GgmlType {
             27 => Self::I64,
             28 => Self::F64,
             30 => Self::BF16,
+            31 | 39 => Self::F8_E4M3,
             other => Self::Other(other),
         }
     }
@@ -89,7 +91,7 @@ impl GgmlType {
         Some(match self {
             Self::F32 | Self::I32 => (1, 4),
             Self::F16 | Self::BF16 | Self::I16 => (1, 2),
-            Self::I8 => (1, 1),
+            Self::I8 | Self::F8_E4M3 => (1, 1),
             Self::F64 | Self::I64 => (1, 8),
             Self::Q4_0 => (32, 18),
             Self::Q4_1 => (32, 20),
@@ -112,6 +114,37 @@ impl GgmlType {
             Self::Other(id) => format!("type{id}"),
             other => format!("{other:?}"),
         }
+    }
+
+    pub fn to_id(self) -> u32 {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+            Self::Q4_0 => 2,
+            Self::Q4_1 => 3,
+            Self::Q5_0 => 6,
+            Self::Q5_1 => 7,
+            Self::Q8_0 => 8,
+            Self::Q8_1 => 9,
+            Self::Q2_K => 10,
+            Self::Q3_K => 11,
+            Self::Q4_K => 12,
+            Self::Q5_K => 13,
+            Self::Q6_K => 14,
+            Self::Q8_K => 15,
+            Self::I8 => 24,
+            Self::I16 => 25,
+            Self::I32 => 26,
+            Self::I64 => 27,
+            Self::F64 => 28,
+            Self::BF16 => 30,
+            Self::F8_E4M3 => 31,
+            Self::Other(id) => id,
+        }
+    }
+
+    pub fn raw(self) -> u32 {
+        self.to_id()
     }
 }
 
@@ -290,10 +323,20 @@ impl<'a> Cursor<'a> {
     read_prim!(f32_, f32);
     read_prim!(f64_, f64);
 
+    fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+
     fn string(&mut self) -> Result<String> {
         let n = self.u64_()?;
         if n > MAX_STRING {
             return Err(bad(format!("implausible string length {n}")));
+        }
+        if n > self.remaining() as u64 {
+            return Err(bad(format!(
+                "string length {n} exceeds remaining buffer ({})",
+                self.remaining()
+            )));
         }
         let bytes = self.take(n as usize)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| bad("metadata string is not utf-8"))
@@ -315,7 +358,27 @@ impl<'a> Cursor<'a> {
                     return Err(bad("nested arrays are not valid GGUF"));
                 }
                 let inner = self.u32_()?;
+                if inner > 12 || inner == 9 {
+                    return Err(bad(format!("invalid GGUF array element type {inner}")));
+                }
                 let count = self.u64_()?;
+                let min_elem_size = match inner {
+                    0 | 1 | 7 => 1u64, // U8, I8, Bool
+                    2 | 3 => 2,        // U16, I16
+                    4..=6 => 4,        // U32, I32, F32
+                    8 => 8,            // String (8-byte length prefix)
+                    10..=12 => 8,      // U64, I64, F64
+                    _ => 1,
+                };
+                let min_bytes = count
+                    .checked_mul(min_elem_size)
+                    .ok_or_else(|| bad(format!("array element count {count} overflows")))?;
+                if min_bytes > self.remaining() as u64 {
+                    return Err(bad(format!(
+                        "array element count {count} exceeds remaining buffer ({})",
+                        self.remaining()
+                    )));
+                }
                 // Deliberately no `with_capacity`: `count` is attacker-controlled
                 // and `take` is what bounds each element.
                 let mut items = Vec::new();
@@ -344,6 +407,8 @@ pub struct TensorInfo {
     pub offset: u64,
     /// `None` when the type has no known layout.
     pub byte_len: Option<u64>,
+    /// Index of the shard containing this tensor (0 for single-file models).
+    pub shard_index: usize,
 }
 
 impl TensorInfo {
@@ -361,11 +426,12 @@ impl TensorInfo {
 
 pub struct Gguf {
     map: Mmap,
+    pub shard_maps: Vec<(Mmap, u64)>,
     pub version: u32,
     pub alignment: u64,
     pub meta: BTreeMap<String, Value>,
     pub tensors: Vec<TensorInfo>,
-    /// Byte offset of the tensor data blob within the file.
+    /// Byte offset of the tensor data blob within the primary file.
     pub data_offset: u64,
     index: HashMap<String, usize>,
 }
@@ -378,126 +444,197 @@ impl fmt::Debug for Gguf {
             .field("version", &self.version)
             .field("arch", &self.arch())
             .field("tensors", &self.tensors.len())
-            .field("bytes", &self.map.len())
+            .field("bytes", &self.file_len())
+            .field("shards", &(self.shard_maps.len() + 1))
             .finish()
     }
 }
 
-impl Gguf {
-    pub fn open(path: &Path) -> Result<Self> {
-        let map = Mmap::open(path)?;
-        let file_len = map.len() as u64;
-        let mut cur = Cursor::new(map.as_slice());
+struct RawShard {
+    map: Mmap,
+    version: u32,
+    alignment: u64,
+    meta: BTreeMap<String, Value>,
+    tensors: Vec<TensorInfo>,
+    data_offset: u64,
+}
 
-        if cur.take(4)? != MAGIC {
-            return Err(bad("not a GGUF file (bad magic)"));
+fn parse_shard_from_mmap(map: Mmap, shard_index: usize) -> Result<RawShard> {
+    let file_len = map.len() as u64;
+    let mut cur = Cursor::new(map.as_slice());
+
+    if cur.take(4)? != MAGIC {
+        return Err(bad("not a GGUF file (bad magic)"));
+    }
+    let version = cur.u32_()?;
+    if !(2..=3).contains(&version) {
+        return Err(bad(format!(
+            "GGUF version {version} unsupported (need 2 or 3)"
+        )));
+    }
+    let tensor_count = cur.u64_()?;
+    let meta_count = cur.u64_()?;
+
+    let min_meta_bytes = meta_count
+        .checked_mul(13)
+        .ok_or_else(|| bad("metadata count overflows"))?;
+    let min_tensor_bytes = tensor_count
+        .checked_mul(32)
+        .ok_or_else(|| bad("tensor count overflows"))?;
+    let min_header_bytes = min_meta_bytes
+        .checked_add(min_tensor_bytes)
+        .ok_or_else(|| bad("header count overflows"))?;
+    if min_header_bytes > cur.remaining() as u64 {
+        return Err(bad(format!(
+            "file too small for declared {meta_count} metadata and {tensor_count} tensor entries (needs at least {min_header_bytes} bytes, have {})",
+            cur.remaining()
+        )));
+    }
+
+    let mut meta = BTreeMap::new();
+    for _ in 0..meta_count {
+        let key = cur.string()?;
+        let ty = cur.u32_()?;
+        let value = cur.value(ty, 0)?;
+        meta.insert(key, value);
+    }
+
+    let alignment = match meta.get("general.alignment") {
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| bad("general.alignment not an int"))?,
+        None => DEFAULT_ALIGNMENT,
+    };
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return Err(bad(format!("alignment {alignment} is not a power of two")));
+    }
+
+    let mut tensors = Vec::with_capacity(tensor_count as usize);
+    for _ in 0..tensor_count {
+        let name = cur.string()?;
+        let n_dims = cur.u32_()? as usize;
+        if n_dims == 0 || n_dims > MAX_DIMS {
+            return Err(bad(format!("tensor {name} has {n_dims} dimensions")));
         }
-        let version = cur.u32_()?;
-        if !(2..=3).contains(&version) {
+        let mut dims = Vec::with_capacity(n_dims);
+        for _ in 0..n_dims {
+            dims.push(cur.u64_()?);
+        }
+        if dims.contains(&0) {
+            return Err(bad(format!("tensor {name} has zero dimension")));
+        }
+        let ty = GgmlType::from_id(cur.u32_()?);
+        let offset = cur.u64_()?;
+
+        let elements: u64 = dims
+            .iter()
+            .try_fold(1u64, |acc, d| acc.checked_mul(*d))
+            .ok_or_else(|| bad(format!("tensor {name} element count overflows")))?;
+
+        let byte_len = match ty.layout() {
+            Some((block, size)) => {
+                if elements % block != 0 {
+                    return Err(bad(format!(
+                        "tensor {name}: {elements} elements is not a multiple of {} block {block}",
+                        ty.name()
+                    )));
+                }
+                Some(
+                    (elements / block)
+                        .checked_mul(size)
+                        .ok_or_else(|| bad(format!("tensor {name} byte length overflows")))?,
+                )
+            }
+            None => None,
+        };
+
+        tensors.push(TensorInfo {
+            name,
+            dims,
+            ty,
+            offset,
+            byte_len,
+            shard_index,
+        });
+    }
+
+    let data_offset =
+        align_up(cur.pos as u64, alignment).ok_or_else(|| bad("data offset overflows"))?;
+    if data_offset > file_len {
+        return Err(bad("file ends before the tensor data begins"));
+    }
+
+    for t in &tensors {
+        let Some(len) = t.byte_len else { continue };
+        let end = data_offset
+            .checked_add(t.offset)
+            .and_then(|s| s.checked_add(len))
+            .ok_or_else(|| bad(format!("tensor {} extent overflows", t.name)))?;
+        if end > file_len {
             return Err(bad(format!(
-                "GGUF version {version} unsupported (need 2 or 3)"
+                "tensor {} runs {} bytes past end of file (truncated download?)",
+                t.name,
+                end - file_len
             )));
         }
-        let tensor_count = cur.u64_()?;
-        let meta_count = cur.u64_()?;
+    }
 
-        let mut meta = BTreeMap::new();
-        for _ in 0..meta_count {
-            let key = cur.string()?;
-            let ty = cur.u32_()?;
-            let value = cur.value(ty, 0)?;
-            meta.insert(key, value);
+    Ok(RawShard {
+        map,
+        version,
+        alignment,
+        meta,
+        tensors,
+        data_offset,
+    })
+}
+
+impl Gguf {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(shards) = discover_shards(path) {
+            if shards.len() > 1 {
+                return Self::open_sharded(&shards);
+            }
         }
+        Self::open_sharded(&[path])
+    }
 
-        let alignment = match meta.get("general.alignment") {
-            Some(v) => v
-                .as_u64()
-                .ok_or_else(|| bad("general.alignment not an int"))?,
-            None => DEFAULT_ALIGNMENT,
-        };
-        if alignment == 0 || !alignment.is_power_of_two() {
-            return Err(bad(format!("alignment {alignment} is not a power of two")));
+    pub fn open_sharded<P: AsRef<Path>>(paths: &[P]) -> Result<Self> {
+        if paths.is_empty() {
+            return Err(bad("open_sharded requires at least one path"));
         }
-
-        let mut tensors = Vec::new();
+        let mut shard0 = parse_shard_from_mmap(Mmap::open(paths[0].as_ref())?, 0)?;
         let mut index = HashMap::new();
-        for _ in 0..tensor_count {
-            let name = cur.string()?;
-            let n_dims = cur.u32_()? as usize;
-            if n_dims == 0 || n_dims > MAX_DIMS {
-                return Err(bad(format!("tensor {name} has {n_dims} dimensions")));
+        for (i, t) in shard0.tensors.iter().enumerate() {
+            if index.insert(t.name.clone(), i).is_some() {
+                return Err(bad(format!("duplicate tensor name {}", t.name)));
             }
-            let mut dims = Vec::with_capacity(n_dims);
-            for _ in 0..n_dims {
-                dims.push(cur.u64_()?);
-            }
-            let ty = GgmlType::from_id(cur.u32_()?);
-            let offset = cur.u64_()?;
+        }
 
-            let elements: u64 = dims
-                .iter()
-                .try_fold(1u64, |acc, d| acc.checked_mul(*d))
-                .ok_or_else(|| bad(format!("tensor {name} element count overflows")))?;
-
-            let byte_len = match ty.layout() {
-                Some((block, size)) => {
-                    if elements % block != 0 {
-                        return Err(bad(format!(
-                            "tensor {name}: {elements} elements is not a multiple of {} block {block}",
-                            ty.name()
-                        )));
-                    }
-                    Some(
-                        (elements / block)
-                            .checked_mul(size)
-                            .ok_or_else(|| bad(format!("tensor {name} byte length overflows")))?,
-                    )
+        let mut shard_maps = Vec::new();
+        for (extra_idx, path) in paths.iter().skip(1).enumerate() {
+            let shard_num = extra_idx + 1;
+            let shard = parse_shard_from_mmap(Mmap::open(path.as_ref())?, shard_num)?;
+            for t in shard.tensors {
+                if index.insert(t.name.clone(), shard0.tensors.len()).is_some() {
+                    return Err(bad(format!("duplicate tensor name {}", t.name)));
                 }
-                None => None,
-            };
-
-            if index.insert(name.clone(), tensors.len()).is_some() {
-                return Err(bad(format!("duplicate tensor name {name}")));
+                shard0.tensors.push(t);
             }
-            tensors.push(TensorInfo {
-                name,
-                dims,
-                ty,
-                offset,
-                byte_len,
-            });
-        }
-
-        let data_offset =
-            align_up(cur.pos as u64, alignment).ok_or_else(|| bad("data offset overflows"))?;
-        if data_offset > file_len {
-            return Err(bad("file ends before the tensor data begins"));
-        }
-
-        // Every sized tensor must fit inside the file. Catches truncated
-        // downloads before a kernel reads past the mapping.
-        for t in &tensors {
-            let Some(len) = t.byte_len else { continue };
-            let end = data_offset
-                .checked_add(t.offset)
-                .and_then(|s| s.checked_add(len))
-                .ok_or_else(|| bad(format!("tensor {} extent overflows", t.name)))?;
-            if end > file_len {
-                return Err(bad(format!(
-                    "tensor {} runs {} bytes past end of file (truncated download?)",
-                    t.name,
-                    end - file_len
-                )));
+            for (k, v) in shard.meta {
+                shard0.meta.entry(k).or_insert(v);
             }
+            shard_maps.push((shard.map, shard.data_offset));
         }
 
         Ok(Self {
-            map,
-            version,
-            alignment,
-            meta,
-            tensors,
-            data_offset,
+            map: shard0.map,
+            shard_maps,
+            version: shard0.version,
+            alignment: shard0.alignment,
+            meta: shard0.meta,
+            tensors: shard0.tensors,
+            data_offset: shard0.data_offset,
             index,
         })
     }
@@ -535,6 +672,11 @@ impl Gguf {
         self.meta_f32(&format!("{arch}.{suffix}"))
     }
 
+    pub fn arch_str(&self, suffix: &str) -> Option<&str> {
+        let arch = self.arch()?;
+        self.meta_str(&format!("{arch}.{suffix}"))
+    }
+
     pub fn tensor(&self, name: &str) -> Option<&TensorInfo> {
         Some(&self.tensors[*self.index.get(name)?])
     }
@@ -548,16 +690,42 @@ impl Gguf {
                 t.ty.name()
             ))
         })?;
-        let start = (self.data_offset + t.offset) as usize;
-        let end = start + len as usize;
-        self.map
-            .as_slice()
+        let (map, data_offset) = if t.shard_index == 0 {
+            (&self.map, self.data_offset)
+        } else {
+            let (m, off) = self.shard_maps.get(t.shard_index - 1).ok_or_else(|| {
+                bad(format!(
+                    "tensor {} references invalid shard index {}",
+                    t.name, t.shard_index
+                ))
+            })?;
+            (m, *off)
+        };
+        let start = data_offset
+            .checked_add(t.offset)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| bad(format!("tensor {} offset overflows", t.name)))?;
+        let len = usize::try_from(len)
+            .map_err(|_| bad(format!("tensor {} length exceeds address space", t.name)))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| bad(format!("tensor {} extent overflows", t.name)))?;
+        map.as_slice()
             .get(start..end)
             .ok_or_else(|| bad(format!("tensor {} out of bounds", t.name)))
     }
 
     pub fn file_len(&self) -> u64 {
-        self.map.len() as u64
+        let mut total = self.map.len() as u64;
+        for (m, _) in &self.shard_maps {
+            total += m.len() as u64;
+        }
+        total
+    }
+
+    /// Number of distinct shard files backing this model.
+    pub fn shard_count(&self) -> usize {
+        self.shard_maps.len() + 1
     }
 
     /// Bytes per quantization type, largest first. This is what tells you at a
@@ -585,6 +753,58 @@ pub(crate) fn align_up(value: u64, alignment: u64) -> Option<u64> {
     } else {
         value.checked_add(alignment - rem)
     }
+}
+
+/// Discover and resolve sibling shard files matching `-<index>-of-<total>.gguf`.
+pub fn discover_shards(path: &Path) -> Option<Vec<PathBuf>> {
+    let file_name = path.file_name()?.to_str()?;
+    let of_pos = file_name.rfind("-of-")?;
+    let before_of = &file_name[..of_pos];
+    let after_of = &file_name[of_pos + 4..];
+
+    let dash_pos = before_of.rfind('-')?;
+    let prefix = &before_of[..=dash_pos];
+    let cur_str = &before_of[dash_pos + 1..];
+
+    let ext_pos = after_of.find(".gguf")?;
+    let total_str = &after_of[..ext_pos];
+    let suffix = &after_of[ext_pos..];
+
+    if cur_str.is_empty() || total_str.is_empty() {
+        return None;
+    }
+    if !cur_str.chars().all(|c| c.is_ascii_digit())
+        || !total_str.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let total: usize = total_str.parse().ok()?;
+    if total <= 1 || total > 9999 {
+        return None;
+    }
+    let cur: usize = cur_str.parse().ok()?;
+    let width = cur_str.len();
+
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let is_one_based = cur != 0;
+
+    let range: Vec<usize> = if is_one_based {
+        (1..=total).collect()
+    } else {
+        (0..total).collect()
+    };
+
+    let mut paths = Vec::with_capacity(total);
+    for idx in range {
+        let name = format!("{prefix}{idx:0width$}-of-{total:0width$}{suffix}");
+        let shard_path = parent.join(name);
+        if !shard_path.is_file() {
+            return None;
+        }
+        paths.push(shard_path);
+    }
+    Some(paths)
 }
 
 #[cfg(test)]

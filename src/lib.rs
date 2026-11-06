@@ -11,16 +11,54 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+pub mod convert;
+pub mod distributed;
+pub mod embed;
+pub mod eval;
 pub mod gguf;
+pub mod grammar;
+pub mod kv;
 pub mod lmstudio;
+pub mod lora;
 pub mod map;
+pub mod merge;
 pub mod model;
 pub mod ops;
+pub mod paged;
+pub mod prefix;
 pub mod quant;
 pub mod sample;
+pub mod scheduler;
+pub mod server;
+pub mod speculative;
 pub mod synth;
+pub mod template;
 pub mod tokenizer;
+pub mod tools;
+pub mod tp;
+pub mod vision;
 
-pub use gguf::{GgmlType, Gguf, TensorInfo, Value};
+pub use convert::{convert_safetensors_to_gguf, JsonValue, SafeTensorsHeader};
+pub use embed::{cosine_similarity, l2_normalize, pool, EmbedEngine, Pooling};
+pub use eval::{cross_entropy_loss, ChunkPerplexity, PerplexityEvaluator, PerplexityReport};
+pub use gguf::{discover_shards, GgmlType, Gguf, TensorInfo, Value};
+pub use grammar::{ChoiceGrammar, Grammar, JsonGrammar, RegexMatcher};
+pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType};
+pub use lora::{LoraAdapter, LoraPair};
 pub use map::Mmap;
+pub use model::ChunkedPrefill;
+pub use paged::{BlockId, PagedPool, PagedSequence, PhysicalBlock, DEFAULT_BLOCK_TOKENS};
+pub use prefix::{RadixCache, RadixNode};
+pub use quant::quantize::{quantize_file, quantize_model};
+pub use scheduler::{
+    BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
+};
+pub use server::{Server, ServerConfig};
+pub use speculative::{MtpEngine, SpeculativeEngine, SpeculativeStats, SpeculativeTreeEngine};
+pub use template::{ChatMessage, ChatTemplate};
+pub use tokenizer::train::{
+    train_bpe, train_vocab_file, write_vocab_gguf, TrainConfig, TrainedVocab,
+};
 pub use tokenizer::Tokenizer;
+pub use tp::{eval_tp_swiglu, matvec_column_parallel, matvec_row_parallel, ThreadPool};
+pub use vision::{Image, MultiModalProjector, VisionConfig, VisionEncoder};

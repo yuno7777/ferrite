@@ -41,6 +41,43 @@ pub fn read_f16(bytes: &[u8]) -> f32 {
     }
 }
 
+/// Convert f32 to IEEE 754 binary16 bits.
+pub fn f32_to_f16(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp32 = ((bits >> 23) & 0xFF) as i32;
+    let mant32 = bits & 0x007F_FFFF;
+
+    if exp32 == 255 {
+        if mant32 != 0 {
+            sign | 0x7E00
+        } else {
+            sign | 0x7C00
+        }
+    } else if exp32 > 142 {
+        sign | 0x7C00
+    } else if exp32 < 113 {
+        if exp32 < 103 {
+            sign
+        } else {
+            let shift = 113 - exp32;
+            let full_mant = mant32 | 0x0080_0000;
+            let mant16 = (full_mant >> (shift + 13)) as u16;
+            sign | mant16
+        }
+    } else {
+        let exp16 = ((exp32 - 112) as u16) << 10;
+        let mant16 = (mant32 >> 13) as u16;
+        sign | exp16 | mant16
+    }
+}
+
+/// Write a little-endian f16 to a 2-byte slice.
+pub fn write_f16(out: &mut [u8], val: f32) {
+    let bits = f32_to_f16(val);
+    out[0..2].copy_from_slice(&bits.to_le_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

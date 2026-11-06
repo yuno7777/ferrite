@@ -18,8 +18,17 @@ usage:
                                     -t also dumps the tensor table
   ferrite tokenize <model> <text>   encode text, show ids and pieces
   ferrite run <model> <prompt>      generate, streaming to stdout
+  ferrite serve <model>             serve HTTP/SSE API daemon
+  ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
+  ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare> [--weight <0..1>]
+  ferrite perplexity <model> <file> evaluate text perplexity and loss
+  ferrite convert <src> <dst.gguf>  convert SafeTensors to GGUF format
+  ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>
+  ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]
+  ferrite embed <model> <text...>   generate vector embeddings & similarity
+  ferrite vision <model> --image <image> --mmproj <mmproj.gguf> [prompt]
 
-run options:
+run/serve options:
   -n <count>      tokens to generate (default 128)
   --temp <t>      sampling temperature, 0 for greedy (default 0)
   --top-k <k>     keep only the k most likely tokens (default 40)
@@ -27,6 +36,21 @@ run options:
   --seed <s>      sampling seed (default 1)
   --ctx <n>       KV cache size in tokens (default 2048)
   --threads <n>   workers per matvec (default: machine parallelism)
+  --host <host>   host interface to bind (default: 127.0.0.1)
+  --port <port>   port to bind (default: 8080)
+  --draft <model> draft model for speculative decoding acceleration
+  --spec-k <k>    speculative candidate count / depth (default 3)
+  --spec-tree <b> speculative candidate branch count (default 0, disabled)
+  --mtp           enable DeepSeek Multi-Token Prediction (MTP) speculation
+  --lora <adapter> apply GGUF LoRA adapter dynamically
+  --chunk-size <n> chunk size for prompt prefill (default 512)
+  --kv-cache <t>  KV cache quantization: f32, q8_0, q4_0 (default f32)
+  --min-p <p>     minimum probability scale relative to top token (default 0.0)
+  --tfs <z>       tail free sampling z parameter in (0, 1] (default 1.0)
+  --repeat-penalty <p> multiplicative repetition penalty (default 1.0)
+  --frequency-penalty <p> additive frequency penalty (default 0.0)
+  --presence-penalty <p> additive presence penalty (default 0.0)
+  --repeat-last-n <n> window of recent tokens for penalties (default 64)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -40,6 +64,16 @@ fn main() -> ExitCode {
         Some("info") => cmd_info(&args[1..]),
         Some("tokenize") => cmd_tokenize(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
+        Some("serve") => cmd_serve(&args[1..]),
+        Some("quantize") => cmd_quantize(&args[1..]),
+        Some("merge") => cmd_merge(&args[1..]),
+        Some("perplexity") => cmd_perplexity(&args[1..]),
+        Some("convert") => cmd_convert(&args[1..]),
+        Some("lora") => cmd_lora(&args[1..]),
+        Some("train-vocab") => cmd_train_vocab(&args[1..]),
+        Some("embed") => cmd_embed(&args[1..]),
+        Some("distributed") => cmd_distributed(&args[1..]),
+        Some("vision") => cmd_vision(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -57,6 +91,418 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_train_vocab(args: &[String]) -> std::io::Result<()> {
+    if args.len() < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]",
+        ));
+    }
+    let corpus_path = std::path::Path::new(&args[0]);
+    let out_path = std::path::Path::new(&args[1]);
+    let mut vocab_size = 1000;
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--vocab-size" && i + 1 < args.len() {
+            vocab_size = args[i + 1].parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid vocab-size: {e}"),
+                )
+            })?;
+            i += 2;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unknown option: {}", args[i]),
+            ));
+        }
+    }
+    let config = ferrite::TrainConfig {
+        vocab_size,
+        ..Default::default()
+    };
+    println!(
+        "Training BPE vocabulary from {} (target size: {})...",
+        corpus_path.display(),
+        vocab_size
+    );
+    let start = Instant::now();
+    let vocab = ferrite::train_vocab_file(corpus_path, out_path, &config)?;
+    println!(
+        "Trained {} tokens ({} merges) in {:.2?}. Saved to {}",
+        vocab.tokens.len(),
+        vocab.merges.len(),
+        start.elapsed(),
+        out_path.display()
+    );
+    Ok(())
+}
+
+fn cmd_embed(args: &[String]) -> std::io::Result<()> {
+    if args.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite embed <model> <text...> [--pooling <mean|cls|last>] [--compare]",
+        ));
+    }
+    let path = lmstudio::resolve(&args[0])?;
+    let mut texts = Vec::new();
+    let mut pooling = ferrite::Pooling::Mean;
+    let mut compare = false;
+    let mut threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--pooling" && i + 1 < args.len() {
+            pooling = args[i + 1].parse().map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}"))
+            })?;
+            i += 2;
+        } else if args[i] == "--compare" {
+            compare = true;
+            i += 1;
+        } else if args[i] == "--threads" && i + 1 < args.len() {
+            threads = args[i + 1].parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid threads: {e}"),
+                )
+            })?;
+            i += 2;
+        } else if !args[i].starts_with("--") {
+            texts.push(args[i].clone());
+            i += 1;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unknown option {}", args[i]),
+            ));
+        }
+    }
+    if texts.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no input text provided to embed",
+        ));
+    }
+
+    let gguf = Gguf::open(&path)?;
+    let model = Model::load(&gguf)?;
+    let tokenizer = Tokenizer::from_gguf(&gguf)?;
+    let engine = ferrite::EmbedEngine::new(&model, pooling, true);
+
+    let mut state = State::new(&model.config);
+    state.threads = threads;
+
+    let mut vectors = Vec::new();
+    for (idx, text) in texts.iter().enumerate() {
+        let tokens = tokenizer.encode(text, true);
+        let vector = engine.embed(&mut state, &tokens)?;
+        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        println!(
+            "[{idx}] \"{text}\" -> dim {}, L2 norm: {norm:.4}",
+            vector.len()
+        );
+        vectors.push(vector);
+    }
+
+    if compare && vectors.len() >= 2 {
+        println!("\nCosine Similarity Matrix:");
+        for i in 0..vectors.len() {
+            for j in 0..vectors.len() {
+                let sim = ferrite::cosine_similarity(&vectors[i], &vectors[j]);
+                print!("{sim:8.4} ");
+            }
+            println!("  [{i}] \"{}\"", texts[i]);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_distributed(args: &[String]) -> std::io::Result<()> {
+    if args.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite distributed <worker|driver> ...",
+        ));
+    }
+    match args[0].as_str() {
+        "worker" => {
+            if args.len() < 2 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "usage: ferrite distributed worker <model> [--listen <host:port>] [--layers <start..end>]",
+                ));
+            }
+            let path = lmstudio::resolve(&args[1])?;
+            let gguf = Gguf::open(&path)?;
+            let model = Model::load(&gguf)?;
+            let listen_addr: String = flag(&args[2..], "--listen", "127.0.0.1:9090".to_string())?;
+            let layers_str: String = flag(
+                &args[2..],
+                "--layers",
+                format!("0..{}", model.config.layers),
+            )?;
+            let parts: Vec<&str> = layers_str.split("..").collect();
+            let start: usize = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let end: usize = parts
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(model.config.layers);
+            let listener = std::net::TcpListener::bind(&listen_addr)?;
+            eprintln!("Distributed worker listening on {listen_addr} for layers {start}..{end}");
+            ferrite::distributed::run_worker(&model, start..end, listener)
+        }
+        "driver" => {
+            if args.len() < 3 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "usage: ferrite distributed driver <model> <prompt> [--remote <host:port>] [--layers <start..end>]",
+                ));
+            }
+            let path = lmstudio::resolve(&args[1])?;
+            let gguf = Gguf::open(&path)?;
+            let model = Model::load(&gguf)?;
+            let tokenizer = Tokenizer::from_gguf(&gguf)?;
+            let remote_addr: String = flag(&args[3..], "--remote", "127.0.0.1:9090".to_string())?;
+            let layers_str: String = flag(
+                &args[3..],
+                "--layers",
+                format!("1..{}", model.config.layers),
+            )?;
+            let parts: Vec<&str> = layers_str.split("..").collect();
+            let remote_start: usize = parts.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+            let remote_end: usize = parts
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(model.config.layers);
+            let prompt = &args[2];
+            let tokens = tokenizer.encode(prompt, true);
+            let mut state = State::new(&model.config);
+            let mut driver = ferrite::distributed::DistributedDriver::connect(
+                &model,
+                0..remote_start,
+                remote_start..remote_end,
+                &remote_addr,
+            )?;
+            for (pos, &tok) in tokens.iter().enumerate() {
+                driver.forward(&mut state, tok, pos)?;
+            }
+            let mut sampler = ferrite::sample::Sampler::greedy();
+            let next_tok = sampler.sample(&mut state.logits);
+            let piece = tokenizer.piece(next_tok);
+            println!("{}", String::from_utf8_lossy(&piece));
+            driver.shutdown()?;
+            Ok(())
+        }
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown distributed subcommand '{other}', expected worker or driver"),
+        )),
+    }
+}
+
+fn cmd_lora(args: &[String]) -> std::io::Result<()> {
+    if args.len() < 4 || args[0] != "merge" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>",
+        ));
+    }
+    let base_path = lmstudio::resolve(&args[1])?;
+    let base = Gguf::open(&base_path)?;
+    let adapter_files: Vec<Gguf> = args[3..]
+        .iter()
+        .map(|path| lmstudio::resolve(path).and_then(|p| Gguf::open(&p)))
+        .collect::<std::io::Result<_>>()?;
+    let refs: Vec<&Gguf> = adapter_files.iter().collect();
+    ferrite::lora::merge_adapters(&base, &refs, std::path::Path::new(&args[2]))
+}
+
+fn cmd_quantize(args: &[String]) -> std::io::Result<()> {
+    if args.len() != 3 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>",
+        ));
+    }
+    let target = match args[2].to_ascii_uppercase().as_str() {
+        "Q8_0" => ferrite::GgmlType::Q8_0,
+        "Q4_0" => ferrite::GgmlType::Q4_0,
+        "Q4_K" => ferrite::GgmlType::Q4_K,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "quantization type must be Q8_0, Q4_0, or Q4_K",
+            ))
+        }
+    };
+    ferrite::quant::quantize::quantize_file(
+        std::path::Path::new(&args[0]),
+        std::path::Path::new(&args[1]),
+        target,
+    )
+}
+
+fn cmd_merge(args: &[String]) -> std::io::Result<()> {
+    if args.len() < 5 || args[3] != "--method" {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+            "usage: ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare> [--weight <0..1>]"));
+    }
+    let method = ferrite::merge::MergeMethod::parse(&args[4])?;
+    let weight = if args.len() == 7 && args[5] == "--weight" {
+        args[6].parse().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid merge weight")
+        })?
+    } else if args.len() == 5 {
+        0.5
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected optional --weight <0..1>",
+        ));
+    };
+    let a = Gguf::open(&lmstudio::resolve(&args[0])?)?;
+    let b = Gguf::open(&lmstudio::resolve(&args[1])?)?;
+    ferrite::merge::merge_models(&a, &b, std::path::Path::new(&args[2]), method, weight)
+}
+
+fn cmd_perplexity(args: &[String]) -> std::io::Result<()> {
+    let context: usize = flag(args, "--ctx", 512)?;
+    let stride: usize = flag(args, "--stride", context)?;
+    let threads: usize = flag(args, "--threads", 0)?;
+
+    let flags = ["--ctx", "--stride", "--threads"];
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if flags.contains(&args[index].as_str()) {
+            index += 2;
+            continue;
+        }
+        positional.push(args[index].clone());
+        index += 1;
+    }
+
+    let (query, file_path) = match positional.as_slice() {
+        [q, f] => (q, f),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: ferrite perplexity <model> <text_file> [--ctx <n>] [--stride <n>] [--threads <n>]",
+            ));
+        }
+    };
+
+    let text = std::fs::read_to_string(file_path)?;
+    let path = lmstudio::resolve(query)?;
+    let gguf = Gguf::open(&path)?;
+    let tokenizer = Tokenizer::from_gguf(&gguf)?;
+    let model = Model::load(&gguf)?;
+
+    let tokens = tokenizer.encode(&text, false);
+    if tokens.len() < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "file encoded to {} tokens, but at least 2 tokens are required",
+                tokens.len()
+            ),
+        ));
+    }
+
+    let worker_count = if threads > 0 {
+        threads
+    } else {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4)
+    };
+
+    eprintln!(
+        "model: {} · {} tokens · ctx: {context} · stride: {stride} · threads: {worker_count}",
+        model.config.arch,
+        tokens.len(),
+    );
+
+    let start = Instant::now();
+    let evaluator =
+        ferrite::eval::PerplexityEvaluator::new(&model, context, stride).with_threads(threads);
+
+    let report = evaluator.evaluate_with_callback(&tokens, |chunk| {
+        let chunk_tokens = chunk.count;
+        let nll = chunk.chunk_nll / chunk_tokens as f64;
+        eprintln!(
+            "  chunk {:>3} [{:>6}..{:>6}] · {:>4} tokens · nll: {:>7.4} · ppl: {:>8.4}",
+            chunk.chunk_index + 1,
+            chunk.start_token,
+            chunk.start_token + chunk_tokens,
+            chunk_tokens,
+            nll,
+            chunk.chunk_ppl,
+        );
+    })?;
+
+    let elapsed = start.elapsed();
+    println!("\nPerplexity evaluation results:");
+    println!("  Total tokens:      {}", report.total_tokens);
+    println!("  Evaluated tokens:  {}", report.evaluated_tokens);
+    println!("  Mean loss (NLL):   {:.4}", report.mean_loss);
+    println!("  Perplexity (PPL):  {:.4}", report.perplexity);
+    println!(
+        "  Speed:             {:.1} tok/s ({:.2}s)",
+        report.evaluated_tokens as f64 / elapsed.as_secs_f64().max(1e-9),
+        elapsed.as_secs_f64()
+    );
+
+    Ok(())
+}
+
+fn cmd_convert(args: &[String]) -> std::io::Result<()> {
+    let arch: Option<String> = {
+        let at = args.iter().position(|a| a == "--arch");
+        at.and_then(|i| args.get(i + 1).cloned())
+    };
+
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--arch" {
+            index += 2;
+            continue;
+        }
+        positional.push(args[index].clone());
+        index += 1;
+    }
+
+    let (src, dst) = match positional.as_slice() {
+        [s, d] => (s, d),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: ferrite convert <safetensors_file_or_dir> <output.gguf> [--arch <arch>]",
+            ));
+        }
+    };
+
+    eprintln!("converting {src} -> {dst}...");
+    let start = Instant::now();
+    ferrite::convert::convert_safetensors_to_gguf(
+        std::path::Path::new(src),
+        std::path::Path::new(dst),
+        arch.as_deref(),
+    )?;
+    let elapsed = start.elapsed();
+    eprintln!(
+        "successfully converted to {dst} in {:.2}s",
+        elapsed.as_secs_f64()
+    );
+    Ok(())
 }
 
 fn cmd_where() -> std::io::Result<()> {
@@ -241,9 +687,32 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let temperature: f32 = flag(args, "--temp", 0.0)?;
     let top_k: usize = flag(args, "--top-k", 40)?;
     let top_p: f32 = flag(args, "--top-p", 0.95)?;
+    let min_p: f32 = flag(args, "--min-p", 0.0)?;
+    let tfs: f32 = flag(args, "--tfs", 1.0)?;
+    let repeat_penalty: f32 = flag(args, "--repeat-penalty", 1.0)?;
+    let frequency_penalty: f32 = flag(args, "--frequency-penalty", 0.0)?;
+    let presence_penalty: f32 = flag(args, "--presence-penalty", 0.0)?;
+    let repeat_last_n: usize = flag(args, "--repeat-last-n", 64)?;
     let seed: u64 = flag(args, "--seed", 1)?;
     let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
     let threads: usize = flag(args, "--threads", 0)?;
+
+    let draft_query: Option<String> = {
+        let at = args.iter().position(|a| a == "--draft");
+        at.and_then(|i| args.get(i + 1).cloned())
+    };
+    let spec_k: usize = flag(args, "--spec-k", 3)?;
+    let spec_tree: usize = flag(args, "--spec-tree", 0)?;
+    let lookahead: usize = flag(args, "--lookahead", 0)?;
+    let lookahead_ngram: usize = flag(args, "--lookahead-ngram", 3)?;
+    let chunk_size: usize = flag(args, "--chunk-size", 512)?;
+    let kv_cache: ferrite::kv::KvCacheType =
+        flag(args, "--kv-cache", ferrite::kv::KvCacheType::F32)?;
+
+    let lora_query: Option<String> = {
+        let at = args.iter().position(|a| a == "--lora");
+        at.and_then(|i| args.get(i + 1).cloned())
+    };
 
     // Positionals are whatever is left once flags and their values are removed.
     let flags = [
@@ -251,9 +720,23 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--temp",
         "--top-k",
         "--top-p",
+        "--min-p",
+        "--tfs",
+        "--repeat-penalty",
+        "--frequency-penalty",
+        "--presence-penalty",
+        "--repeat-last-n",
         "--seed",
         "--ctx",
         "--threads",
+        "--draft",
+        "--spec-k",
+        "--spec-tree",
+        "--lookahead",
+        "--lookahead-ngram",
+        "--lora",
+        "--chunk-size",
+        "--kv-cache",
     ];
     let mut positional = Vec::new();
     let mut index = 0;
@@ -278,12 +761,51 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let path = lmstudio::resolve(&query)?;
     let gguf = Gguf::open(&path)?;
     let tokenizer = Tokenizer::from_gguf(&gguf)?;
-    let model = Model::load(&gguf)?;
-    let mut state = State::with_context(&model.config, context);
+    let mut model = Model::load(&gguf)?;
+
+    let lora_gguf = if let Some(lq) = &lora_query {
+        let lora_path = lmstudio::resolve(lq)?;
+        Some(Gguf::open(&lora_path)?)
+    } else {
+        None
+    };
+    if let Some(lgguf) = &lora_gguf {
+        let adapter = ferrite::lora::LoraAdapter::load(lgguf, None)?;
+        model.apply_lora(adapter);
+    }
+    let mut state = State::with_kv_cache(&model.config, context, kv_cache);
     if threads > 0 {
         state.threads = threads;
     }
-    let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
+    let penalties = ferrite::sample::PenaltyConfig {
+        repetition_penalty: repeat_penalty,
+        frequency_penalty,
+        presence_penalty,
+        last_n: repeat_last_n,
+    };
+    let mut sampler = Sampler::new(temperature, top_k, top_p, seed)
+        .with_min_p(min_p)
+        .with_tfs(tfs)
+        .with_penalties(penalties);
+
+    // Optional draft model for speculative decoding
+    let draft_gguf = if let Some(dq) = &draft_query {
+        let draft_path = lmstudio::resolve(dq)?;
+        Some(Gguf::open(&draft_path)?)
+    } else {
+        None
+    };
+
+    let mut draft_bundle = if let Some(gguf) = &draft_gguf {
+        let draft_model = Model::load(gguf)?;
+        let mut draft_state = State::with_context(&draft_model.config, context);
+        if threads > 0 {
+            draft_state.threads = threads;
+        }
+        Some((draft_model, draft_state))
+    } else {
+        None
+    };
 
     let prompt_tokens = tokenizer.encode(&prompt, true);
     if prompt_tokens.is_empty() {
@@ -292,21 +814,45 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
             "prompt encoded to no tokens",
         ));
     }
-    eprintln!(
-        "{} · {} prompt tokens · {} kv cache · {} threads",
-        model.config.arch,
-        prompt_tokens.len(),
-        human(state.cache_bytes() as u64),
-        state.threads
-    );
+    if let Some((draft_model, _)) = &draft_bundle {
+        let tree_info = if spec_tree > 0 {
+            format!(" (tree branches={spec_tree})")
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "target: {} · draft: {} (k={spec_k}{tree_info}) · {} prompt tokens · {} kv cache · {} threads",
+            model.config.arch,
+            draft_model.config.arch,
+            prompt_tokens.len(),
+            human(state.cache_bytes() as u64),
+            state.threads
+        );
+    } else {
+        eprintln!(
+            "{} · {} prompt tokens · {} kv cache · {} threads",
+            model.config.arch,
+            prompt_tokens.len(),
+            human(state.cache_bytes() as u64),
+            state.threads
+        );
+    }
 
     let mut stdout = std::io::stdout();
     print!("{prompt}");
     stdout.flush().ok();
 
     let prefill_start = Instant::now();
-    for (position, token) in prompt_tokens.iter().enumerate() {
-        model.forward(&mut state, *token, position)?;
+    if chunk_size > 0 && chunk_size < prompt_tokens.len() {
+        model.prefill_chunked(&mut state, &prompt_tokens, 0, chunk_size)?;
+        if let Some((draft_model, draft_state)) = &mut draft_bundle {
+            draft_model.prefill_chunked(draft_state, &prompt_tokens, 0, chunk_size)?;
+        }
+    } else {
+        model.prefill(&mut state, &prompt_tokens, 0)?;
+        if let Some((draft_model, draft_state)) = &mut draft_bundle {
+            draft_model.prefill(draft_state, &prompt_tokens, 0)?;
+        }
     }
     let prefill = prefill_start.elapsed();
 
@@ -317,32 +863,197 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let mut generated = 0;
     let decode_start = Instant::now();
 
-    while generated < limit && position < state.context() {
-        let token = sampler.sample(&mut state.logits);
-        if Some(token) == tokenizer.eos {
-            break;
+    if let Some((draft_model, draft_state)) = &mut draft_bundle {
+        let (acc_rate, tok_per_batch) = if spec_tree > 0 {
+            let mut engine = ferrite::speculative::SpeculativeTreeEngine::new(
+                &model,
+                draft_model,
+                spec_k,
+                spec_tree,
+            );
+            while generated < limit && position < state.context() {
+                let emitted = engine.step(&mut state, draft_state, position, &mut sampler)?;
+                let mut stopped = false;
+                for token in emitted {
+                    if Some(token) == tokenizer.eos {
+                        stopped = true;
+                        break;
+                    }
+                    pending.extend(tokenizer.piece(token));
+                    if let Ok(text) = std::str::from_utf8(&pending) {
+                        print!("{text}");
+                        stdout.flush().ok();
+                        pending.clear();
+                    }
+                    position += 1;
+                    generated += 1;
+                    if generated >= limit || position >= state.context() {
+                        stopped = true;
+                        break;
+                    }
+                }
+                if stopped {
+                    break;
+                }
+            }
+            (
+                engine.stats.acceptance_rate(),
+                engine.stats.tokens_per_batch(),
+            )
+        } else {
+            let mut engine =
+                ferrite::speculative::SpeculativeEngine::new(&model, draft_model, spec_k);
+            while generated < limit && position < state.context() {
+                let emitted = engine.step(&mut state, draft_state, position, &mut sampler)?;
+                let mut stopped = false;
+                for token in emitted {
+                    if Some(token) == tokenizer.eos {
+                        stopped = true;
+                        break;
+                    }
+                    pending.extend(tokenizer.piece(token));
+                    if let Ok(text) = std::str::from_utf8(&pending) {
+                        print!("{text}");
+                        stdout.flush().ok();
+                        pending.clear();
+                    }
+                    position += 1;
+                    generated += 1;
+                    if generated >= limit || position >= state.context() {
+                        stopped = true;
+                        break;
+                    }
+                }
+                if stopped {
+                    break;
+                }
+            }
+            (
+                engine.stats.acceptance_rate(),
+                engine.stats.tokens_per_batch(),
+            )
+        };
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s) · acceptance rate {:.1}% ({:.2} tok/target-step)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+            acc_rate * 100.0,
+            tok_per_batch,
+        );
+    } else if lookahead > 0 {
+        let mut engine =
+            ferrite::speculative::LookaheadEngine::new(&model, lookahead_ngram, lookahead);
+        let mut token_history = prompt_tokens.clone();
+        while generated < limit && position < state.context() {
+            let emitted = engine.step(&mut state, &token_history, position, &mut sampler)?;
+            let mut stopped = false;
+            for token in emitted {
+                if Some(token) == tokenizer.eos {
+                    stopped = true;
+                    break;
+                }
+                token_history.push(token);
+                pending.extend(tokenizer.piece(token));
+                if let Ok(text) = std::str::from_utf8(&pending) {
+                    print!("{text}");
+                    stdout.flush().ok();
+                    pending.clear();
+                }
+                position += 1;
+                generated += 1;
+                if generated >= limit || position >= state.context() {
+                    stopped = true;
+                    break;
+                }
+            }
+            if stopped {
+                break;
+            }
         }
-        pending.extend(tokenizer.piece(token));
-        if let Ok(text) = std::str::from_utf8(&pending) {
-            print!("{text}");
-            stdout.flush().ok();
-            pending.clear();
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s) · lookahead acceptance rate {:.1}% ({:.2} tok/target-step)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+            engine.stats.acceptance_rate() * 100.0,
+            engine.stats.tokens_per_batch(),
+        );
+    } else if (args.iter().any(|a| a == "--mtp") || model.mtp_module.is_some())
+        && model.mtp_module.is_some()
+    {
+        let mut engine = ferrite::speculative::MtpEngine::new(&model);
+        while generated < limit && position < state.context() {
+            let emitted = engine.step(&mut state, position, &mut sampler)?;
+            let mut stopped = false;
+            for token in emitted {
+                if Some(token) == tokenizer.eos {
+                    stopped = true;
+                    break;
+                }
+                pending.extend(tokenizer.piece(token));
+                if let Ok(text) = std::str::from_utf8(&pending) {
+                    print!("{text}");
+                    stdout.flush().ok();
+                    pending.clear();
+                }
+                position += 1;
+                generated += 1;
+                if generated >= limit || position >= state.context() {
+                    stopped = true;
+                    break;
+                }
+            }
+            if stopped {
+                break;
+            }
         }
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s) · MTP acceptance rate {:.1}% ({:.2} tok/target-step)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+            engine.stats.acceptance_rate() * 100.0,
+            engine.stats.tokens_per_batch(),
+        );
+    } else {
+        let mut token_history = prompt_tokens.clone();
+        while generated < limit && position < state.context() {
+            let token = sampler.sample_with_history(&mut state.logits, &token_history);
+            if Some(token) == tokenizer.eos {
+                break;
+            }
+            token_history.push(token);
+            pending.extend(tokenizer.piece(token));
+            if let Ok(text) = std::str::from_utf8(&pending) {
+                print!("{text}");
+                stdout.flush().ok();
+                pending.clear();
+            }
 
-        model.forward(&mut state, token, position)?;
-        position += 1;
-        generated += 1;
+            model.forward(&mut state, token, position)?;
+            position += 1;
+            generated += 1;
+        }
+        println!();
+        let decode = decode_start.elapsed();
+        eprintln!(
+            "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s)",
+            prefill.as_secs_f64(),
+            prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
+            decode.as_secs_f64(),
+            generated as f64 / decode.as_secs_f64().max(1e-9),
+        );
     }
-    println!();
-
-    let decode = decode_start.elapsed();
-    eprintln!(
-        "\nprefill {:.2}s ({:.1} tok/s) · decode {generated} tokens in {:.2}s ({:.1} tok/s)",
-        prefill.as_secs_f64(),
-        prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
-        decode.as_secs_f64(),
-        generated as f64 / decode.as_secs_f64().max(1e-9),
-    );
     Ok(())
 }
 
@@ -368,4 +1079,230 @@ fn si(n: u64) -> String {
         n if n >= 1_000 => format!("{:.0}K", n as f64 / 1e3),
         n => n.to_string(),
     }
+}
+
+fn cmd_serve(args: &[String]) -> std::io::Result<()> {
+    let mut host = "127.0.0.1".to_string();
+    let mut port = 8080u16;
+    let mut context = 2048usize;
+    let mut threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    let mut query = None;
+    let mut lora: Option<String> = None;
+    let mut kv_cache = ferrite::kv::KvCacheType::F32;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                i += 1;
+                if let Some(h) = args.get(i) {
+                    host = h.clone();
+                }
+            }
+            "--port" => {
+                i += 1;
+                if let Some(p) = args.get(i).and_then(|s| s.parse().ok()) {
+                    port = p;
+                }
+            }
+            "--ctx" => {
+                i += 1;
+                if let Some(c) = args.get(i).and_then(|s| s.parse().ok()) {
+                    context = c;
+                }
+            }
+            "--threads" => {
+                i += 1;
+                if let Some(t) = args.get(i).and_then(|s| s.parse().ok()) {
+                    threads = t;
+                }
+            }
+            "--lora" => {
+                i += 1;
+                if let Some(l) = args.get(i) {
+                    lora = Some(l.clone());
+                }
+            }
+            "--kv-cache" => {
+                i += 1;
+                if let Some(k) = args.get(i).and_then(|s| s.parse().ok()) {
+                    kv_cache = k;
+                }
+            }
+            arg if !arg.starts_with('-') && query.is_none() => {
+                query = Some(arg.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let query = query.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "serve needs a model id or path",
+        )
+    })?;
+
+    let path = lmstudio::resolve(&query)?;
+    let gguf = Box::leak(Box::new(Gguf::open(&path)?));
+    let model = Box::leak(Box::new(Model::load(gguf)?));
+    if let Some(lq) = &lora {
+        let lora_path = lmstudio::resolve(lq)?;
+        let lora_gguf = Box::leak(Box::new(Gguf::open(&lora_path)?));
+        let adapter = ferrite::lora::LoraAdapter::load(lora_gguf, None)?;
+        model.apply_lora(adapter);
+    }
+    let tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(gguf)?));
+
+    let config = ferrite::server::ServerConfig {
+        host: host.clone(),
+        port,
+        threads,
+        context,
+        kv_cache,
+    };
+
+    let server = ferrite::server::Server::new(model, tokenizer, config);
+    let listener = server.listen()?;
+    eprintln!(
+        "ferrite HTTP inference daemon listening on http://{host}:{port} ({}, {} threads, ctx {context})",
+        model.config.arch, threads
+    );
+
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    server.serve_with_shutdown(&listener, shutdown)
+}
+
+fn cmd_vision(args: &[String]) -> std::io::Result<()> {
+    let limit: usize = flag(args, "-n", 128)?;
+    let temperature: f32 = flag(args, "--temp", 0.0)?;
+    let top_k: usize = flag(args, "--top-k", 40)?;
+    let top_p: f32 = flag(args, "--top-p", 0.95)?;
+    let seed: u64 = flag(args, "--seed", 1)?;
+    let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
+    let threads: usize = flag(args, "--threads", 0)?;
+
+    let image_path: String = {
+        let at = args.iter().position(|a| a == "--image");
+        match at.and_then(|i| args.get(i + 1).cloned()) {
+            Some(p) => p,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "vision requires --image <path.ppm|path.bmp>",
+                ));
+            }
+        }
+    };
+
+    let mmproj_path: String = {
+        let at = args.iter().position(|a| a == "--mmproj");
+        match at.and_then(|i| args.get(i + 1).cloned()) {
+            Some(p) => p,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "vision requires --mmproj <path.gguf>",
+                ));
+            }
+        }
+    };
+
+    let flags = [
+        "-n",
+        "--temp",
+        "--top-k",
+        "--top-p",
+        "--seed",
+        "--ctx",
+        "--threads",
+        "--image",
+        "--mmproj",
+    ];
+    let mut positional = Vec::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        if flags.contains(&args[idx].as_str()) {
+            idx += 2;
+            continue;
+        }
+        positional.push(args[idx].clone());
+        idx += 1;
+    }
+
+    let (model_query, prompt) = match positional.as_slice() {
+        [m] => (m.as_str(), "Describe this image in detail:".to_string()),
+        [m, rest @ ..] => (m.as_str(), rest.join(" ")),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: ferrite vision <model> --image <image> --mmproj <mmproj.gguf> [prompt]",
+            ));
+        }
+    };
+
+    let model_path = lmstudio::resolve(model_query)?;
+    let model_gguf = Gguf::open(&model_path)?;
+    let tokenizer = Tokenizer::from_gguf(&model_gguf)?;
+    let model = Model::load(&model_gguf)?;
+
+    let mm_path = lmstudio::resolve(&mmproj_path)?;
+    let mm_gguf = Gguf::open(&mm_path)?;
+    let vision_encoder = ferrite::vision::VisionEncoder::from_gguf(&mm_gguf)?;
+
+    let image = ferrite::vision::Image::open(&image_path)?;
+    let image_tokens = vision_encoder.encode_image(&image)?;
+
+    let mut state = State::with_context(&model.config, context);
+    if threads > 0 {
+        state.threads = threads;
+    }
+
+    let prefix_tokens = tokenizer.encode("[USER] Image: ", true);
+    let suffix_tokens = tokenizer.encode(&format!("\nPrompt: {prompt}\n[ASSISTANT] "), false);
+
+    let start = Instant::now();
+    model.prefill_multimodal(&mut state, &prefix_tokens, &image_tokens, &suffix_tokens, 0)?;
+
+    let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
+    let mut next_token = sampler.sample(&mut state.logits);
+
+    let mut stdout = std::io::stdout();
+    let num_patches = image_tokens.len() / model.config.embedding;
+    eprintln!(
+        "Vision inference: image ({}x{} -> {} tokens) + prompt ({} tokens)",
+        image.width,
+        image.height,
+        num_patches,
+        prefix_tokens.len() + suffix_tokens.len()
+    );
+
+    let mut pos = prefix_tokens.len() + num_patches + suffix_tokens.len();
+    let mut generated = 0;
+    while generated < limit {
+        if Some(next_token) == tokenizer.eos {
+            break;
+        }
+        let piece = tokenizer.piece(next_token);
+        stdout.write_all(&piece).ok();
+        stdout.flush().ok();
+
+        model.forward(&mut state, next_token, pos)?;
+        pos += 1;
+        generated += 1;
+        next_token = sampler.sample(&mut state.logits);
+    }
+    println!();
+    let elapsed = start.elapsed();
+    eprintln!(
+        "\nGenerated {} tokens in {:.2?} ({:.1} tok/s)",
+        generated,
+        elapsed,
+        generated as f64 / elapsed.as_secs_f64()
+    );
+
+    Ok(())
 }

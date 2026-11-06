@@ -44,7 +44,81 @@ pub struct Sampler {
     pub top_k: usize,
     /// Keep the smallest set whose probabilities reach p. 1.0 disables.
     pub top_p: f32,
+    /// Minimum probability scale relative to top token (p >= p_max * min_p). 0.0 disables.
+    pub min_p: f32,
+    /// Tail free sampling parameter z in (0, 1]. 1.0 disables.
+    pub tfs_z: f32,
+    pub penalties: PenaltyConfig,
     pub rng: Rng,
+}
+
+/// Configuration for repetition, frequency, and presence penalties.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenaltyConfig {
+    /// Multiplicative penalty on previous tokens: > 1.0 penalizes, 1.0 disables.
+    pub repetition_penalty: f32,
+    /// Additive penalty proportional to count of occurrences: > 0.0 penalizes, 0.0 disables.
+    pub frequency_penalty: f32,
+    /// Additive penalty on any token that appeared at least once: > 0.0 penalizes, 0.0 disables.
+    pub presence_penalty: f32,
+    /// Window of trailing tokens to penalize (0 means entire sequence).
+    pub last_n: usize,
+}
+
+impl Default for PenaltyConfig {
+    fn default() -> Self {
+        Self {
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            last_n: 64,
+        }
+    }
+}
+
+/// Apply repetition, frequency, and presence penalties to raw unnormalized logits.
+pub fn apply_penalties(logits: &mut [f32], tokens: &[u32], config: &PenaltyConfig) {
+    if tokens.is_empty() {
+        return;
+    }
+    if (config.repetition_penalty - 1.0).abs() < 1e-6
+        && config.frequency_penalty.abs() < 1e-6
+        && config.presence_penalty.abs() < 1e-6
+    {
+        return;
+    }
+
+    let window = if config.last_n == 0 || config.last_n >= tokens.len() {
+        tokens
+    } else {
+        &tokens[tokens.len() - config.last_n..]
+    };
+
+    let mut counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for &tok in window {
+        *counts.entry(tok).or_insert(0) += 1;
+    }
+
+    for (tok, count) in counts {
+        if let Some(logit) = logits.get_mut(tok as usize) {
+            // Multiplicative repetition penalty
+            if (config.repetition_penalty - 1.0).abs() > 1e-6 && config.repetition_penalty > 0.0 {
+                if *logit > 0.0 {
+                    *logit /= config.repetition_penalty;
+                } else {
+                    *logit *= config.repetition_penalty;
+                }
+            }
+            // Additive frequency penalty
+            if config.frequency_penalty.abs() > 1e-6 {
+                *logit -= (count as f32) * config.frequency_penalty;
+            }
+            // Additive presence penalty
+            if config.presence_penalty.abs() > 1e-6 {
+                *logit -= config.presence_penalty;
+            }
+        }
+    }
 }
 
 impl Default for Sampler {
@@ -61,6 +135,9 @@ impl Sampler {
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
+            min_p: 0.0,
+            tfs_z: 1.0,
+            penalties: PenaltyConfig::default(),
             rng: Rng::new(1),
         }
     }
@@ -70,8 +147,66 @@ impl Sampler {
             temperature,
             top_k,
             top_p,
+            min_p: 0.0,
+            tfs_z: 1.0,
+            penalties: PenaltyConfig::default(),
             rng: Rng::new(seed),
         }
+    }
+
+    pub fn new_advanced(
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        tfs_z: f32,
+        seed: u64,
+    ) -> Self {
+        Self {
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            tfs_z,
+            penalties: PenaltyConfig::default(),
+            rng: Rng::new(seed),
+        }
+    }
+
+    pub fn with_min_p(mut self, min_p: f32) -> Self {
+        self.min_p = min_p;
+        self
+    }
+
+    pub fn with_tfs(mut self, tfs_z: f32) -> Self {
+        self.tfs_z = tfs_z;
+        self
+    }
+
+    pub fn with_penalties(mut self, penalties: PenaltyConfig) -> Self {
+        self.penalties = penalties;
+        self
+    }
+
+    pub fn with_repetition_penalty(mut self, rep: f32) -> Self {
+        self.penalties.repetition_penalty = rep;
+        self
+    }
+
+    pub fn with_frequency_penalty(mut self, freq: f32) -> Self {
+        self.penalties.frequency_penalty = freq;
+        self
+    }
+
+    pub fn with_presence_penalty(mut self, pres: f32) -> Self {
+        self.penalties.presence_penalty = pres;
+        self
+    }
+
+    /// Sample token after applying repetition/frequency/presence penalties from history.
+    pub fn sample_with_history(&mut self, logits: &mut [f32], history: &[u32]) -> u32 {
+        apply_penalties(logits, history, &self.penalties);
+        self.sample(logits)
     }
 
     /// Pick a token. `logits` is modified in place — it is scratch after this.
@@ -89,8 +224,7 @@ impl Sampler {
         }
         ops::softmax(logits);
 
-        // Index by probability, descending. Only the head matters, so when
-        // top-k is small the rest is left unsorted.
+        // Index by probability, descending.
         let mut ranked: Vec<(f32, u32)> = logits
             .iter()
             .enumerate()
@@ -107,17 +241,58 @@ impl Sampler {
         }
         ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
 
-        // Nucleus: the shortest prefix whose mass reaches top_p.
-        let mut total = 0.0;
-        let mut cutoff = ranked.len();
-        for (position, (probability, _)) in ranked.iter().enumerate() {
-            total += probability;
-            if total >= self.top_p {
-                cutoff = position + 1;
-                break;
+        // 1. Min-P truncation: remove tokens where p < p_max * min_p
+        if self.min_p > 0.0 && !ranked.is_empty() {
+            let threshold = ranked[0].0 * self.min_p;
+            let mut keep_count = 0;
+            for (p, _) in &ranked {
+                if *p >= threshold {
+                    keep_count += 1;
+                } else {
+                    break;
+                }
+            }
+            ranked.truncate(keep_count.max(1));
+        }
+
+        // 2. Tail Free Sampling (TFS): truncate based on normalized second derivative
+        if self.tfs_z < 1.0 && ranked.len() > 2 {
+            let mut d = Vec::with_capacity(ranked.len() - 1);
+            for i in 0..ranked.len() - 1 {
+                d.push(ranked[i].0 - ranked[i + 1].0);
+            }
+            let mut d2 = Vec::with_capacity(d.len() - 1);
+            for i in 0..d.len() - 1 {
+                d2.push((d[i] - d[i + 1]).abs());
+            }
+            let d2_sum: f32 = d2.iter().sum();
+            if d2_sum > 0.0 {
+                let mut cum = 0.0;
+                let mut cutoff = ranked.len();
+                for (i, v) in d2.iter().enumerate() {
+                    cum += v / d2_sum;
+                    if cum >= self.tfs_z {
+                        cutoff = i + 1;
+                        break;
+                    }
+                }
+                ranked.truncate(cutoff.max(1));
             }
         }
-        ranked.truncate(cutoff.max(1));
+
+        // 3. Nucleus (Top-P): the shortest prefix whose mass reaches top_p.
+        if self.top_p < 1.0 {
+            let mut total = 0.0;
+            let mut cutoff = ranked.len();
+            for (position, (probability, _)) in ranked.iter().enumerate() {
+                total += probability;
+                if total >= self.top_p {
+                    cutoff = position + 1;
+                    break;
+                }
+            }
+            ranked.truncate(cutoff.max(1));
+        }
 
         let mass: f32 = ranked.iter().map(|(p, _)| p).sum();
         let mut target = self.rng.next_f32() * mass;
@@ -211,5 +386,62 @@ mod tests {
         }
         let mean = sum / 10_000.0;
         assert!((mean - 0.5f32).abs() < 0.02, "mean {mean}");
+    }
+
+    #[test]
+    fn min_p_drops_sub_threshold_tail() {
+        // Logits: token 0 is dominant (~0.8), token 1 is ~0.15, token 2 is ~0.05
+        // With min_p = 0.2, threshold is 0.8 * 0.2 = 0.16. Token 2 must be dropped.
+        let mut sampler = Sampler::new(1.0, 0, 1.0, 42).with_min_p(0.25);
+        for _ in 0..50 {
+            let res = sampler.sample(&mut [5.0, 3.5, 0.0]);
+            assert!(
+                res == 0 || res == 1,
+                "token 2 should be filtered out by min_p"
+            );
+        }
+    }
+
+    #[test]
+    fn tfs_truncates_long_tail() {
+        let mut sampler = Sampler::new(1.0, 0, 1.0, 42).with_tfs(0.9);
+        // Logits with a sharp drop after token 1
+        for _ in 0..50 {
+            let res = sampler.sample(&mut [10.0, 8.0, 1.0, 0.5, 0.1, 0.05]);
+            assert!(res == 0 || res == 1, "tail tokens should be removed by TFS");
+        }
+    }
+
+    #[test]
+    fn repetition_penalty_reduces_repeated_token_probability() {
+        let mut logits = [2.0, 1.0];
+        let history = [0]; // token 0 previously generated
+        let config = PenaltyConfig {
+            repetition_penalty: 2.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            last_n: 10,
+        };
+        apply_penalties(&mut logits, &history, &config);
+        // Logit 0 was 2.0, with rep penalty 2.0 it becomes 1.0
+        assert!((logits[0] - 1.0).abs() < 1e-5);
+        assert!((logits[1] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn frequency_and_presence_penalties() {
+        let mut logits = [10.0, 10.0];
+        let history = [0, 0, 0]; // token 0 generated 3 times
+        let config = PenaltyConfig {
+            repetition_penalty: 1.0,
+            frequency_penalty: 1.5,
+            presence_penalty: 2.0,
+            last_n: 10,
+        };
+        apply_penalties(&mut logits, &history, &config);
+        // Token 0: 10.0 - (3 * 1.5) - 2.0 = 10.0 - 4.5 - 2.0 = 3.5
+        assert!((logits[0] - 3.5).abs() < 1e-5);
+        // Token 1 untouched: 10.0
+        assert!((logits[1] - 10.0).abs() < 1e-5);
     }
 }
