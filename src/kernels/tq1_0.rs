@@ -32,9 +32,11 @@ pub fn gemm_tq1_0_m1n1_scalar(w0: &[u8], x0: &Quantized) -> [[f32; 1]; 1] {
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -74,9 +76,11 @@ pub fn gemm_tq1_0_m1n2_scalar(w0: &[u8], x0: &Quantized, x1: &Quantized) -> [[f3
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -132,9 +136,11 @@ pub fn gemm_tq1_0_m1n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -202,9 +208,11 @@ pub fn gemm_tq1_0_m1n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -274,9 +282,11 @@ pub fn gemm_tq1_0_m2n1_scalar(w0: &[u8], w1: &[u8], x0: &Quantized) -> [[f32; 1]
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -303,9 +313,11 @@ pub fn gemm_tq1_0_m2n1_scalar(w0: &[u8], w1: &[u8], x0: &Quantized) -> [[f32; 1]
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -352,9 +364,11 @@ pub fn gemm_tq1_0_m2n2_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -391,9 +405,11 @@ pub fn gemm_tq1_0_m2n2_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -453,9 +469,11 @@ pub fn gemm_tq1_0_m2n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -502,9 +520,11 @@ pub fn gemm_tq1_0_m2n3_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -580,9 +600,11 @@ pub fn gemm_tq1_0_m2n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -639,9 +661,11 @@ pub fn gemm_tq1_0_m2n4_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -715,9 +739,11 @@ pub fn gemm_tq1_0_m3n1_scalar(w0: &[u8], w1: &[u8], w2: &[u8], x0: &Quantized) -
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -744,9 +770,11 @@ pub fn gemm_tq1_0_m3n1_scalar(w0: &[u8], w1: &[u8], w2: &[u8], x0: &Quantized) -
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -773,9 +801,11 @@ pub fn gemm_tq1_0_m3n1_scalar(w0: &[u8], w1: &[u8], w2: &[u8], x0: &Quantized) -
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -825,9 +855,11 @@ pub fn gemm_tq1_0_m3n2_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -864,9 +896,11 @@ pub fn gemm_tq1_0_m3n2_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -903,9 +937,11 @@ pub fn gemm_tq1_0_m3n2_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -973,9 +1009,11 @@ pub fn gemm_tq1_0_m3n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1022,9 +1060,11 @@ pub fn gemm_tq1_0_m3n3_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1071,9 +1111,11 @@ pub fn gemm_tq1_0_m3n3_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1155,9 +1197,11 @@ pub fn gemm_tq1_0_m3n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1214,9 +1258,11 @@ pub fn gemm_tq1_0_m3n4_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1273,9 +1319,11 @@ pub fn gemm_tq1_0_m3n4_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1357,9 +1405,11 @@ pub fn gemm_tq1_0_m4n1_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1386,9 +1436,11 @@ pub fn gemm_tq1_0_m4n1_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1415,9 +1467,11 @@ pub fn gemm_tq1_0_m4n1_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1444,9 +1498,11 @@ pub fn gemm_tq1_0_m4n1_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1499,9 +1555,11 @@ pub fn gemm_tq1_0_m4n2_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1538,9 +1596,11 @@ pub fn gemm_tq1_0_m4n2_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1577,9 +1637,11 @@ pub fn gemm_tq1_0_m4n2_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1616,9 +1678,11 @@ pub fn gemm_tq1_0_m4n2_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1691,9 +1755,11 @@ pub fn gemm_tq1_0_m4n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1740,9 +1806,11 @@ pub fn gemm_tq1_0_m4n3_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1789,9 +1857,11 @@ pub fn gemm_tq1_0_m4n3_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1838,9 +1908,11 @@ pub fn gemm_tq1_0_m4n3_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1928,9 +2000,11 @@ pub fn gemm_tq1_0_m4n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -1987,9 +2061,11 @@ pub fn gemm_tq1_0_m4n4_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2046,9 +2122,11 @@ pub fn gemm_tq1_0_m4n4_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2105,9 +2183,11 @@ pub fn gemm_tq1_0_m4n4_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2192,9 +2272,11 @@ pub fn gemm_tq1_0_m5n1_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2221,9 +2303,11 @@ pub fn gemm_tq1_0_m5n1_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2250,9 +2334,11 @@ pub fn gemm_tq1_0_m5n1_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2279,9 +2365,11 @@ pub fn gemm_tq1_0_m5n1_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2308,9 +2396,11 @@ pub fn gemm_tq1_0_m5n1_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2372,9 +2462,11 @@ pub fn gemm_tq1_0_m5n2_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2411,9 +2503,11 @@ pub fn gemm_tq1_0_m5n2_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2450,9 +2544,11 @@ pub fn gemm_tq1_0_m5n2_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2489,9 +2585,11 @@ pub fn gemm_tq1_0_m5n2_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2528,9 +2626,11 @@ pub fn gemm_tq1_0_m5n2_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2608,9 +2708,11 @@ pub fn gemm_tq1_0_m5n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2657,9 +2759,11 @@ pub fn gemm_tq1_0_m5n3_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2706,9 +2810,11 @@ pub fn gemm_tq1_0_m5n3_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2755,9 +2861,11 @@ pub fn gemm_tq1_0_m5n3_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2804,9 +2912,11 @@ pub fn gemm_tq1_0_m5n3_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2900,9 +3010,11 @@ pub fn gemm_tq1_0_m5n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -2959,9 +3071,11 @@ pub fn gemm_tq1_0_m5n4_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3018,9 +3132,11 @@ pub fn gemm_tq1_0_m5n4_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3077,9 +3193,11 @@ pub fn gemm_tq1_0_m5n4_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3136,9 +3254,11 @@ pub fn gemm_tq1_0_m5n4_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3226,9 +3346,11 @@ pub fn gemm_tq1_0_m6n1_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3255,9 +3377,11 @@ pub fn gemm_tq1_0_m6n1_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3284,9 +3408,11 @@ pub fn gemm_tq1_0_m6n1_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3313,9 +3439,11 @@ pub fn gemm_tq1_0_m6n1_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3342,9 +3470,11 @@ pub fn gemm_tq1_0_m6n1_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3371,9 +3501,11 @@ pub fn gemm_tq1_0_m6n1_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3439,9 +3571,11 @@ pub fn gemm_tq1_0_m6n2_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3478,9 +3612,11 @@ pub fn gemm_tq1_0_m6n2_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3517,9 +3653,11 @@ pub fn gemm_tq1_0_m6n2_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3556,9 +3694,11 @@ pub fn gemm_tq1_0_m6n2_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3595,9 +3735,11 @@ pub fn gemm_tq1_0_m6n2_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3634,9 +3776,11 @@ pub fn gemm_tq1_0_m6n2_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3719,9 +3863,11 @@ pub fn gemm_tq1_0_m6n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3768,9 +3914,11 @@ pub fn gemm_tq1_0_m6n3_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3817,9 +3965,11 @@ pub fn gemm_tq1_0_m6n3_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3866,9 +4016,11 @@ pub fn gemm_tq1_0_m6n3_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3915,9 +4067,11 @@ pub fn gemm_tq1_0_m6n3_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -3964,9 +4118,11 @@ pub fn gemm_tq1_0_m6n3_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4066,9 +4222,11 @@ pub fn gemm_tq1_0_m6n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4125,9 +4283,11 @@ pub fn gemm_tq1_0_m6n4_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4184,9 +4344,11 @@ pub fn gemm_tq1_0_m6n4_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4243,9 +4405,11 @@ pub fn gemm_tq1_0_m6n4_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4302,9 +4466,11 @@ pub fn gemm_tq1_0_m6n4_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4361,9 +4527,11 @@ pub fn gemm_tq1_0_m6n4_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4454,9 +4622,11 @@ pub fn gemm_tq1_0_m7n1_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4483,9 +4653,11 @@ pub fn gemm_tq1_0_m7n1_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4512,9 +4684,11 @@ pub fn gemm_tq1_0_m7n1_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4541,9 +4715,11 @@ pub fn gemm_tq1_0_m7n1_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4570,9 +4746,11 @@ pub fn gemm_tq1_0_m7n1_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4599,9 +4777,11 @@ pub fn gemm_tq1_0_m7n1_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4628,9 +4808,11 @@ pub fn gemm_tq1_0_m7n1_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4700,9 +4882,11 @@ pub fn gemm_tq1_0_m7n2_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4739,9 +4923,11 @@ pub fn gemm_tq1_0_m7n2_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4778,9 +4964,11 @@ pub fn gemm_tq1_0_m7n2_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4817,9 +5005,11 @@ pub fn gemm_tq1_0_m7n2_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4856,9 +5046,11 @@ pub fn gemm_tq1_0_m7n2_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4895,9 +5087,11 @@ pub fn gemm_tq1_0_m7n2_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -4934,9 +5128,11 @@ pub fn gemm_tq1_0_m7n2_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5024,9 +5220,11 @@ pub fn gemm_tq1_0_m7n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5073,9 +5271,11 @@ pub fn gemm_tq1_0_m7n3_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5122,9 +5322,11 @@ pub fn gemm_tq1_0_m7n3_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5171,9 +5373,11 @@ pub fn gemm_tq1_0_m7n3_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5220,9 +5424,11 @@ pub fn gemm_tq1_0_m7n3_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5269,9 +5475,11 @@ pub fn gemm_tq1_0_m7n3_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5318,9 +5526,11 @@ pub fn gemm_tq1_0_m7n3_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5426,9 +5636,11 @@ pub fn gemm_tq1_0_m7n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5485,9 +5697,11 @@ pub fn gemm_tq1_0_m7n4_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5544,9 +5758,11 @@ pub fn gemm_tq1_0_m7n4_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5603,9 +5819,11 @@ pub fn gemm_tq1_0_m7n4_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5662,9 +5880,11 @@ pub fn gemm_tq1_0_m7n4_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5721,9 +5941,11 @@ pub fn gemm_tq1_0_m7n4_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5780,9 +6002,11 @@ pub fn gemm_tq1_0_m7n4_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5876,9 +6100,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5905,9 +6131,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5934,9 +6162,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5963,9 +6193,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -5992,9 +6224,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6021,9 +6255,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6050,9 +6286,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6079,9 +6317,11 @@ pub fn gemm_tq1_0_m8n1_scalar(
             }
         }
         for (i, &byte) in qh_r7.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r7[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r7[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6155,9 +6395,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6194,9 +6436,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6233,9 +6477,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6272,9 +6518,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6311,9 +6559,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6350,9 +6600,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6389,9 +6641,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6428,9 +6682,11 @@ pub fn gemm_tq1_0_m8n2_scalar(
             }
         }
         for (i, &byte) in qh_r7.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r7[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r7[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6523,9 +6779,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6572,9 +6830,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6621,9 +6881,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6670,9 +6932,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6719,9 +6983,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6768,9 +7034,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6817,9 +7085,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6866,9 +7136,11 @@ pub fn gemm_tq1_0_m8n3_scalar(
             }
         }
         for (i, &byte) in qh_r7.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r7[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r7[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -6980,9 +7252,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r0.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r0[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r0[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -7039,9 +7313,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r1.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r1[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r1[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -7098,9 +7374,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r2.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r2[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r2[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -7157,9 +7435,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r3.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r3[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r3[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -7216,9 +7496,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r4.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r4[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r4[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -7275,9 +7557,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r5.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r5[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r5[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -7334,9 +7618,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r6.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r6[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r6[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -7393,9 +7679,11 @@ pub fn gemm_tq1_0_m8n4_scalar(
             }
         }
         for (i, &byte) in qh_r7.iter().enumerate() {
+            let mut rem = byte;
             for k in 0..4 {
-                let bits = (byte >> (2 * k)) & 3;
-                trits_r7[240 + i * 4 + k] = (bits as i8) - 1;
+                let t = (rem % 3) as i8 - 1;
+                rem /= 3;
+                trits_r7[240 + i * 4 + k] = t;
             }
         }
         for ib in 0..8 {
@@ -9251,6 +9539,9 @@ mod tests {
             })
             .collect();
 
+        let tile_scalar = gemm_tq1_0_m4n4_scalar(
+            &rows[0], &rows[1], &rows[2], &rows[3], &xs[0], &xs[1], &xs[2], &xs[3],
+        );
         let tile = dispatch_tq1_0_m4n4(
             &rows[0], &rows[1], &rows[2], &rows[3], &xs[0], &xs[1], &xs[2], &xs[3],
         );
@@ -9258,6 +9549,11 @@ mod tests {
             for c in 0..4 {
                 let expected =
                     crate::quant::idot::integer(GgmlType::TQ1_0, &rows[r], &xs[c]).unwrap();
+                assert!(
+                    (tile_scalar[r][c] - expected).abs() < 5e-3,
+                    "scalar mismatch at ({r},{c}): {} vs {expected}",
+                    tile_scalar[r][c]
+                );
                 assert!(
                     (tile[r][c] - expected).abs() < 5e-3,
                     "mismatch at ({r},{c}): {} vs {expected}",

@@ -7442,6 +7442,9 @@ mod tests {
             })
             .collect();
 
+        let tile_scalar = gemm_q5_1_m4n4_scalar(
+            &rows[0], &rows[1], &rows[2], &rows[3], &xs[0], &xs[1], &xs[2], &xs[3],
+        );
         let tile = dispatch_q5_1_m4n4(
             &rows[0], &rows[1], &rows[2], &rows[3], &xs[0], &xs[1], &xs[2], &xs[3],
         );
@@ -7449,6 +7452,11 @@ mod tests {
             for c in 0..4 {
                 let expected =
                     crate::quant::idot::integer(GgmlType::Q5_1, &rows[r], &xs[c]).unwrap();
+                assert!(
+                    (tile_scalar[r][c] - expected).abs() < 5e-3,
+                    "scalar mismatch at ({r},{c}): {} vs {expected}",
+                    tile_scalar[r][c]
+                );
                 assert!(
                     (tile[r][c] - expected).abs() < 5e-3,
                     "mismatch at ({r},{c}): {} vs {expected}",

@@ -21,18 +21,19 @@ pub fn gemm_tq2_0_m1n1_scalar(w0: &[u8], x0: &Quantized) -> [[f32; 1]; 1] {
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0]]
@@ -50,31 +51,30 @@ pub fn gemm_tq2_0_m1n2_scalar(w0: &[u8], x0: &Quantized, x1: &Quantized) -> [[f3
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0, acc_r0_c1]]
@@ -98,44 +98,41 @@ pub fn gemm_tq2_0_m1n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0, acc_r0_c1, acc_r0_c2]]
@@ -161,57 +158,52 @@ pub fn gemm_tq2_0_m1n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0, acc_r0_c1, acc_r0_c2, acc_r0_c3]]
@@ -229,34 +221,36 @@ pub fn gemm_tq2_0_m2n1_scalar(w0: &[u8], w1: &[u8], x0: &Quantized) -> [[f32; 1]
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0], [acc_r1_c0]]
@@ -281,60 +275,58 @@ pub fn gemm_tq2_0_m2n2_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0, acc_r0_c1], [acc_r1_c0, acc_r1_c1]]
@@ -362,86 +354,80 @@ pub fn gemm_tq2_0_m2n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
         }
     }
     [
@@ -475,112 +461,102 @@ pub fn gemm_tq2_0_m2n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
             }
-            acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
         }
     }
     [
@@ -602,50 +578,53 @@ pub fn gemm_tq2_0_m3n1_scalar(w0: &[u8], w1: &[u8], w2: &[u8], x0: &Quantized) -
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0], [acc_r1_c0], [acc_r2_c0]]
@@ -673,89 +652,86 @@ pub fn gemm_tq2_0_m3n2_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
         }
     }
     [
@@ -791,128 +767,119 @@ pub fn gemm_tq2_0_m3n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
         }
     }
     [
@@ -952,167 +919,152 @@ pub fn gemm_tq2_0_m3n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
             }
-            acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
             }
-            acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
         }
     }
     [
@@ -1142,66 +1094,70 @@ pub fn gemm_tq2_0_m4n1_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
         }
     }
     [[acc_r0_c0], [acc_r1_c0], [acc_r2_c0], [acc_r3_c0]]
@@ -1232,118 +1188,114 @@ pub fn gemm_tq2_0_m4n2_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
         }
     }
     [
@@ -1384,170 +1336,158 @@ pub fn gemm_tq2_0_m4n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
         }
     }
     [
@@ -1593,222 +1533,202 @@ pub fn gemm_tq2_0_m4n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
             }
-            acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
             }
-            acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
             }
-            acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
         }
     }
     [
@@ -1841,82 +1761,87 @@ pub fn gemm_tq2_0_m5n1_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
         }
     }
     [
@@ -1956,147 +1881,142 @@ pub fn gemm_tq2_0_m5n2_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
         }
     }
     [
@@ -2142,212 +2062,197 @@ pub fn gemm_tq2_0_m5n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
         }
     }
     [
@@ -2399,277 +2304,252 @@ pub fn gemm_tq2_0_m5n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
             }
-            acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
             }
-            acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
             }
-            acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
             }
-            acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
         }
     }
     [
@@ -2705,98 +2585,104 @@ pub fn gemm_tq2_0_m6n1_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
         }
     }
     [
@@ -2840,176 +2726,170 @@ pub fn gemm_tq2_0_m6n2_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
         }
     }
     [
@@ -3060,254 +2940,236 @@ pub fn gemm_tq2_0_m6n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
             }
-            acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
         }
     }
     [
@@ -3365,332 +3227,302 @@ pub fn gemm_tq2_0_m6n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
             }
-            acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
             }
-            acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
             }
-            acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
             }
-            acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
             }
-            acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c3 += d_r5 * x3.scales[g] * (isum as f32);
             }
-            acc_r5_c3 += d_r5 * x3.scales[g] * (isum as f32);
         }
     }
     [
@@ -3729,114 +3561,121 @@ pub fn gemm_tq2_0_m7n1_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
         }
     }
     [
@@ -3884,205 +3723,198 @@ pub fn gemm_tq2_0_m7n2_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
             }
-            acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
         }
     }
     [
@@ -4138,296 +3970,275 @@ pub fn gemm_tq2_0_m7n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
             }
-            acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
             }
-            acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
             }
-            acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
         }
     }
     [
@@ -4491,387 +4302,352 @@ pub fn gemm_tq2_0_m7n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
             }
-            acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
             }
-            acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
             }
-            acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
             }
-            acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
             }
-            acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c3 += d_r5 * x3.scales[g] * (isum as f32);
             }
-            acc_r5_c3 += d_r5 * x3.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
             }
-            acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
             }
-            acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c3 += d_r6 * x3.scales[g] * (isum as f32);
             }
-            acc_r6_c3 += d_r6 * x3.scales[g] * (isum as f32);
         }
     }
     [
@@ -4913,130 +4689,138 @@ pub fn gemm_tq2_0_m8n1_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
         }
         let blk_r7 = &w7[sb * 66..(sb + 1) * 66];
         let qs_r7 = &blk_r7[0..64];
         let d_r7 = f16_to_f32(u16::from_le_bytes([blk_r7[64], blk_r7[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r7[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
             }
-            acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
         }
     }
     [
@@ -5088,234 +4872,226 @@ pub fn gemm_tq2_0_m8n2_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
             }
-            acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
         }
         let blk_r7 = &w7[sb * 66..(sb + 1) * 66];
         let qs_r7 = &blk_r7[0..64];
         let d_r7 = f16_to_f32(u16::from_le_bytes([blk_r7[64], blk_r7[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r7[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
             }
-            acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c1 += d_r7 * x1.scales[g] * (isum as f32);
             }
-            acc_r7_c1 += d_r7 * x1.scales[g] * (isum as f32);
         }
     }
     [
@@ -5376,338 +5152,314 @@ pub fn gemm_tq2_0_m8n3_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
             }
-            acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
             }
-            acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
             }
-            acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
         }
         let blk_r7 = &w7[sb * 66..(sb + 1) * 66];
         let qs_r7 = &blk_r7[0..64];
         let d_r7 = f16_to_f32(u16::from_le_bytes([blk_r7[64], blk_r7[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r7[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
             }
-            acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c1 += d_r7 * x1.scales[g] * (isum as f32);
             }
-            acc_r7_c1 += d_r7 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c2 += d_r7 * x2.scales[g] * (isum as f32);
             }
-            acc_r7_c2 += d_r7 * x2.scales[g] * (isum as f32);
         }
     }
     [
@@ -5777,442 +5529,402 @@ pub fn gemm_tq2_0_m8n4_scalar(
         let blk_r0 = &w0[sb * 66..(sb + 1) * 66];
         let qs_r0 = &blk_r0[0..64];
         let d_r0 = f16_to_f32(u16::from_le_bytes([blk_r0[64], blk_r0[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r0[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
             }
-            acc_r0_c0 += d_r0 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
             }
-            acc_r0_c1 += d_r0 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
             }
-            acc_r0_c2 += d_r0 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r0[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
             }
-            acc_r0_c3 += d_r0 * x3.scales[g] * (isum as f32);
         }
         let blk_r1 = &w1[sb * 66..(sb + 1) * 66];
         let qs_r1 = &blk_r1[0..64];
         let d_r1 = f16_to_f32(u16::from_le_bytes([blk_r1[64], blk_r1[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r1[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
             }
-            acc_r1_c0 += d_r1 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
             }
-            acc_r1_c1 += d_r1 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
             }
-            acc_r1_c2 += d_r1 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r1[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
             }
-            acc_r1_c3 += d_r1 * x3.scales[g] * (isum as f32);
         }
         let blk_r2 = &w2[sb * 66..(sb + 1) * 66];
         let qs_r2 = &blk_r2[0..64];
         let d_r2 = f16_to_f32(u16::from_le_bytes([blk_r2[64], blk_r2[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r2[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
             }
-            acc_r2_c0 += d_r2 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
             }
-            acc_r2_c1 += d_r2 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
             }
-            acc_r2_c2 += d_r2 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r2[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
             }
-            acc_r2_c3 += d_r2 * x3.scales[g] * (isum as f32);
         }
         let blk_r3 = &w3[sb * 66..(sb + 1) * 66];
         let qs_r3 = &blk_r3[0..64];
         let d_r3 = f16_to_f32(u16::from_le_bytes([blk_r3[64], blk_r3[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r3[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
             }
-            acc_r3_c0 += d_r3 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
             }
-            acc_r3_c1 += d_r3 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
             }
-            acc_r3_c2 += d_r3 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r3[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
             }
-            acc_r3_c3 += d_r3 * x3.scales[g] * (isum as f32);
         }
         let blk_r4 = &w4[sb * 66..(sb + 1) * 66];
         let qs_r4 = &blk_r4[0..64];
         let d_r4 = f16_to_f32(u16::from_le_bytes([blk_r4[64], blk_r4[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r4[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
             }
-            acc_r4_c0 += d_r4 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
             }
-            acc_r4_c1 += d_r4 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
             }
-            acc_r4_c2 += d_r4 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r4[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
             }
-            acc_r4_c3 += d_r4 * x3.scales[g] * (isum as f32);
         }
         let blk_r5 = &w5[sb * 66..(sb + 1) * 66];
         let qs_r5 = &blk_r5[0..64];
         let d_r5 = f16_to_f32(u16::from_le_bytes([blk_r5[64], blk_r5[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r5[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
             }
-            acc_r5_c0 += d_r5 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
             }
-            acc_r5_c1 += d_r5 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
             }
-            acc_r5_c2 += d_r5 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r5[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r5_c3 += d_r5 * x3.scales[g] * (isum as f32);
             }
-            acc_r5_c3 += d_r5 * x3.scales[g] * (isum as f32);
         }
         let blk_r6 = &w6[sb * 66..(sb + 1) * 66];
         let qs_r6 = &blk_r6[0..64];
         let d_r6 = f16_to_f32(u16::from_le_bytes([blk_r6[64], blk_r6[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r6[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
             }
-            acc_r6_c0 += d_r6 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
             }
-            acc_r6_c1 += d_r6 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
             }
-            acc_r6_c2 += d_r6 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r6[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r6_c3 += d_r6 * x3.scales[g] * (isum as f32);
             }
-            acc_r6_c3 += d_r6 * x3.scales[g] * (isum as f32);
         }
         let blk_r7 = &w7[sb * 66..(sb + 1) * 66];
         let qs_r7 = &blk_r7[0..64];
         let d_r7 = f16_to_f32(u16::from_le_bytes([blk_r7[64], blk_r7[65]]));
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x0.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+        for half in 0..2 {
+            let q_h = &qs_r7[half * 32..(half + 1) * 32];
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x0.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
             }
-            acc_r7_c0 += d_r7 * x0.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x1.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x1.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c1 += d_r7 * x1.scales[g] * (isum as f32);
             }
-            acc_r7_c1 += d_r7 * x1.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x2.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x2.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c2 += d_r7 * x2.scales[g] * (isum as f32);
             }
-            acc_r7_c2 += d_r7 * x2.scales[g] * (isum as f32);
-        }
-        for ib in 0..8 {
-            let g = b_base + ib;
-            let x_q = &x3.quants[g * 32..(g + 1) * 32];
-            let q_sub = &qs_r7[ib * 8..(ib + 1) * 8];
-            let mut isum = 0i32;
-            for (bi, &byte) in q_sub.iter().enumerate() {
-                for k in 0..4 {
-                    let trit = ((byte >> (2 * k)) & 3) as i32 - 1;
-                    isum += trit * (x_q[bi * 4 + k] as i32);
+            for shift_idx in 0..4 {
+                let g = b_base + half * 4 + shift_idx;
+                let x_q = &x3.quants[g * 32..(g + 1) * 32];
+                let sh = (shift_idx * 2) as u32;
+                let mut isum = 0i32;
+                for l in 0..32 {
+                    let trit = ((q_h[l] >> sh) & 3) as i32 - 1;
+                    isum += trit * (x_q[l] as i32);
                 }
+                acc_r7_c3 += d_r7 * x3.scales[g] * (isum as f32);
             }
-            acc_r7_c3 += d_r7 * x3.scales[g] * (isum as f32);
         }
     }
     [
@@ -8009,6 +7721,13 @@ mod tests {
         for (i, b) in buf.iter_mut().enumerate() {
             *b = ((seed * 31 + i * 17 + 7) % 199) as u8;
         }
+        for b in &mut buf[0..64] {
+            let c0 = *b % 3;
+            let c1 = (*b / 3) % 3;
+            let c2 = (*b / 9) % 3;
+            let c3 = (*b / 27) % 3;
+            *b = c0 | (c1 << 2) | (c2 << 4) | (c3 << 6);
+        }
         buf[64..66].copy_from_slice(&0x3400u16.to_le_bytes());
         buf
     }
@@ -8027,6 +7746,9 @@ mod tests {
             })
             .collect();
 
+        let tile_scalar = gemm_tq2_0_m4n4_scalar(
+            &rows[0], &rows[1], &rows[2], &rows[3], &xs[0], &xs[1], &xs[2], &xs[3],
+        );
         let tile = dispatch_tq2_0_m4n4(
             &rows[0], &rows[1], &rows[2], &rows[3], &xs[0], &xs[1], &xs[2], &xs[3],
         );
@@ -8034,6 +7756,11 @@ mod tests {
             for c in 0..4 {
                 let expected =
                     crate::quant::idot::integer(GgmlType::TQ2_0, &rows[r], &xs[c]).unwrap();
+                assert!(
+                    (tile_scalar[r][c] - expected).abs() < 5e-3,
+                    "scalar mismatch at ({r},{c}): {} vs {expected}",
+                    tile_scalar[r][c]
+                );
                 assert!(
                     (tile[r][c] - expected).abs() < 5e-3,
                     "mismatch at ({r},{c}): {} vs {expected}",
