@@ -636,3 +636,122 @@ impl<'a> MtpEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// Speculative decoding engine supporting DeepSeek Multi-Token Prediction (MTP)
+/// tree speculation with multi-candidate branch exploration.
+pub struct MtpTreeEngine<'a> {
+    pub model: &'a Model<'a>,
+    pub branch_factor: usize,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> MtpTreeEngine<'a> {
+    pub fn new(model: &'a Model<'a>, branch_factor: usize) -> Self {
+        Self {
+            model,
+            branch_factor: branch_factor.max(1),
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Reset internal performance statistics.
+    pub fn reset(&mut self) {
+        self.stats = SpeculativeStats::default();
+    }
+
+    /// Extract top-K candidate token IDs from a logit distribution without sorting full vocabulary.
+    pub fn top_k_candidates(&self, logits: &[f32], k: usize) -> Vec<u32> {
+        let mut candidates: Vec<(usize, f32)> = Vec::with_capacity(logits.len());
+        for (i, &l) in logits.iter().enumerate() {
+            candidates.push((i, l));
+        }
+        candidates
+            .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(k);
+        candidates.into_iter().map(|(id, _)| id as u32).collect()
+    }
+
+    /// Perform one tree-speculative decoding step.
+    ///
+    /// - `state`: KV-cache and model state.
+    /// - `position`: current sequence position.
+    /// - `sampler`: token sampler.
+    ///
+    /// Returns the vector of accepted / emitted tokens.
+    pub fn step(
+        &mut self,
+        state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut state.logits);
+        let mut emitted = vec![first_tok];
+
+        if self.model.mtp_module.is_none() || position + 3 > state.context() {
+            self.model.forward(state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // 1. Forward first_tok through main trunk at position
+        self.model.forward(state, first_tok, position)?;
+        self.stats.target_batches += 1;
+
+        // 2. Verified next token tok_1 predicted by trunk for position + 1
+        let tok_1 = sampler.sample(&mut state.logits);
+        emitted.push(tok_1);
+
+        // 3. Propose top-B branch candidates for position + 2 via MTP module
+        let mut mtp_logits = vec![0.0f32; self.model.config.vocab];
+        let h_state = state.final_hidden_state().to_vec();
+        self.model
+            .forward_mtp(state, &h_state, tok_1, position, &mut mtp_logits)?;
+
+        let branch_candidates = self.top_k_candidates(&mtp_logits, self.branch_factor);
+        if branch_candidates.is_empty() {
+            self.stats.total_emitted += emitted.len();
+            return Ok(emitted);
+        }
+
+        self.stats.proposed += branch_candidates.len();
+        let primary_candidate = branch_candidates[0];
+
+        // 4. Concurrently evaluate [tok_1, primary_candidate] in target trunk at position + 1
+        let vocab = self.model.config.vocab;
+        let mut target_all_logits = vec![0.0f32; 2 * vocab];
+        self.model.prefill_all_logits(
+            state,
+            &[tok_1, primary_candidate],
+            position + 1,
+            &mut target_all_logits,
+        )?;
+        self.stats.target_batches += 1;
+
+        // 5. Verify against trunk's prediction for position + 2
+        let target_pred = sampler.sample(&mut target_all_logits[..vocab]);
+        if target_pred == primary_candidate {
+            self.stats.accepted += 1;
+            emitted.push(primary_candidate);
+            state.set_logits(&target_all_logits[vocab..2 * vocab]);
+        } else {
+            // Check if any secondary candidate in tree matched target prediction
+            if branch_candidates
+                .iter()
+                .skip(1)
+                .any(|&cand| cand == target_pred)
+            {
+                self.stats.accepted += 1;
+            }
+            emitted.push(target_pred);
+            // Rollback primary candidate at position + 2
+            state.truncate_cache(&self.model.config, position + 2, position + 3);
+            // Resync trunk forward with target_pred at position + 2
+            self.model.forward(state, target_pred, position + 2)?;
+            self.stats.target_batches += 1;
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}

@@ -764,3 +764,61 @@ fn mtp_rejection_recovery_matches_baseline_forward() {
 
     fs::remove_file(mtp_path).ok();
 }
+
+#[test]
+fn mtp_tree_speculative_decoding_matches_baseline_forward() {
+    let mtp_path = make_mtp_model_fixture("mtp_tree", false);
+    let gguf = Gguf::open(&mtp_path).expect("open mtp model");
+    let model = Model::load(&gguf).expect("load model");
+
+    let prompt = vec![0u32, 1u32];
+    let total_to_generate = 6;
+
+    // 1. Baseline forward
+    let mut baseline_state = State::new(&model.config);
+    model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. MTP Tree speculation
+    let mut tree_state = State::new(&model.config);
+    model
+        .prefill(&mut tree_state, &prompt, 0)
+        .expect("prefill tree");
+
+    let mut tree_engine = ferrite::speculative::MtpTreeEngine::new(&model, 2);
+    let mut tree_tokens = Vec::new();
+    let mut tree_sampler = Sampler::greedy();
+    let mut tree_pos = prompt.len();
+
+    while tree_tokens.len() < total_to_generate {
+        let emitted = tree_engine
+            .step(&mut tree_state, tree_pos, &mut tree_sampler)
+            .expect("tree step");
+        tree_pos += emitted.len();
+        tree_tokens.extend(emitted);
+    }
+    tree_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        tree_tokens, baseline_tokens,
+        "MTP tree speculation must match baseline forward decode bit-identically"
+    );
+    assert!(tree_engine.stats.proposed > 0);
+    assert!(tree_engine.stats.accepted > 0);
+
+    fs::remove_file(mtp_path).ok();
+}
