@@ -33,6 +33,7 @@ run/serve options:
   --draft <model> draft model for speculative decoding acceleration
   --spec-k <k>    speculative candidate count (default 3)
   --lora <adapter> apply GGUF LoRA adapter dynamically
+  --chunk-size <n> chunk size for prompt prefill (default 512)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -257,6 +258,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         at.and_then(|i| args.get(i + 1).cloned())
     };
     let spec_k: usize = flag(args, "--spec-k", 3)?;
+    let chunk_size: usize = flag(args, "--chunk-size", 512)?;
 
     let lora_query: Option<String> = {
         let at = args.iter().position(|a| a == "--lora");
@@ -275,6 +277,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--draft",
         "--spec-k",
         "--lora",
+        "--chunk-size",
     ];
     let mut positional = Vec::new();
     let mut index = 0;
@@ -367,9 +370,16 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     stdout.flush().ok();
 
     let prefill_start = Instant::now();
-    model.prefill(&mut state, &prompt_tokens, 0)?;
-    if let Some((draft_model, draft_state)) = &mut draft_bundle {
-        draft_model.prefill(draft_state, &prompt_tokens, 0)?;
+    if chunk_size > 0 && chunk_size < prompt_tokens.len() {
+        model.prefill_chunked(&mut state, &prompt_tokens, 0, chunk_size)?;
+        if let Some((draft_model, draft_state)) = &mut draft_bundle {
+            draft_model.prefill_chunked(draft_state, &prompt_tokens, 0, chunk_size)?;
+        }
+    } else {
+        model.prefill(&mut state, &prompt_tokens, 0)?;
+        if let Some((draft_model, draft_state)) = &mut draft_bundle {
+            draft_model.prefill(draft_state, &prompt_tokens, 0)?;
+        }
     }
     let prefill = prefill_start.elapsed();
 

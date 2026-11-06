@@ -97,6 +97,18 @@
    - `cargo clippy --all-targets -- -D warnings` passes without warnings.
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
+16. Phase 17 Chunked Prefill & Bounded-Latency Prompt Scheduling:
+   - Added `Model::prefill_chunked` and `Model::prefill_all_logits_chunked` partitioning long prompts into bounded token chunks.
+   - Built stateful `ChunkedPrefill` runner with `.step()` returning chunk progress and `.run_with_progress()` callback.
+   - Wired `--chunk-size <n>` CLI flag into `run` command in `src/main.rs`.
+   - Verified exact numerical identity against full batched prefill and sequential forward.
+   - Added integration tests in `tests/model.rs` (`chunked_prefill_matches_single_pass_and_sequential_forward`, `chunked_prefill_all_logits_matches_full_prefill_all_logits`, `chunked_prefill_runner_stateful_step_and_progress`).
+17. Verification after Phase 17:
+   - `cargo test --all-targets` passes (130 tests).
+   - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
+   - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+   - `cargo fmt --check` passes without differences.
+   - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 17: Chunked Prefill & Bounded-Latency Prompt Scheduling (partitioning long prompt ingestion into bounded token chunks with stateful resumption to bound TTFT and interleave decode steps; status READY TO IMPLEMENT).
+- Phase 18: Quantized KV Cache (Q8_0 and Q4_0 Paged/Continuous Cache) (cutting KV memory footprint by 2x-4x with near-zero perplexity loss; status QUEUED).

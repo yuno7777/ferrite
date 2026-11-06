@@ -152,7 +152,99 @@
 
 ### Phase 17: Chunked Prefill & Bounded-Latency Prompt Scheduling
 - Priority: P1
-- Status: READY TO IMPLEMENT
+- Status: COMPLETED
 - Rationale: Very long prompt ingestion (e.g. 16k-64k tokens) monopolizes execution threads and causes high time-to-first-token (TTFT) tail latencies. Chunked prefill partitions large prompts into bounded token chunks (e.g. 512 tokens), interleaving prompt chunk ingestion with active sequence decode steps to maintain bounded response latency.
-- Files: `src/model.rs`, `src/server.rs`, `tests/model.rs`
+- Files: `src/model.rs`, `src/lib.rs`, `src/main.rs`, `tests/model.rs`
 - Acceptance: Break prompt ingestion into configurable chunk sizes; verify identical KV-cache states and final logits against full batched prefill; support resume/continuation across chunks.
+- Completion evidence: Added `Model::prefill_chunked` and `Model::prefill_all_logits_chunked` with configurable chunk boundaries. Implemented stateful `ChunkedPrefill` runner with `.step()` and `.run_with_progress()` callbacks. Wired `--chunk-size` flag in CLI `main.rs`. Added tests verifying exact parity with unchunked batched prefill across both uniform and uneven chunk sizes. All 130 tests pass.
+
+### Phase 18: Quantized KV Cache (Q8_0 and Q4_0 Paged/Continuous Cache)
+- Priority: P1
+- Status: QUEUED
+- Rationale: Storing KV activations in full FP32 consumes excessive RAM on large context lengths. Quantizing KV-cache vectors to Q8_0 or Q4_0 cuts KV memory footprint by 2x-4x with near-zero perplexity impact.
+- Files: `src/model.rs`, `src/quant/mod.rs`, `src/ops.rs`, `tests/model.rs`
+- Acceptance: Provide configurable KV cache quantization (f32, q8_0); online attention dynamically reads quantized scales/quants; bit-accurate verification with bounded quantization tolerance.
+
+### Phase 19: Paged KV-Cache & Block Table Allocator
+- Priority: P1
+- Status: QUEUED
+- Rationale: Eliminates contiguous KV buffer pre-allocation and memory fragmentation by organizing KV cache into fixed-size physical blocks (e.g. 16 or 32 tokens) with logical-to-physical block tables (vLLM style).
+- Files: `src/paged.rs`, `src/model.rs`, `tests/paged.rs`
+- Acceptance: Dynamic non-contiguous block allocation on demand; copy-on-write fork support; attention kernel updated to follow block tables.
+
+### Phase 20: Radix Tree Prefix Caching & Prompt Deduplication
+- Priority: P2
+- Status: QUEUED
+- Rationale: Repeated system prompts, multi-turn dialogues, and agentic workflows share identical token prefixes. Radix-tree prefix cache indexes previously evaluated blocks by token hashes for instantaneous 0ms ingestion of cached prefixes.
+- Files: `src/prefix.rs`, `src/server.rs`, `tests/prefix.rs`
+- Acceptance: Hash-based prefix matching; skip prefill for matched prefix tokens; automatic cache eviction under memory pressure.
+
+### Phase 21: Grammar-Constrained Decoding (Zero-Dependency JSON Schema & Regex Masking)
+- Priority: P1
+- Status: QUEUED
+- Rationale: Critical for reliable structured output (JSON objects, lists, numbers, booleans, specific regex patterns) without external parser crates.
+- Files: `src/grammar.rs`, `src/sample.rs`, `tests/grammar.rs`
+- Acceptance: Deterministic finite automaton (DFA) / state machine checking partial UTF-8 strings against schema; dynamically masking invalid token logits before sampling; zero dependencies.
+
+### Phase 22: Min-P and Tail Free Sampling (Adaptive Logit Filtering)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Modern sampling strategies outperforming traditional Top-P: Min-P scales truncation dynamically with top logit probability ($p \ge p_{\max} \cdot \text{scale}$); TFS calculates second derivative of sorted probabilities.
+- Files: `src/sample.rs`, `src/main.rs`, `src/server.rs`
+- Acceptance: Add `--min-p` and `--tfs` CLI and server flags; unit tests validating distribution truncation.
+
+### Phase 23: Repetition & Frequency/Presence Penalty Engine
+- Priority: P2
+- Status: QUEUED
+- Rationale: Prevents degenerative repetitive loops by applying multiplicative and additive penalties on previously generated tokens within configurable context windows.
+- Files: `src/sample.rs`, `src/model.rs`, `src/server.rs`
+- Acceptance: Apply repetition_penalty ($l / \text{penalty}$ or $l \cdot \text{penalty}$), frequency_penalty, and presence_penalty; support in `/v1/chat/completions`.
+
+### Phase 24: Continuous Batching & Multi-Sequence Scheduling
+- Priority: P1
+- Status: QUEUED
+- Rationale: Serving multiple concurrent user requests efficiently requires dynamic continuous batching where prefill chunks and decode steps from different requests are scheduled together in single forward passes.
+- Files: `src/server.rs`, `src/scheduler.rs`, `tests/server.rs`
+- Acceptance: Multi-sequence concurrency in HTTP daemon without blocking incoming requests during long generations.
+
+### Phase 25: Pure-Rust In-Engine Quantization Tool (`ferrite quantize`)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Convert F32/F16 GGUF weights to high-speed quantized formats (Q8_0, Q4_0, Q4_K) directly inside Ferrite with zero external tools (no llama.cpp build required).
+- Files: `src/quant/quantize.rs`, `src/main.rs`, `tests/quantize.rs`
+- Acceptance: CLI `ferrite quantize <src.gguf> <dst.gguf> <type>`; output file valid and readable by Ferrite.
+
+### Phase 26: GGUF Multi-File Sharded Model Loader
+- Priority: P2
+- Status: QUEUED
+- Rationale: Large models (e.g. 70B parameters) are distributed as multiple GGUF shard files (`model-00001-of-00004.gguf`).
+- Files: `src/gguf.rs`, `src/model.rs`, `tests/sharded.rs`
+- Acceptance: Parse shard index metadata and resolve cross-file tensor mappings into a single unified virtual model.
+
+### Phase 27: Tokenizer Jinja/Mini-Template Chat Engine
+- Priority: P2
+- Status: QUEUED
+- Rationale: Read GGUF `tokenizer.chat_template` and format OpenAI-style message arrays (`system`, `user`, `assistant`) into exact model prompts (LLaMA-3, ChatML, Mistral, Qwen) without external template crates.
+- Files: `src/template.rs`, `src/server.rs`, `tests/template.rs`
+- Acceptance: Support standard template macros (`{% for message in messages %}`, `{{ message.content }}`); render valid conversation prompts.
+
+### Phase 28: Speculative Tree Drafting (Medusa / Multi-Candidate Branching)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Extend speculative decoding from linear draft sequences to tree-structured draft verification, evaluating multiple branching candidate paths in a single target model forward pass.
+- Files: `src/speculative.rs`, `tests/speculative.rs`
+- Acceptance: Tree attention mask for target model verification; higher token acceptance per forward pass.
+
+### Phase 29: Perplexity & Cross-Entropy Evaluation Tool (`ferrite perplexity`)
+- Priority: P3
+- Status: QUEUED
+- Rationale: Standard tool for benchmarking model quantization accuracy and RoPE scaling perplexity across standard datasets (e.g. wikitext).
+- Files: `src/eval.rs`, `src/main.rs`, `tests/eval.rs`
+- Acceptance: CLI `ferrite perplexity <model> <text_file>`; compute exact cross-entropy loss, negative log likelihood, and perplexity per chunk.
+
+### Phase 30: SafeTensors to GGUF Zero-Dependency Model Transpiler (`ferrite convert`)
+- Priority: P3
+- Status: QUEUED
+- Rationale: Convert Hugging Face `.safetensors` checkpoints and `config.json` into standardized GGUF format natively without requiring Python, PyTorch, or external libraries.
+- Files: `src/convert.rs`, `src/main.rs`, `tests/convert.rs`
+- Acceptance: Read Hugging Face JSON config and safetensors headers; write compliant GGUF header, metadata, and tensor data.

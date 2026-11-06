@@ -1022,3 +1022,140 @@ fn partial_rotary_dim_prefill_matches_forward() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn chunked_prefill_matches_single_pass_and_sequential_forward() {
+    let path = write("chunked_prefill", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = [1u32, 2, 3, 0, 2, 1, 3, 2];
+
+    // 1. Sequential forward
+    let mut state_seq = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    // 2. Full single-pass prefill
+    let mut state_full = State::new(&model.config);
+    model.prefill(&mut state_full, &prompt, 0).expect("prefill");
+
+    // 3. Chunked prefill with chunk size 2
+    let mut state_chunk2 = State::new(&model.config);
+    model
+        .prefill_chunked(&mut state_chunk2, &prompt, 0, 2)
+        .expect("prefill_chunk2");
+
+    // 4. Chunked prefill with uneven chunk size 3 (8 = 3 + 3 + 2)
+    let mut state_chunk3 = State::new(&model.config);
+    model
+        .prefill_chunked(&mut state_chunk3, &prompt, 0, 3)
+        .expect("prefill_chunk3");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_full.logits),
+        bits(&state_seq.logits),
+        "full prefill must match sequential forward"
+    );
+    assert_eq!(
+        bits(&state_chunk2.logits),
+        bits(&state_seq.logits),
+        "chunked prefill (chunk 2) must match sequential forward"
+    );
+    assert_eq!(
+        bits(&state_chunk3.logits),
+        bits(&state_seq.logits),
+        "chunked prefill (chunk 3) must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn chunked_prefill_all_logits_matches_full_prefill_all_logits() {
+    let path = write("chunked_all_logits", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = [1u32, 2, 3, 0, 2, 1, 3, 2];
+    let vocab = model.config.vocab;
+
+    // Full prefill_all_logits
+    let mut all_full = vec![0.0f32; prompt.len() * vocab];
+    let mut state_full = State::new(&model.config);
+    model
+        .prefill_all_logits(&mut state_full, &prompt, 0, &mut all_full)
+        .expect("prefill_all");
+
+    // Chunked prefill_all_logits (chunk size 3)
+    let mut all_chunked = vec![0.0f32; prompt.len() * vocab];
+    let mut state_chunked = State::new(&model.config);
+    model
+        .prefill_all_logits_chunked(&mut state_chunked, &prompt, 0, &mut all_chunked, 3)
+        .expect("prefill_all_chunked");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&all_chunked),
+        bits(&all_full),
+        "chunked all_logits must match full all_logits exactly"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn chunked_prefill_runner_stateful_step_and_progress() {
+    let path = write("chunked_runner", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = vec![1u32, 2, 3, 0, 2];
+
+    // Reference sequential forward
+    let mut state_ref = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_ref, tok, pos).expect("forward");
+    }
+
+    // Stateful runner stepping with chunk size 2
+    let mut runner = ferrite::model::ChunkedPrefill::new(&model, prompt.clone(), 0, 2);
+    let mut state = State::new(&model.config);
+
+    assert_eq!(runner.total_tokens(), 5);
+    assert_eq!(runner.processed_tokens(), 0);
+    assert!(!runner.is_finished());
+
+    // Step 1: tokens 0..2
+    let step1 = runner.step(&mut state).expect("step 1");
+    assert_eq!(step1, 2);
+    assert_eq!(runner.processed_tokens(), 2);
+    assert!(!runner.is_finished());
+
+    // Step 2: tokens 2..4
+    let step2 = runner.step(&mut state).expect("step 2");
+    assert_eq!(step2, 2);
+    assert_eq!(runner.processed_tokens(), 4);
+    assert!(!runner.is_finished());
+
+    // Step 3: tokens 4..5
+    let step3 = runner.step(&mut state).expect("step 3");
+    assert_eq!(step3, 1);
+    assert_eq!(runner.processed_tokens(), 5);
+    assert!(runner.is_finished());
+
+    // Step 4: already finished
+    let step4 = runner.step(&mut state).expect("step 4");
+    assert_eq!(step4, 0);
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state.logits),
+        bits(&state_ref.logits),
+        "stepwise chunked runner logits must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}

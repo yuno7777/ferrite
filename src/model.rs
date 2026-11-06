@@ -1500,6 +1500,135 @@ impl<'a> Model<'a> {
         logits.copy_from_slice(last_logits);
         Ok(())
     }
+
+    /// Process a long sequence of prompt tokens in chunks of `chunk_size`.
+    ///
+    /// Bounds peak latency and memory pressure during large context ingestion.
+    /// Bit-identical to single-pass `prefill` and sequential `forward`.
+    pub fn prefill_chunked(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        start_pos: usize,
+        chunk_size: usize,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        let chunk = if chunk_size == 0 { 512 } else { chunk_size };
+        let mut offset = 0;
+        while offset < tokens.len() {
+            let end = (offset + chunk).min(tokens.len());
+            self.prefill(state, &tokens[offset..end], start_pos + offset)?;
+            offset = end;
+        }
+        Ok(())
+    }
+
+    /// Process a sequence of prompt/draft tokens in chunks of `chunk_size` and
+    /// emit intermediate logits for every token in `all_logits`.
+    pub fn prefill_all_logits_chunked(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        start_pos: usize,
+        all_logits: &mut [f32],
+        chunk_size: usize,
+    ) -> Result<()> {
+        let n = tokens.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let c = &self.config;
+        if all_logits.len() != n * c.vocab {
+            return Err(bad(format!(
+                "all_logits buffer size {} != n ({n}) * vocab ({})",
+                all_logits.len(),
+                c.vocab
+            )));
+        }
+        let chunk = if chunk_size == 0 { 512 } else { chunk_size };
+        let mut offset = 0;
+        while offset < n {
+            let end = (offset + chunk).min(n);
+            let chunk_tokens = &tokens[offset..end];
+            let chunk_logits = &mut all_logits[offset * c.vocab..end * c.vocab];
+            self.prefill_all_logits(state, chunk_tokens, start_pos + offset, chunk_logits)?;
+            offset = end;
+        }
+        Ok(())
+    }
+}
+
+/// Stateful, interruptible chunked prompt prefill runner.
+///
+/// Permits progress reporting, cooperative timesharing, and bounded latency
+/// across huge prompts without blocking runtime threads.
+pub struct ChunkedPrefill<'a, 'm> {
+    model: &'m Model<'a>,
+    tokens: Vec<u32>,
+    start_pos: usize,
+    chunk_size: usize,
+    processed: usize,
+}
+
+impl<'a, 'm> ChunkedPrefill<'a, 'm> {
+    pub fn new(
+        model: &'m Model<'a>,
+        tokens: Vec<u32>,
+        start_pos: usize,
+        chunk_size: usize,
+    ) -> Self {
+        let eff_chunk = if chunk_size == 0 { 512 } else { chunk_size };
+        Self {
+            model,
+            tokens,
+            start_pos,
+            chunk_size: eff_chunk,
+            processed: 0,
+        }
+    }
+
+    #[inline]
+    pub fn total_tokens(&self) -> usize {
+        self.tokens.len()
+    }
+
+    #[inline]
+    pub fn processed_tokens(&self) -> usize {
+        self.processed
+    }
+
+    #[inline]
+    pub fn is_finished(&self) -> bool {
+        self.processed >= self.tokens.len()
+    }
+
+    /// Process the next slice of tokens. Returns the number of tokens processed.
+    pub fn step(&mut self, state: &mut State) -> Result<usize> {
+        if self.is_finished() {
+            return Ok(0);
+        }
+        let end = (self.processed + self.chunk_size).min(self.tokens.len());
+        let chunk = &self.tokens[self.processed..end];
+        self.model
+            .prefill(state, chunk, self.start_pos + self.processed)?;
+        let count = end - self.processed;
+        self.processed = end;
+        Ok(count)
+    }
+
+    /// Run all remaining chunks, notifying `callback(processed, total)` after each chunk.
+    pub fn run_with_progress<F>(&mut self, state: &mut State, mut callback: F) -> Result<()>
+    where
+        F: FnMut(usize, usize),
+    {
+        while !self.is_finished() {
+            self.step(state)?;
+            callback(self.processed, self.tokens.len());
+        }
+        Ok(())
+    }
 }
 
 /// Everything one sequence needs that is not a weight.

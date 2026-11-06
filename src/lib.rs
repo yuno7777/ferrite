@@ -27,6 +27,7 @@ pub mod tokenizer;
 pub use gguf::{GgmlType, Gguf, TensorInfo, Value};
 pub use lora::{LoraAdapter, LoraPair};
 pub use map::Mmap;
+pub use model::ChunkedPrefill;
 pub use server::{Server, ServerConfig};
 pub use speculative::{SpeculativeEngine, SpeculativeStats};
 pub use tokenizer::Tokenizer;
