@@ -5,6 +5,7 @@
 //! microkernels that evaluate `M` weight rows against `N` quantized
 //! activation columns simultaneously in a single L1-resident pass.
 
+#[allow(unused_imports)]
 use crate::gguf::GgmlType;
 use crate::quant::activation::Quantized;
 use crate::quant::half::f16_to_f32;
