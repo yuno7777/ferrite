@@ -148,6 +148,128 @@ pub fn attention_online(
     }
 }
 
+/// High-throughput tiled online attention with dynamic tile selection and 4-lane unrolled accumulation.
+pub fn attention_online_dynamic(
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    params: AttentionParams,
+    out: &mut [f32],
+) {
+    let AttentionParams {
+        row_width,
+        offset,
+        len,
+        scale,
+        logit_cap,
+        window,
+        position,
+        tile_size,
+        v_row_width,
+        v_offset,
+    } = params;
+    let val_row_width = v_row_width.unwrap_or(row_width);
+    let val_offset = v_offset.unwrap_or(offset);
+    debug_assert!(tile_size > 0 && offset + query.len() <= row_width);
+    debug_assert!(keys.len() >= len * row_width && values.len() >= len * val_row_width);
+    debug_assert!(val_offset + out.len() <= val_row_width);
+    out.fill(0.0);
+    let mut max_score = f32::NEG_INFINITY;
+    let mut denominator = 0.0f32;
+    let mut stack_scores = [0.0f32; 128];
+    let mut heap_scores = if tile_size > 128 {
+        vec![0.0f32; tile_size]
+    } else {
+        Vec::new()
+    };
+    let scores: &mut [f32] = if tile_size <= 128 {
+        &mut stack_scores[..tile_size]
+    } else {
+        &mut heap_scores[..tile_size]
+    };
+
+    let q_len = query.len();
+    let out_len = out.len();
+
+    for start in (0..len).step_by(tile_size) {
+        let end = (start + tile_size).min(len);
+        for (i, past) in (start..end).enumerate() {
+            if window.is_some_and(|w| position.saturating_sub(past) >= w) {
+                scores[i] = f32::NEG_INFINITY;
+                continue;
+            }
+            let row = past * row_width + offset;
+            let mut score = dot(query, &keys[row..row + q_len]) * scale;
+            if let Some(cap) = logit_cap {
+                score = cap * (score / cap).tanh();
+            }
+            scores[i] = score;
+        }
+
+        let tile_max = scores[..end - start]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !tile_max.is_finite() {
+            continue;
+        }
+
+        let next_max = max_score.max(tile_max);
+        let old_scale = if max_score.is_finite() {
+            (max_score - next_max).exp()
+        } else {
+            0.0
+        };
+
+        denominator *= old_scale;
+        for v in out.chunks_exact_mut(4) {
+            v[0] *= old_scale;
+            v[1] *= old_scale;
+            v[2] *= old_scale;
+            v[3] *= old_scale;
+        }
+        let full_out = out_len - out_len % 4;
+        for v in &mut out[full_out..] {
+            *v *= old_scale;
+        }
+
+        for (i, past) in (start..end).enumerate() {
+            if !scores[i].is_finite() {
+                continue;
+            }
+            let weight = (scores[i] - next_max).exp();
+            denominator += weight;
+            let row = past * val_row_width + val_offset;
+            let val_slice = &values[row..row + out_len];
+
+            for (slot, v_chunk) in out.chunks_exact_mut(4).zip(val_slice.chunks_exact(4)) {
+                slot[0] += weight * v_chunk[0];
+                slot[1] += weight * v_chunk[1];
+                slot[2] += weight * v_chunk[2];
+                slot[3] += weight * v_chunk[3];
+            }
+            for (slot, &v) in out[full_out..].iter_mut().zip(&val_slice[full_out..]) {
+                *slot += weight * v;
+            }
+        }
+        max_score = next_max;
+    }
+
+    if denominator > 0.0 {
+        let inv_den = 1.0 / denominator;
+        for v in out.chunks_exact_mut(4) {
+            v[0] *= inv_den;
+            v[1] *= inv_den;
+            v[2] *= inv_den;
+            v[3] *= inv_den;
+        }
+        let full_out = out_len - out_len % 4;
+        for v in &mut out[full_out..] {
+            *v *= inv_den;
+        }
+    }
+}
+
 /// Parameters for Multi-Head Latent Attention direct latent evaluation.
 #[derive(Clone, Copy, Debug)]
 pub struct MlaAttentionParams {
@@ -817,5 +939,62 @@ mod tests {
         assert!(close(total_weight, 2.5));
         assert!(close(biased[0].1, (0.4 / 0.7) * 2.5));
         assert!(close(biased[1].1, (0.3 / 0.7) * 2.5));
+    }
+
+    #[test]
+    fn attention_online_dynamic_matches_reference_across_tile_sizes() {
+        let q = [0.2, -0.7, 1.1, 0.4];
+        let len = 40;
+        let keys: Vec<f32> = (0..len * 4).map(|i| (i as f32 * 0.17).sin()).collect();
+        let values: Vec<f32> = (0..len * 4).map(|i| (i as f32 * 0.31).cos()).collect();
+
+        let mut expected = [0.0f32; 4];
+        attention_online(
+            &q,
+            &keys,
+            &values,
+            AttentionParams {
+                row_width: 4,
+                offset: 0,
+                len,
+                scale: 0.5,
+                logit_cap: Some(30.0),
+                window: None,
+                position: len - 1,
+                tile_size: 64,
+                v_row_width: None,
+                v_offset: None,
+            },
+            &mut expected,
+        );
+
+        for tile in [8, 16, 32, 64, 128] {
+            let mut actual = [0.0f32; 4];
+            attention_online_dynamic(
+                &q,
+                &keys,
+                &values,
+                AttentionParams {
+                    row_width: 4,
+                    offset: 0,
+                    len,
+                    scale: 0.5,
+                    logit_cap: Some(30.0),
+                    window: None,
+                    position: len - 1,
+                    tile_size: tile,
+                    v_row_width: None,
+                    v_offset: None,
+                },
+                &mut actual,
+            );
+
+            for (a, e) in actual.iter().zip(&expected) {
+                assert!(
+                    (a - e).abs() < 1e-5,
+                    "tile {tile}: actual {actual:?} != expected {expected:?}"
+                );
+            }
+        }
     }
 }
