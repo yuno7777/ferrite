@@ -116,6 +116,85 @@ pub fn q6_k(block: &[u8], out: &mut [f32]) {
     }
 }
 
+/// 256 elements in 84 bytes (`Q2_K`):
+/// - `scales[0..16]`: 16 bytes where low 4 bits are sub-block scale and high 4 bits are sub-block min
+/// - `qs[16..80]`: 64 bytes of 2-bit quants (4 per byte)
+/// - `d[80..82]`: f16 super-block scale
+/// - `dmin[82..84]`: f16 super-block min scale
+pub fn q2_k(block: &[u8], out: &mut [f32]) {
+    let scales = &block[0..16];
+    let qs = &block[16..80];
+    let d = half::read_f16(&block[80..82]);
+    let dmin = half::read_f16(&block[82..84]);
+
+    for half_block in 0..2 {
+        let q = &qs[half_block * 32..(half_block + 1) * 32];
+        for shift_idx in 0..4 {
+            let shift = (shift_idx * 2) as u32;
+            let sc_lo = scales[half_block * 8 + shift_idx * 2];
+            let sc_hi = scales[half_block * 8 + shift_idx * 2 + 1];
+
+            let dl0 = d * (sc_lo & 0x0F) as f32;
+            let ml0 = dmin * (sc_lo >> 4) as f32;
+            let dl1 = d * (sc_hi & 0x0F) as f32;
+            let ml1 = dmin * (sc_hi >> 4) as f32;
+
+            let base = half_block * 128 + shift_idx * 32;
+            for l in 0..16 {
+                out[base + l] = dl0 * ((q[l] >> shift) & 3) as f32 - ml0;
+                out[base + 16 + l] = dl1 * ((q[16 + l] >> shift) & 3) as f32 - ml1;
+            }
+        }
+    }
+}
+
+/// Unpack the 16 6-bit signed scales (centered at 32) from `Q3_K`'s 12-byte scale table.
+#[inline(always)]
+pub(crate) fn q3_k_scales(scales: &[u8]) -> [i8; 16] {
+    let mut out = [0i8; 16];
+    for j in 0..4 {
+        let s0 = scales[j];
+        let s1 = scales[j + 4];
+        let top = scales[j + 8];
+        out[j] = ((s0 & 0x0F) | ((top & 0x03) << 4)) as i8 - 32;
+        out[j + 4] = ((s1 & 0x0F) | (((top >> 2) & 0x03) << 4)) as i8 - 32;
+        out[j + 8] = ((s0 >> 4) | (((top >> 4) & 0x03) << 4)) as i8 - 32;
+        out[j + 12] = ((s1 >> 4) | (((top >> 6) & 0x03) << 4)) as i8 - 32;
+    }
+    out
+}
+
+/// 256 elements in 110 bytes (`Q3_K`):
+/// - `hmask[0..32]`: 32 bytes of 3rd high bits
+/// - `qs[32..96]`: 64 bytes of 2-bit low planes
+/// - `scales[96..108]`: 12 bytes of packed 6-bit scales (centered at 32)
+/// - `d[108..110]`: f16 super-block scale
+pub fn q3_k(block: &[u8], out: &mut [f32]) {
+    let hmask = &block[0..32];
+    let qs = &block[32..96];
+    let scales = q3_k_scales(&block[96..108]);
+    let d = half::read_f16(&block[108..110]);
+
+    for half_block in 0..2 {
+        let q = &qs[half_block * 32..(half_block + 1) * 32];
+        for shift_idx in 0..4 {
+            let shift = (shift_idx * 2) as u32;
+            let m_bit = 1u8 << (half_block * 4 + shift_idx);
+            let dl0 = d * scales[half_block * 8 + shift_idx * 2] as f32;
+            let dl1 = d * scales[half_block * 8 + shift_idx * 2 + 1] as f32;
+            let base = half_block * 128 + shift_idx * 32;
+
+            for l in 0..16 {
+                let q0 = ((q[l] >> shift) & 3) as i8 - if hmask[l] & m_bit != 0 { 0 } else { 4 };
+                let q1 = ((q[16 + l] >> shift) & 3) as i8
+                    - if hmask[16 + l] & m_bit != 0 { 0 } else { 4 };
+                out[base + l] = dl0 * q0 as f32;
+                out[base + 16 + l] = dl1 * q1 as f32;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +284,32 @@ mod tests {
         block[128] = 0b0000_0011;
         q6_k(&block, &mut out);
         assert_eq!(out[0], 31.0);
+    }
+
+    #[test]
+    fn q2_k_and_q3_k_dequantize_correctly() {
+        let mut block2 = vec![0u8; 84];
+        block2[0] = 0x12; // scale = 2, min = 1 for sub-block 0
+        block2[16] = 0b0000_0011; // element 0 quant = 3
+        block2[80..82].copy_from_slice(&0x3C00u16.to_le_bytes()); // d = 1.0
+        block2[82..84].copy_from_slice(&0x3C00u16.to_le_bytes()); // dmin = 1.0
+        let mut out = [0.0; QK_K];
+        q2_k(&block2, &mut out);
+        // 1.0 * 2 * 3 - 1.0 * 1 = 5.0
+        assert_eq!(out[0], 5.0);
+        // element 1 has quant 0 -> 1.0 * 2 * 0 - 1.0 * 1 = -1.0
+        assert_eq!(out[1], -1.0);
+
+        let mut block3 = vec![0u8; 110];
+        block3[0] = 1; // hmask bit 0 set -> element 0 gets +0 instead of -4
+        block3[32] = 0b0000_0010; // element 0 low 2 bits = 2
+                                  // Set scale 0 to 33 (so 33 - 32 = +1): low4 = 1, top2 = 2 (in scales[8] bits 0..1)
+        block3[96] = 1;
+        block3[104] = 2;
+        block3[108..110].copy_from_slice(&0x3C00u16.to_le_bytes()); // d = 1.0
+        q3_k(&block3, &mut out);
+        assert_eq!(out[0], 2.0);
+        assert_eq!(out[1], -4.0);
     }
 
     #[test]

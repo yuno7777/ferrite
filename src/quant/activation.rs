@@ -70,6 +70,18 @@ impl Quantized {
             self.sums.resize(blocks, 0);
         }
 
+        #[cfg(target_arch = "x86_64")]
+        if super::avx2::available() && is_x86_feature_detected!("fma") {
+            unsafe {
+                self.fill_avx2(x);
+            }
+            return;
+        }
+
+        self.fill_scalar(x);
+    }
+
+    fn fill_scalar(&mut self, x: &[f32]) {
         for (index, values) in x.chunks_exact(BLOCK).enumerate() {
             let amax = values.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
             let scale = amax / 127.0;
@@ -86,6 +98,84 @@ impl Quantized {
             }
             self.scales[index] = scale;
             self.sums[index] = sum;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn fill_avx2(&mut self, x: &[f32]) {
+        use std::arch::x86_64::*;
+        let abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFF_FFFF));
+        let min_i32 = _mm256_set1_epi32(-127);
+        let max_i32 = _mm256_set1_epi32(127);
+        let half_pos = _mm256_set1_ps(0.5);
+        let half_neg = _mm256_set1_ps(-0.5);
+        let zero_ps = _mm256_setzero_ps();
+
+        for (index, values) in x.chunks_exact(BLOCK).enumerate() {
+            let ptr = values.as_ptr();
+            let v0 = _mm256_loadu_ps(ptr);
+            let v1 = _mm256_loadu_ps(ptr.add(8));
+            let v2 = _mm256_loadu_ps(ptr.add(16));
+            let v3 = _mm256_loadu_ps(ptr.add(24));
+
+            let a0 = _mm256_and_ps(v0, abs_mask);
+            let a1 = _mm256_and_ps(v1, abs_mask);
+            let a2 = _mm256_and_ps(v2, abs_mask);
+            let a3 = _mm256_and_ps(v3, abs_mask);
+
+            let m01 = _mm256_max_ps(a0, a1);
+            let m23 = _mm256_max_ps(a2, a3);
+            let m = _mm256_max_ps(m01, m23);
+
+            let hi128 = _mm256_extractf128_ps(m, 1);
+            let m128 = _mm_max_ps(_mm256_castps256_ps128(m), hi128);
+            let m64 = _mm_max_ps(m128, _mm_movehl_ps(m128, m128));
+            let m32 = _mm_max_ss(m64, _mm_shuffle_ps(m64, m64, 1));
+            let amax = _mm_cvtss_f32(m32);
+
+            let scale = amax / 127.0;
+            let inverse = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+            let inv_vec = _mm256_set1_ps(inverse);
+
+            // Round half away from zero to match `f32::round()` bit-for-bit:
+            let round_away = |v: __m256| -> __m256i {
+                let scaled = _mm256_mul_ps(v, inv_vec);
+                let neg_mask = _mm256_cmp_ps(scaled, zero_ps, _CMP_LT_OQ);
+                let offset = _mm256_blendv_ps(half_pos, half_neg, neg_mask);
+                let shifted = _mm256_add_ps(scaled, offset);
+                let i32s = _mm256_cvttps_epi32(shifted);
+                _mm256_min_epi32(_mm256_max_epi32(i32s, min_i32), max_i32)
+            };
+
+            let q0 = round_away(v0);
+            let q1 = round_away(v1);
+            let q2 = round_away(v2);
+            let q3 = round_away(v3);
+
+            let sum01 = _mm256_add_epi32(q0, q1);
+            let sum23 = _mm256_add_epi32(q2, q3);
+            let sum_all = _mm256_add_epi32(sum01, sum23);
+            let sum_halves = _mm_add_epi32(
+                _mm256_castsi256_si128(sum_all),
+                _mm256_extracti128_si256(sum_all, 1),
+            );
+            let sum_pairs = _mm_add_epi32(sum_halves, _mm_shuffle_epi32(sum_halves, 0b01_00_11_10));
+            let sum_single = _mm_add_epi32(sum_pairs, _mm_shuffle_epi32(sum_pairs, 0b00_01_00_01));
+            let sum = _mm_cvtsi128_si32(sum_single);
+
+            // Pack four 8xi32 vectors down to 32xi8 in linear order:
+            let p01 = _mm256_packs_epi32(q0, q1);
+            let p23 = _mm256_packs_epi32(q2, q3);
+            let p01_ordered = _mm256_permute4x64_epi64(p01, 0b11_01_10_00);
+            let p23_ordered = _mm256_permute4x64_epi64(p23, 0b11_01_10_00);
+            let packed_i8 = _mm256_packs_epi16(p01_ordered, p23_ordered);
+            let ordered_i8 = _mm256_permute4x64_epi64(packed_i8, 0b11_01_10_00);
+
+            let dst = self.quants.as_mut_ptr().add(index * BLOCK);
+            _mm256_storeu_si256(dst as *mut __m256i, ordered_i8);
+            *self.scales.get_unchecked_mut(index) = scale;
+            *self.sums.get_unchecked_mut(index) = sum;
         }
     }
 

@@ -179,7 +179,7 @@ Options:
 
 ### `ferrite serve <model> [options]`
 
-Starts an HTTP server providing OpenAI-compatible `/v1/chat/completions` and `/v1/completions` endpoints with Server-Sent Events (SSE) streaming.
+Starts an HTTP server providing OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, and `/v1/embeddings` endpoints with Server-Sent Events (SSE) streaming, plus an embedded single-binary WebUI playground at `/ui` (and `/` when opened in a web browser).
 
 ```bash
 ferrite serve llama-3.2 --host 127.0.0.1 --port 8080 --threads 8
@@ -196,10 +196,10 @@ Server Options:
 
 Re-quantizes a GGUF model file into a target quantization format without external tooling.
 
-Supported target formats: `Q8_0`, `Q4_0`, `Q4_K`.
+Supported target formats: `Q8_0`, `Q4_0`, `Q4_K`, `IQ4_NL`, `IQ4_XS`, `TQ1_0`, `TQ2_0`.
 
 ```bash
-ferrite quantize base-f32.gguf base-q4_k.gguf Q4_K
+ferrite quantize base-f32.gguf base-iq4_nl.gguf IQ4_NL
 ```
 
 ---

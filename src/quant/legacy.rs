@@ -37,6 +37,35 @@ pub fn q8_0(block: &[u8], out: &mut [f32]) {
     }
 }
 
+/// 32 elements in 22 bytes: f16 scale, 4 bytes of packed 5th high bits (`qh`),
+/// then 16 bytes of packed 4-bit low nibbles (`qs`), centered on 16.
+pub fn q5_0(block: &[u8], out: &mut [f32]) {
+    let d = half::read_f16(block);
+    let qh = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+    let qs = &block[6..22];
+    for (j, &byte) in qs.iter().enumerate() {
+        let xh_0 = (((qh >> j) << 4) & 0x10) as u8;
+        let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+        out[j] = d * (((byte & 0x0F) | xh_0) as i32 - 16) as f32;
+        out[j + 16] = d * (((byte >> 4) | xh_1) as i32 - 16) as f32;
+    }
+}
+
+/// 32 elements in 24 bytes: f16 scale, f16 min, 4 bytes of packed 5th high bits
+/// (`qh`), then 16 bytes of packed 4-bit low nibbles (`qs`).
+pub fn q5_1(block: &[u8], out: &mut [f32]) {
+    let d = half::read_f16(block);
+    let min = half::read_f16(&block[2..4]);
+    let qh = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    let qs = &block[8..24];
+    for (j, &byte) in qs.iter().enumerate() {
+        let xh_0 = (((qh >> j) << 4) & 0x10) as u8;
+        let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+        out[j] = d * ((byte & 0x0F) | xh_0) as f32 + min;
+        out[j + 16] = d * ((byte >> 4) | xh_1) as f32 + min;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +116,31 @@ mod tests {
         // low nibble 1 -> 1 - 2 = -1, high nibble 2 -> 2 - 2 = 0
         assert!(out[..16].iter().all(|v| *v == -1.0));
         assert!(out[16..].iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn q5_0_and_q5_1_reconstruct_fifth_bit() {
+        let mut block5_0 = ONE.to_vec();
+        // Bit 0 set (element 0 gets +16), bit 16 set (element 16 gets +16)
+        block5_0.extend_from_slice(&0x0001_0001u32.to_le_bytes());
+        block5_0.extend(std::iter::repeat_n(0x23u8, 16));
+        let mut out = [0.0; 32];
+        q5_0(&block5_0, &mut out);
+        // element 0: (3 + 16) - 16 = 3.0; element 1: 3 - 16 = -13.0
+        assert_eq!(out[0], 3.0);
+        assert_eq!(out[1], -13.0);
+        // element 16: (2 + 16) - 16 = 2.0; element 17: 2 - 16 = -14.0
+        assert_eq!(out[16], 2.0);
+        assert_eq!(out[17], -14.0);
+
+        let mut block5_1 = ONE.to_vec();
+        block5_1.extend_from_slice(&0x3C00u16.to_le_bytes()); // min = 1.0
+        block5_1.extend_from_slice(&0x0001_0001u32.to_le_bytes());
+        block5_1.extend(std::iter::repeat_n(0x23u8, 16));
+        q5_1(&block5_1, &mut out);
+        assert_eq!(out[0], 20.0);
+        assert_eq!(out[1], 4.0);
+        assert_eq!(out[16], 19.0);
+        assert_eq!(out[17], 3.0);
     }
 }

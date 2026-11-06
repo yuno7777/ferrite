@@ -18,10 +18,14 @@ pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx512;
 pub mod awq;
+pub mod bitnet;
 pub mod dot;
 pub mod fp8;
 pub mod half;
 pub mod idot;
+pub mod imatrix;
+pub use imatrix::ImportanceMatrix;
+pub mod iq;
 pub mod k;
 pub mod legacy;
 #[cfg(target_arch = "aarch64")]
@@ -87,12 +91,23 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], out: &mut [f32]) -> Result<()> {
                 ));
             }
         }
+        GgmlType::Q2_K => per_block(bytes, out, 256, 84, k::q2_k),
+        GgmlType::Q3_K => per_block(bytes, out, 256, 110, k::q3_k),
         GgmlType::Q4_K => per_block(bytes, out, 256, 144, k::q4_k),
         GgmlType::Q5_K => per_block(bytes, out, 256, 176, k::q5_k),
         GgmlType::Q6_K => per_block(bytes, out, 256, 210, k::q6_k),
         GgmlType::Q4_0 => per_block(bytes, out, 32, 18, legacy::q4_0),
         GgmlType::Q4_1 => per_block(bytes, out, 32, 20, legacy::q4_1),
+        GgmlType::Q5_0 => per_block(bytes, out, 32, 22, legacy::q5_0),
+        GgmlType::Q5_1 => per_block(bytes, out, 32, 24, legacy::q5_1),
         GgmlType::Q8_0 => per_block(bytes, out, 32, 34, legacy::q8_0),
+        GgmlType::IQ2_XXS => per_block(bytes, out, 256, 66, iq::dequantize_iq2_xxs),
+        GgmlType::IQ3_XXS => per_block(bytes, out, 256, 98, iq::dequantize_iq3_xxs),
+        GgmlType::IQ3_S => per_block(bytes, out, 256, 110, iq::dequantize_iq3_s),
+        GgmlType::IQ4_NL => per_block(bytes, out, 32, 18, iq::dequantize_iq4_nl),
+        GgmlType::IQ4_XS => per_block(bytes, out, 256, 136, iq::dequantize_iq4_xs),
+        GgmlType::TQ1_0 => per_block(bytes, out, 256, 54, bitnet::dequantize_tq1_0),
+        GgmlType::TQ2_0 => per_block(bytes, out, 256, 66, bitnet::dequantize_tq2_0),
         GgmlType::F8_E4M3 => fp8::dequantize_e4m3(bytes, out),
         other => return Err(unsupported(other)),
     }
@@ -148,14 +163,35 @@ pub(crate) mod testdata {
             }
             match ty {
                 // scale at the front
-                GgmlType::Q8_0 | GgmlType::Q4_0 => block[..2].copy_from_slice(&SCALE),
+                GgmlType::Q8_0
+                | GgmlType::Q4_0
+                | GgmlType::Q5_0
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ3_S => block[..2].copy_from_slice(&SCALE),
                 // scale and minimum-scale at the front
-                GgmlType::Q4_K | GgmlType::Q5_K => {
+                GgmlType::Q4_1 | GgmlType::Q5_1 | GgmlType::Q4_K | GgmlType::Q5_K => {
                     block[..2].copy_from_slice(&SCALE);
                     block[2..4].copy_from_slice(&MIN_SCALE);
                 }
+                // Q2_K puts d and dmin at bytes 80..84
+                GgmlType::Q2_K => {
+                    block[80..82].copy_from_slice(&SCALE);
+                    block[82..84].copy_from_slice(&MIN_SCALE);
+                }
+                // Q3_K puts d at bytes 108..110
+                GgmlType::Q3_K => block[108..110].copy_from_slice(&SCALE),
                 // Q6_K puts its scale last
                 GgmlType::Q6_K => block[208..210].copy_from_slice(&SCALE),
+                GgmlType::TQ1_0 => block[52..54].copy_from_slice(&SCALE),
+                GgmlType::TQ2_0 => {
+                    for b in &mut block[0..64] {
+                        *b &= 0b10_10_10_10;
+                    }
+                    block[64..66].copy_from_slice(&SCALE);
+                }
                 GgmlType::F8_E4M3 => {
                     for b in block.iter_mut() {
                         if *b == 0x7F || *b == 0xFF {

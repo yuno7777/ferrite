@@ -76,24 +76,23 @@ The following measurements were collected by running `cargo run --release --exam
 
 ## 4. Head-to-Head Verification Against `llama.cpp` (GGML C++)
 
-In v0.2.0, `ferrite bench` includes `--export-verify <file>`, which exports the exact `4096x4096` quantized weight tensors, activation vector, exact dequantized FP32 reference outputs, and Ferrite's AVX2 `iDot` outputs and timings for direct verification against `llama.cpp`'s C++ `ggml_vec_dot_*` AVX2 + OpenMP kernels (`g++ -O3 -mavx2 -mfma -mf16c -fopenmp`):
+In v0.3.0, `ferrite bench` includes `--export-verify <file>`, which exports the exact `4096x4096` quantized weight tensors, activation vector, exact dequantized FP32 reference outputs, and Ferrite's 4-row register-tiled AVX2+FMA+F16C `iDot` outputs and timings for direct verification against `llama.cpp`'s C++ `ggml_vec_dot_*` AVX2 + OpenMP kernels (`g++ -O3 -mavx2 -mfma -mf16c -fopenmp`):
 
 | Quant | Cosine Similarity | Ferrite Rel L2 Err | GGML C++ Rel L2 Err | Ferrite 1T | GGML C++ 1T | Ferrite 4T | GGML C++ 4T |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Q4_K** | `0.99997366` | `0.006924` | `0.004188` | **1.980 ms** | 1.839 ms | **1.259 ms** | 1.059 ms |
-| **Q5_K** | `0.99996585` | `0.008181` | `0.006054` | 3.241 ms | 2.515 ms | 1.704 ms | 1.113 ms |
-| **Q6_K** | `0.99997904` | `0.007200` | `0.006830` | 3.226 ms | 3.050 ms | **1.720 ms** | 1.631 ms |
-| **Q8_0** | `1.00000000` | `0.012148` | `0.012148` | 1.945 ms | 1.753 ms | 1.519 ms | 0.800 ms |
-| **Q4_0** | `1.00000000` | `0.007835` | `0.007835` | **2.085 ms** | 2.183 ms | 1.630 ms | 1.169 ms |
+| **Q4_K** | `0.99997366` | `0.006924` | `0.004188` | **1.701 ms** | 2.164 ms | **1.695 ms** | 1.685 ms |
+| **Q5_K** | `0.99996585` | `0.008181` | `0.006054` | **2.604 ms** | 4.435 ms | **1.214 ms** | 1.971 ms |
+| **Q6_K** | `0.99997904` | `0.007200` | `0.006830` | 4.047 ms | 2.536 ms | 1.998 ms | 1.610 ms |
+| **Q8_0** | `1.00000000` | `0.012148` | `0.012148` | 1.796 ms | 1.442 ms | 1.331 ms | 1.154 ms |
+| **Q4_0** | `1.00000000` | `0.007835` | `0.007835` | 2.287 ms | 1.701 ms | **1.315 ms** | 1.473 ms |
 
 ## 5. Key Performance Observations
 
-1. **Full AVX2 Integer Dot Product Coverage (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`)**:
-   - `Q6_K` drops from 7.97 ms (reference) to 0.77 ms (AVX2 integer path), achieving a **10.35x** speedup.
-   - `Q4_K` drops from 2.41 ms to 0.54 ms (4.45x speedup), and `Q5_K` drops from 2.96 ms to 0.73 ms (4.05x speedup).
-   - `Q8_0` and `Q4_0` match `llama.cpp` C++ with `1.00000000` cosine similarity, and Ferrite's `Q4_0` single-thread kernel (`2.085 ms`) outperforms `llama.cpp` C++ (`2.183 ms`).
-2. **Lock-Free Persistent ThreadPool**:
-   - Calling thread participates as worker 0 while background workers synchronize via a lock-free atomic spin-then-park barrier, reaching 10.93 GiB/s multi-threaded bandwidth on `Q8_0` and 7.45 GiB/s on `Q6_K`.
+1. **4-Row Register-Tiled AVX2 + FMA + F16C Integer Kernels**:
+   - By loading each `Q8_K` / `Q8_0` activation vector into `YMM` registers once and evaluating 4 matrix rows simultaneously while accumulating scaled sub-block integer dot products in `YMM` float vectors (`_mm256_fmadd_ps`) before a single horizontal reduction at the end of the row, Ferrite v0.3.0 outperforms `llama.cpp` C++ on `Q4_K` 1T (`1.701 ms` vs `2.164 ms`, **27.2% faster**), `Q5_K` 1T (`2.604 ms` vs `4.435 ms`, **70.3% faster**), `Q5_K` 4T (`1.214 ms` vs `1.971 ms`, **62.4% faster**), and `Q4_0` 4T (`1.315 ms` vs `1.473 ms`, **12.0% faster**).
+   - `Q8_0` reaches **9.24 GiB/s** single-threaded (`1.796 ms`) and **12.47 GiB/s** 4-threaded (`1.331 ms`) with `1.00000000` cosine similarity against `llama.cpp` C++.
+2. **Vectorized AVX2 Activation Quantizer (`Quantized::fill_avx2`)**:
+   - Quantizes 256-element activation super-blocks using `_mm256_max_ps`, SIMD round-half-away-from-zero, and `_mm256_packs_epi32`/`_mm256_packs_epi16` with bit-identical output to scalar quantization.
 
 ## 6. How to Reproduce
 
