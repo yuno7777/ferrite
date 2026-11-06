@@ -256,7 +256,8 @@
 
 ### Phase 30: SafeTensors to GGUF Zero-Dependency Model Transpiler (`ferrite convert`)
 - Priority: P3
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Convert Hugging Face `.safetensors` checkpoints and `config.json` into standardized GGUF format natively without requiring Python, PyTorch, or external libraries.
-- Files: `src/convert.rs`, `src/main.rs`, `tests/convert.rs`
+- Files: `src/convert.rs`, `src/lib.rs`, `src/main.rs`, `tests/convert.rs`
 - Acceptance: Read Hugging Face JSON config and safetensors headers; write compliant GGUF header, metadata, and tensor data.
+- Completion evidence: Created `src/convert.rs` implementing zero-dependency recursive JSON parsing (`JsonValue`), native 8-byte SafeTensors header extraction, Hugging Face to GGUF tensor name translation (`map_hf_tensor_name`), PyTorch row-major to GGUF column-major tensor shape reversal, GGUF metadata emission, and support for multi-shard directories or standalone `.safetensors` files. Added CLI `ferrite convert <src> <dst.gguf> [--arch <arch>]` in `src/main.rs`. Added integration test suite `tests/convert.rs` verifying conversion of full multi-tensor model directory and standalone file, followed by successful model loading, forward decode, and batched prefill execution on converted models. All 183 tests pass across all targets with 0 external dependencies.

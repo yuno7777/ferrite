@@ -11,6 +11,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+pub mod convert;
 pub mod eval;
 pub mod gguf;
 pub mod grammar;
@@ -31,6 +32,7 @@ pub mod synth;
 pub mod template;
 pub mod tokenizer;
 
+pub use convert::{convert_safetensors_to_gguf, JsonValue, SafeTensorsHeader};
 pub use eval::{cross_entropy_loss, ChunkPerplexity, PerplexityEvaluator, PerplexityReport};
 pub use gguf::{discover_shards, GgmlType, Gguf, TensorInfo, Value};
 pub use grammar::{ChoiceGrammar, Grammar, JsonGrammar, RegexMatcher};

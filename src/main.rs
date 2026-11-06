@@ -21,6 +21,7 @@ usage:
   ferrite serve <model>             serve HTTP/SSE API daemon
   ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
   ferrite perplexity <model> <file> evaluate text perplexity and loss
+  ferrite convert <src> <dst.gguf>  convert SafeTensors to GGUF format
 
 run/serve options:
   -n <count>      tokens to generate (default 128)
@@ -60,6 +61,7 @@ fn main() -> ExitCode {
         Some("serve") => cmd_serve(&args[1..]),
         Some("quantize") => cmd_quantize(&args[1..]),
         Some("perplexity") => cmd_perplexity(&args[1..]),
+        Some("convert") => cmd_convert(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -192,6 +194,48 @@ fn cmd_perplexity(args: &[String]) -> std::io::Result<()> {
         elapsed.as_secs_f64()
     );
 
+    Ok(())
+}
+
+fn cmd_convert(args: &[String]) -> std::io::Result<()> {
+    let arch: Option<String> = {
+        let at = args.iter().position(|a| a == "--arch");
+        at.and_then(|i| args.get(i + 1).cloned())
+    };
+
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--arch" {
+            index += 2;
+            continue;
+        }
+        positional.push(args[index].clone());
+        index += 1;
+    }
+
+    let (src, dst) = match positional.as_slice() {
+        [s, d] => (s, d),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: ferrite convert <safetensors_file_or_dir> <output.gguf> [--arch <arch>]",
+            ));
+        }
+    };
+
+    eprintln!("converting {src} -> {dst}...");
+    let start = Instant::now();
+    ferrite::convert::convert_safetensors_to_gguf(
+        std::path::Path::new(src),
+        std::path::Path::new(dst),
+        arch.as_deref(),
+    )?;
+    let elapsed = start.elapsed();
+    eprintln!(
+        "successfully converted to {dst} in {:.2}s",
+        elapsed.as_secs_f64()
+    );
     Ok(())
 }
 
