@@ -113,6 +113,36 @@ impl GgmlType {
             other => format!("{other:?}"),
         }
     }
+
+    pub fn to_id(self) -> u32 {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+            Self::Q4_0 => 2,
+            Self::Q4_1 => 3,
+            Self::Q5_0 => 6,
+            Self::Q5_1 => 7,
+            Self::Q8_0 => 8,
+            Self::Q8_1 => 9,
+            Self::Q2_K => 10,
+            Self::Q3_K => 11,
+            Self::Q4_K => 12,
+            Self::Q5_K => 13,
+            Self::Q6_K => 14,
+            Self::Q8_K => 15,
+            Self::I8 => 24,
+            Self::I16 => 25,
+            Self::I32 => 26,
+            Self::I64 => 27,
+            Self::F64 => 28,
+            Self::BF16 => 30,
+            Self::Other(id) => id,
+        }
+    }
+
+    pub fn raw(self) -> u32 {
+        self.to_id()
+    }
 }
 
 // -------------------------------------------------------------------- values

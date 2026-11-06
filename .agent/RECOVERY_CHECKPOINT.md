@@ -168,4 +168,9 @@
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 25: Pure-Rust In-Engine Quantization Tool (`ferrite quantize`; status QUEUED).
+- Phase 26: GGUF Multi-File Sharded Model Loader (status QUEUED).
+
+## Completed in This Execution
+- Phase 25: Added `ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>` and `src/quant/quantize.rs`. The writer preserves GGUF metadata, tensor names/shapes/order, and already-quantized tensor bytes while quantizing F32/F16 tensors. Added quantization round-trip and full GGUF readback coverage for all three target formats.
+- Verification: `cargo test --all-targets` passes (165 tests); `cargo clippy --all-targets -- -D warnings` passes; `cargo fmt --check` passes.
+- Working tree note: `.agent/maintenance.log` has unrelated concurrent log changes with whitespace errors; `src/gguf.rs`, `src/quant/half.rs`, and `src/lib.rs` also have concurrent edits. Retained these changes; do not discard them during follow-up work. `git diff --check` passes when excluding the pre-existing/concurrently appended maintenance log.

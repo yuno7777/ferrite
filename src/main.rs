@@ -19,6 +19,7 @@ usage:
   ferrite tokenize <model> <text>   encode text, show ids and pieces
   ferrite run <model> <prompt>      generate, streaming to stdout
   ferrite serve <model>             serve HTTP/SSE API daemon
+  ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
 
 run/serve options:
   -n <count>      tokens to generate (default 128)
@@ -55,6 +56,7 @@ fn main() -> ExitCode {
         Some("tokenize") => cmd_tokenize(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
+        Some("quantize") => cmd_quantize(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -72,6 +74,31 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_quantize(args: &[String]) -> std::io::Result<()> {
+    if args.len() != 3 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>",
+        ));
+    }
+    let target = match args[2].to_ascii_uppercase().as_str() {
+        "Q8_0" => ferrite::GgmlType::Q8_0,
+        "Q4_0" => ferrite::GgmlType::Q4_0,
+        "Q4_K" => ferrite::GgmlType::Q4_K,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "quantization type must be Q8_0, Q4_0, or Q4_K",
+            ))
+        }
+    };
+    ferrite::quant::quantize::quantize_file(
+        std::path::Path::new(&args[0]),
+        std::path::Path::new(&args[1]),
+        target,
+    )
 }
 
 fn cmd_where() -> std::io::Result<()> {

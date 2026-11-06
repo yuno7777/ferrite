@@ -216,10 +216,11 @@
 
 ### Phase 25: Pure-Rust In-Engine Quantization Tool (`ferrite quantize`)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Convert F32/F16 GGUF weights to high-speed quantized formats (Q8_0, Q4_0, Q4_K) directly inside Ferrite with zero external tools (no llama.cpp build required).
 - Files: `src/quant/quantize.rs`, `src/main.rs`, `tests/quantize.rs`
 - Acceptance: CLI `ferrite quantize <src.gguf> <dst.gguf> <type>`; output file valid and readable by Ferrite.
+- Completion evidence: Added a zero-dependency GGUF rewriting command supporting Q8_0, Q4_0, and Q4_K output from F32/F16 tensors while preserving metadata and copying non-floating tensor encodings. Added round-trip quantization and full GGUF readback coverage for all three target formats. All targets, strict Clippy, and formatting checks pass.
 
 ### Phase 26: GGUF Multi-File Sharded Model Loader
 - Priority: P2
