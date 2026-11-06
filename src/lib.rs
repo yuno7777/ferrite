@@ -68,7 +68,8 @@ pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, do
 pub use quant::outlier::{OutlierConfig, OutlierMatrix, OutlierQuantMode};
 pub use quant::quantize::{quantize_file, quantize_model};
 pub use scheduler::{
-    BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
+    BatchScheduler, FinishReason, MicroBatchConfig, MicroBatchPrefillEngine, PackedBatch,
+    SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
 };
 pub use server::{Server, ServerConfig};
 pub use sparse::{SparseAttentionMask, SparsePattern};

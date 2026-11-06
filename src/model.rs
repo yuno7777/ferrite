@@ -2757,6 +2757,23 @@ impl<'a> Model<'a> {
         *current_pos += 1;
         Ok(())
     }
+
+    /// Executes prefill for a packed heterogeneous batch of sequences without zero-padding,
+    /// returning the final token logits for each sequence in the packed batch.
+    pub fn prefill_packed(
+        &self,
+        state: &mut State,
+        packed: &crate::scheduler::PackedBatch,
+    ) -> Result<Vec<Vec<f32>>> {
+        let mut logits = Vec::with_capacity(packed.num_sequences());
+        for i in 0..packed.num_sequences() {
+            let tokens = packed.sequence_tokens(i);
+            let start_pos = packed.sequence_positions(i)[0];
+            self.prefill(state, tokens, start_pos)?;
+            logits.push(state.logits.clone());
+        }
+        Ok(logits)
+    }
 }
 
 /// Stateful, interruptible chunked prompt prefill runner.
