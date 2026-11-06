@@ -208,6 +208,64 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     lanes[0] + lanes[1] + lanes[2] + lanes[3] + tail
 }
 
+/// Standard sigmoid activation: `1 / (1 + exp(-x))`.
+pub fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// Adds bias vector in-place to vector `x`.
+pub fn vector_add_bias(x: &mut [f32], bias: &[f32]) {
+    debug_assert_eq!(x.len(), bias.len());
+    for (val, b) in x.iter_mut().zip(bias) {
+        *val += b;
+    }
+}
+
+/// Top-k expert selection and weight normalization with auxiliary-loss-free bias routing.
+///
+/// If `bias` is provided, expert selection ranks by `raw_scores[i] + bias[i]`.
+/// The actual routing weights are computed from the original `raw_scores[i]` (without bias)
+/// across the selected top-k experts and normalized (optionally scaled by `weights_scale`).
+pub fn topk_moe_routing(
+    raw_scores: &[f32],
+    bias: Option<&[f32]>,
+    top_k: usize,
+    weights_scale: Option<f32>,
+) -> Vec<(usize, f32)> {
+    let n = raw_scores.len();
+    let k = top_k.min(n);
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut ranked: Vec<(usize, f32)> = if let Some(b) = bias {
+        debug_assert_eq!(raw_scores.len(), b.len());
+        raw_scores
+            .iter()
+            .zip(b.iter())
+            .enumerate()
+            .map(|(idx, (&s, &bias_val))| (idx, s + bias_val))
+            .collect()
+    } else {
+        raw_scores.iter().copied().enumerate().collect()
+    };
+
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let selected = &ranked[..k];
+    let sum_raw: f32 = selected.iter().map(|&(idx, _)| raw_scores[idx]).sum();
+    let norm_factor = if sum_raw > 0.0 { 1.0 / sum_raw } else { 0.0 };
+    let scale = weights_scale.unwrap_or(1.0);
+
+    selected
+        .iter()
+        .map(|&(idx, _)| {
+            let weight = (raw_scores[idx] * norm_factor) * scale;
+            (idx, weight)
+        })
+        .collect()
+}
+
 /// SiLU, also called swish: `x * sigmoid(x)`. The gate half of SwiGLU.
 pub fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
@@ -619,5 +677,45 @@ mod tests {
         // Sections 1 and 2 (H=2, W=5) should be rotated
         assert!(!close(v[1], 2.0) || !close(v[5], 6.0));
         assert!(!close(v[2], 3.0) || !close(v[6], 7.0));
+    }
+
+    #[test]
+    fn sigmoid_and_bias_ops() {
+        assert!(close(sigmoid(0.0), 0.5));
+        assert!(sigmoid(20.0) > 0.9999);
+        assert!(sigmoid(-20.0) < 0.0001);
+
+        let mut v = [1.0, 2.0, 3.0];
+        vector_add_bias(&mut v, &[0.5, -1.0, 2.0]);
+        assert_eq!(v, [1.5, 1.0, 5.0]);
+    }
+
+    #[test]
+    fn topk_moe_routing_with_bias() {
+        // Raw scores: expert 0 and 1 are highest without bias
+        let raw = [0.8, 0.7, 0.4, 0.3];
+        // Without bias, top-2 should be 0 and 1
+        let unmasked = topk_moe_routing(&raw, None, 2, None);
+        assert_eq!(unmasked.len(), 2);
+        assert_eq!(unmasked[0].0, 0);
+        assert_eq!(unmasked[1].0, 1);
+        let sum_unmasked: f32 = unmasked.iter().map(|(_, w)| *w).sum();
+        assert!(close(sum_unmasked, 1.0));
+
+        // With bias, boost experts 2 and 3 so they win top-2
+        let bias = [0.0, 0.0, 1.0, 1.0];
+        // Biased scores: 0.8, 0.7, 1.4, 1.3 -> top 2 are expert 2 (1.4) and expert 3 (1.3)
+        let biased = topk_moe_routing(&raw, Some(&bias), 2, Some(2.5));
+        assert_eq!(biased.len(), 2);
+        assert_eq!(biased[0].0, 2);
+        assert_eq!(biased[1].0, 3);
+        // Weights are calculated from raw scores without bias!
+        // raw[2] = 0.4, raw[3] = 0.3, sum = 0.7.
+        // weight[2] = (0.4 / 0.7) * 2.5
+        // weight[3] = (0.3 / 0.7) * 2.5
+        let total_weight: f32 = biased.iter().map(|(_, w)| *w).sum();
+        assert!(close(total_weight, 2.5));
+        assert!(close(biased[0].1, (0.4 / 0.7) * 2.5));
+        assert!(close(biased[1].1, (0.3 / 0.7) * 2.5));
     }
 }

@@ -53,6 +53,7 @@ pub struct Config {
     pub expert_count: Option<usize>,
     pub expert_used_count: Option<usize>,
     pub expert_shared_count: Option<usize>,
+    pub expert_weights_scale: Option<f32>,
     pub q_lora_rank: Option<usize>,
     pub kv_lora_rank: Option<usize>,
     pub qk_nope_head_dim: Option<usize>,
@@ -238,6 +239,10 @@ impl Config {
                 .arch_u64("expert_shared_count")
                 .or_else(|| model.meta_u64("expert_shared_count"))
                 .map(|v| v as usize),
+            expert_weights_scale: model
+                .arch_f32("expert_weights_scale")
+                .or_else(|| model.meta_f32("expert_weights_scale"))
+                .or_else(|| model.arch_f32("expert_weight_scale")),
             q_lora_rank: model.arch_u64("attention.q_lora_rank").map(|v| v as usize),
             kv_lora_rank: model.arch_u64("attention.kv_lora_rank").map(|v| v as usize),
             qk_nope_head_dim: model
@@ -679,6 +684,7 @@ pub struct Layer<'a> {
     pub down: Weight<'a>,
     pub lora_down: Option<crate::lora::LoraPair<'a>>,
     pub ffn_gate_inp: Option<Weight<'a>>,
+    pub expert_bias: Option<Vec<f32>>,
     pub moe_gate: Option<Vec<Weight<'a>>>,
     pub moe_up: Option<Vec<Weight<'a>>>,
     pub moe_down: Option<Vec<Weight<'a>>>,
@@ -725,22 +731,23 @@ impl<'a> Layer<'a> {
                 out_tok.fill(0.0);
 
                 router.matvec_threaded(xb_tok, &mut router_logits, threads, workspace)?;
-                ops::softmax(&mut router_logits);
 
-                let mut indexed_logits: Vec<(usize, f32)> =
-                    router_logits.iter().copied().enumerate().collect();
-                indexed_logits
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-                let top_k_sum: f32 = indexed_logits[..top_k].iter().map(|(_, w)| *w).sum();
-                let re_norm = if top_k_sum > 0.0 {
-                    1.0 / top_k_sum
+                if c.arch == "deepseek3" {
+                    for val in router_logits.iter_mut() {
+                        *val = ops::sigmoid(*val);
+                    }
                 } else {
-                    0.0
-                };
+                    ops::softmax(&mut router_logits);
+                }
 
-                for &(exp_idx, exp_weight) in &indexed_logits[..top_k] {
-                    let weight_scale = exp_weight * re_norm;
+                let routed = ops::topk_moe_routing(
+                    &router_logits,
+                    self.expert_bias.as_deref(),
+                    top_k,
+                    c.expert_weights_scale,
+                );
+
+                for (exp_idx, weight_scale) in routed {
                     if weight_scale == 0.0 {
                         continue;
                     }
@@ -860,7 +867,20 @@ impl<'a> Layer<'a> {
             down: Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))
                 .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
             lora_down: None,
-            ffn_gate_inp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_inp.weight")).ok(),
+            ffn_gate_inp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_inp.weight"))
+                .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_gate_exps.weight")))
+                .ok(),
+            expert_bias: if let Some(b) =
+                load_vector_optional(gguf, &format!("blk.{index}.ffn_gate_inp.bias"))?
+            {
+                Some(b)
+            } else if let Some(b) =
+                load_vector_optional(gguf, &format!("blk.{index}.exp_probs_b.weight"))?
+            {
+                Some(b)
+            } else {
+                load_vector_optional(gguf, &format!("blk.{index}.expert_bias.weight"))?
+            },
             moe_gate: if let Some(n_exp) = config.expert_count {
                 let mut gates = Vec::with_capacity(n_exp);
                 for exp in 0..n_exp {

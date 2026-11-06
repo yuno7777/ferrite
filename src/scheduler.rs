@@ -395,6 +395,7 @@ mod tests {
             expert_count: None,
             expert_used_count: None,
             expert_shared_count: None,
+            expert_weights_scale: None,
             q_lora_rank: None,
             kv_lora_rank: None,
             qk_nope_head_dim: None,
