@@ -90,7 +90,7 @@ impl Quantized {
     }
 
     /// Quants and scale for one block.
-    #[inline]
+    #[inline(always)]
     pub fn block(&self, index: usize) -> (&[i8], f32, i32) {
         (
             &self.quants[index * BLOCK..(index + 1) * BLOCK],

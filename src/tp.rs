@@ -4,7 +4,8 @@
 //! synchronization for massive DeepSeek-V3 and Qwen GEMMs, eliminating thread
 //! spawn overhead and partitioning weights across column and row dimensions.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -33,20 +34,73 @@ enum JobPayload {
     },
 }
 
-struct SharedPoolState {
-    lock: Mutex<JobState>,
-    cvar_worker: Condvar,
-    cvar_master: Condvar,
-    shutdown: AtomicBool,
+#[inline]
+fn execute_payload(payload: JobPayload, thread_id: usize, threads: usize) {
+    match payload {
+        JobPayload::Single(job) => {
+            let total = job.total_len;
+            let chunk = total.div_ceil(threads);
+            let start = (thread_id * chunk).min(total);
+            let end = ((thread_id + 1) * chunk).min(total);
+            if start < end {
+                unsafe {
+                    (job.run)(job.ctx, start, end, thread_id);
+                }
+            }
+        }
+        JobPayload::Dual {
+            job1,
+            job2,
+            split_thread,
+        } => {
+            if thread_id < split_thread {
+                let t_id = thread_id;
+                let t_count = split_thread;
+                let total = job1.total_len;
+                let chunk = total.div_ceil(t_count);
+                let start = (t_id * chunk).min(total);
+                let end = ((t_id + 1) * chunk).min(total);
+                if start < end {
+                    unsafe {
+                        (job1.run)(job1.ctx, start, end, t_id);
+                    }
+                }
+            } else {
+                let t_id = thread_id - split_thread;
+                let t_count = threads - split_thread;
+                let total = job2.total_len;
+                let chunk = total.div_ceil(t_count);
+                let start = (t_id * chunk).min(total);
+                let end = ((t_id + 1) * chunk).min(total);
+                if start < end {
+                    unsafe {
+                        (job2.run)(job2.ctx, start, end, t_id);
+                    }
+                }
+            }
+        }
+    }
 }
 
-struct JobState {
-    generation: usize,
-    payload: Option<JobPayload>,
-    finished_workers: usize,
+const WORKER_SPIN_ITERS: usize = 32_768;
+
+struct SharedPoolState {
+    generation: AtomicUsize,
+    pending_workers: AtomicUsize,
+    sleeping_workers: AtomicUsize,
+    shutdown: AtomicBool,
+    payload: UnsafeCell<Option<JobPayload>>,
+    park_lock: Mutex<()>,
+    cvar_worker: Condvar,
 }
+
+unsafe impl Sync for SharedPoolState {}
 
 /// Persistent thread pool optimized for zero-allocation tensor-parallel GEMM partitioning.
+///
+/// The calling thread executes partition `thread_id = 0` directly while `num_threads - 1`
+/// persistent background threads execute `1..num_threads`, synchronized via a lock-free
+/// atomic spin-then-park barrier.
 pub struct ThreadPool {
     workers: Vec<JoinHandle<()>>,
     shared: Arc<SharedPoolState>,
@@ -54,97 +108,57 @@ pub struct ThreadPool {
 }
 
 impl ThreadPool {
-    /// Spawns `num_threads` persistent worker threads waiting on condition variables.
+    /// Creates a thread pool with `num_threads` total parallel workers (`num_threads - 1`
+    /// background threads plus the calling thread as worker 0).
     pub fn new(num_threads: usize) -> Self {
         let threads = num_threads.max(1);
+        let bg_threads = threads.saturating_sub(1);
         let shared = Arc::new(SharedPoolState {
-            lock: Mutex::new(JobState {
-                generation: 0,
-                payload: None,
-                finished_workers: 0,
-            }),
-            cvar_worker: Condvar::new(),
-            cvar_master: Condvar::new(),
+            generation: AtomicUsize::new(0),
+            pending_workers: AtomicUsize::new(0),
+            sleeping_workers: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
+            payload: UnsafeCell::new(None),
+            park_lock: Mutex::new(()),
+            cvar_worker: Condvar::new(),
         });
 
-        let mut workers = Vec::with_capacity(threads);
-        for thread_id in 0..threads {
+        let mut workers = Vec::with_capacity(bg_threads);
+        for thread_id in 1..threads {
             let shared_clone = Arc::clone(&shared);
             let handle = std::thread::Builder::new()
                 .name(format!("ferrite-tp-{}", thread_id))
                 .spawn(move || {
-                    let mut local_gen = 0;
+                    let mut local_gen = 0usize;
                     loop {
-                        let payload = {
-                            let mut state = shared_clone.lock.lock().unwrap();
-                            while !shared_clone.shutdown.load(Ordering::Relaxed)
-                                && state.generation == local_gen
-                            {
-                                state = shared_clone.cvar_worker.wait(state).unwrap();
-                            }
-
+                        let mut spins = 0usize;
+                        loop {
                             if shared_clone.shutdown.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            let g = shared_clone.generation.load(Ordering::Acquire);
+                            if g != local_gen {
+                                local_gen = g;
                                 break;
                             }
-
-                            local_gen = state.generation;
-                            state
-                                .payload
-                                .expect("payload must be set when generation advances")
-                        };
-
-                        match payload {
-                            JobPayload::Single(job) => {
-                                let total = job.total_len;
-                                let chunk = total.div_ceil(threads);
-                                let start = (thread_id * chunk).min(total);
-                                let end = ((thread_id + 1) * chunk).min(total);
-                                if start < end {
-                                    unsafe {
-                                        (job.run)(job.ctx, start, end, thread_id);
-                                    }
+                            if spins < WORKER_SPIN_ITERS {
+                                spins += 1;
+                                std::hint::spin_loop();
+                            } else {
+                                shared_clone.sleeping_workers.fetch_add(1, Ordering::SeqCst);
+                                let mut guard = shared_clone.park_lock.lock().unwrap();
+                                while !shared_clone.shutdown.load(Ordering::Relaxed)
+                                    && shared_clone.generation.load(Ordering::Acquire) == local_gen
+                                {
+                                    guard = shared_clone.cvar_worker.wait(guard).unwrap();
                                 }
-                            }
-                            JobPayload::Dual {
-                                job1,
-                                job2,
-                                split_thread,
-                            } => {
-                                if thread_id < split_thread {
-                                    let t_id = thread_id;
-                                    let t_count = split_thread;
-                                    let total = job1.total_len;
-                                    let chunk = total.div_ceil(t_count);
-                                    let start = (t_id * chunk).min(total);
-                                    let end = ((t_id + 1) * chunk).min(total);
-                                    if start < end {
-                                        unsafe {
-                                            (job1.run)(job1.ctx, start, end, t_id);
-                                        }
-                                    }
-                                } else {
-                                    let t_id = thread_id - split_thread;
-                                    let t_count = threads - split_thread;
-                                    let total = job2.total_len;
-                                    let chunk = total.div_ceil(t_count);
-                                    let start = (t_id * chunk).min(total);
-                                    let end = ((t_id + 1) * chunk).min(total);
-                                    if start < end {
-                                        unsafe {
-                                            (job2.run)(job2.ctx, start, end, t_id);
-                                        }
-                                    }
-                                }
+                                shared_clone.sleeping_workers.fetch_sub(1, Ordering::SeqCst);
                             }
                         }
 
-                        // Report completion
-                        let mut state = shared_clone.lock.lock().unwrap();
-                        state.finished_workers += 1;
-                        if state.finished_workers == threads {
-                            shared_clone.cvar_master.notify_one();
-                        }
+                        let payload = unsafe { (*shared_clone.payload.get()).unwrap() };
+                        execute_payload(payload, thread_id, threads);
+                        shared_clone.pending_workers.fetch_sub(1, Ordering::Release);
                     }
                 })
                 .expect("failed to spawn tp worker thread");
@@ -162,6 +176,34 @@ impl ThreadPool {
     /// Number of active worker threads in the pool.
     pub fn num_threads(&self) -> usize {
         self.num_threads
+    }
+
+    #[inline]
+    fn run_payload(&self, payload: JobPayload) {
+        let bg = self.num_threads.saturating_sub(1);
+        unsafe {
+            *self.shared.payload.get() = Some(payload);
+        }
+        self.shared.pending_workers.store(bg, Ordering::Relaxed);
+        let next_gen = self
+            .shared
+            .generation
+            .load(Ordering::Relaxed)
+            .wrapping_add(1);
+        self.shared.generation.store(next_gen, Ordering::Release);
+
+        if self.shared.sleeping_workers.load(Ordering::SeqCst) > 0 {
+            let _guard = self.shared.park_lock.lock().unwrap();
+            self.shared.cvar_worker.notify_all();
+        }
+
+        // Calling thread executes partition 0 directly
+        execute_payload(payload, 0, self.num_threads);
+
+        // Wait for background workers to complete their slices
+        while self.shared.pending_workers.load(Ordering::Acquire) != 0 {
+            std::hint::spin_loop();
+        }
     }
 
     /// Dispatches work across all persistent worker threads, blocking until completion.
@@ -189,16 +231,7 @@ impl ThreadPool {
             run: func,
             total_len,
         };
-
-        let mut state = self.shared.lock.lock().unwrap();
-        state.generation = state.generation.wrapping_add(1);
-        state.payload = Some(JobPayload::Single(job));
-        state.finished_workers = 0;
-        self.shared.cvar_worker.notify_all();
-
-        while state.finished_workers < self.num_threads {
-            state = self.shared.cvar_master.wait(state).unwrap();
-        }
+        self.run_payload(JobPayload::Single(job));
     }
 
     /// Dispatches two independent parallel jobs concurrently across worker partitions.
@@ -241,26 +274,20 @@ impl ThreadPool {
             total_len: len2,
         };
 
-        let mut state = self.shared.lock.lock().unwrap();
-        state.generation = state.generation.wrapping_add(1);
-        state.payload = Some(JobPayload::Dual {
+        self.run_payload(JobPayload::Dual {
             job1,
             job2,
             split_thread,
         });
-        state.finished_workers = 0;
-        self.shared.cvar_worker.notify_all();
-
-        while state.finished_workers < self.num_threads {
-            state = self.shared.cvar_master.wait(state).unwrap();
-        }
     }
 }
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::SeqCst);
+        let _guard = self.shared.park_lock.lock().unwrap();
         self.shared.cvar_worker.notify_all();
+        drop(_guard);
         for worker in self.workers.drain(..) {
             worker.join().ok();
         }

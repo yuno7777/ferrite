@@ -44,7 +44,10 @@ use crate::gguf::GgmlType;
 /// already trivial, so paying for the activation quantization buys nothing —
 /// so it keeps the fused f32 kernel, which stays below and stays tested.
 pub fn supports(ty: GgmlType) -> bool {
-    matches!(ty, GgmlType::Q8_0 | GgmlType::Q4_K)
+    matches!(
+        ty,
+        GgmlType::Q8_0 | GgmlType::Q4_0 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K
+    )
 }
 
 /// Dot one quantized weight row against a quantized activation vector.
@@ -68,7 +71,10 @@ pub fn integer(ty: GgmlType, row: &[u8], x: &Quantized) -> Option<f32> {
         if super::avx2::available() {
             match ty {
                 GgmlType::Q8_0 => return Some(unsafe { super::avx2::q8_0(row, x) }),
+                GgmlType::Q4_0 => return Some(unsafe { super::avx2::q4_0(row, x) }),
                 GgmlType::Q4_K => return Some(unsafe { super::avx2::q4_k(row, x) }),
+                GgmlType::Q5_K => return Some(unsafe { super::avx2::q5_k(row, x) }),
+                GgmlType::Q6_K => return Some(unsafe { super::avx2::q6_k(row, x) }),
                 _ => {}
             }
         }
@@ -89,6 +95,8 @@ pub fn integer(ty: GgmlType, row: &[u8], x: &Quantized) -> Option<f32> {
         GgmlType::Q8_0 => q8_0(row, x),
         GgmlType::Q4_0 => q4_0(row, x),
         GgmlType::Q4_K => q4_k(row, x),
+        GgmlType::Q5_K => q5_k(row, x),
+        GgmlType::Q6_K => q6_k(row, x),
         _ => return None,
     })
 }
@@ -187,6 +195,97 @@ pub fn q4_k(row: &[u8], x: &Quantized) -> f32 {
     acc
 }
 
+/// 256 elements in 176 bytes: 4-bit low plane + 1-bit high plane per element.
+pub fn q5_k(row: &[u8], x: &Quantized) -> f32 {
+    let mut acc = 0.0f32;
+    for (super_index, block) in row.chunks_exact(176).enumerate() {
+        let d = half::read_f16(block);
+        let dmin = half::read_f16(&block[2..]);
+        let scales = &block[4..16];
+        let qh = &block[16..48];
+        let qs = &block[48..176];
+        let first_sub = super_index * (256 / BLOCK);
+
+        for group in 0..4 {
+            let bytes = &qs[group * 32..(group + 1) * 32];
+            let (scale_low, min_low) = k::scale_min(group * 2, scales);
+            let (scale_high, min_high) = k::scale_min(group * 2 + 1, scales);
+
+            let (acts_low, s_low, sum_low) = x.block(first_sub + group * 2);
+            let (acts_high, s_high, sum_high) = x.block(first_sub + group * 2 + 1);
+
+            let mask_low = 1u8 << (group * 2);
+            let mask_high = 2u8 << (group * 2);
+
+            let mut dot_low = 0i32;
+            let mut dot_high = 0i32;
+            for l in 0..32 {
+                let fifth_low = if qh[l] & mask_low != 0 { 16 } else { 0 };
+                let fifth_high = if qh[l] & mask_high != 0 { 16 } else { 0 };
+                let w_low = ((bytes[l] & 0x0F) + fifth_low) as i32;
+                let w_high = ((bytes[l] >> 4) + fifth_high) as i32;
+                dot_low += w_low * acts_low[l] as i32;
+                dot_high += w_high * acts_high[l] as i32;
+            }
+
+            acc += s_low
+                * ((d * scale_low as f32) * dot_low as f32
+                    - (dmin * min_low as f32) * sum_low as f32);
+            acc += s_high
+                * ((d * scale_high as f32) * dot_high as f32
+                    - (dmin * min_high as f32) * sum_high as f32);
+        }
+    }
+    acc
+}
+
+/// 256 elements in 210 bytes: 6-bit quants centered at 32 with 8-bit scales per 16 elements.
+pub fn q6_k(row: &[u8], x: &Quantized) -> f32 {
+    let mut acc = 0.0f32;
+    for (super_index, block) in row.chunks_exact(210).enumerate() {
+        let ql = &block[0..128];
+        let qh = &block[128..192];
+        let scales = &block[192..208];
+        let d = half::read_f16(&block[208..]);
+        let first_sub = super_index * (256 / BLOCK);
+
+        for half_block in 0..2 {
+            let ql_half = &ql[half_block * 64..(half_block + 1) * 64];
+            let qh_half = &qh[half_block * 32..(half_block + 1) * 32];
+            let sc_half = &scales[half_block * 8..(half_block + 1) * 8];
+
+            for quad_idx in 0..4 {
+                let sub_idx = first_sub + half_block * 4 + quad_idx;
+                let (acts, s_act, _) = x.block(sub_idx);
+                let ql_offset = (quad_idx & 1) * 32;
+                let ql_shift = if quad_idx >= 2 { 4 } else { 0 };
+                let qh_shift = (quad_idx * 2) as u32;
+
+                let mut dot_lo = 0i32;
+                let mut dot_hi = 0i32;
+                for l in 0..16 {
+                    let low_bits = (ql_half[ql_offset + l] >> ql_shift) & 0x0F;
+                    let high_bits = ((qh_half[l] >> qh_shift) & 3) << 4;
+                    let q = (low_bits | high_bits) as i8 - 32;
+                    dot_lo += q as i32 * acts[l] as i32;
+                }
+                for l in 16..32 {
+                    let low_bits = (ql_half[ql_offset + l] >> ql_shift) & 0x0F;
+                    let high_bits = ((qh_half[l] >> qh_shift) & 3) << 4;
+                    let q = (low_bits | high_bits) as i8 - 32;
+                    dot_hi += q as i32 * acts[l] as i32;
+                }
+
+                let sc_lo = sc_half[quad_idx * 2] as i8 as i32;
+                let sc_hi = sc_half[quad_idx * 2 + 1] as i8 as i32;
+                let weighted = sc_lo * dot_lo + sc_hi * dot_hi;
+                acc += d * s_act * weighted as f32;
+            }
+        }
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +345,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn q5_k_stays_close_to_the_exact_dot() {
+        for blocks in [1, 2, 8] {
+            let error = relative_error(GgmlType::Q5_K, blocks);
+            assert!(error < 5e-3, "{blocks} blocks: relative error {error}");
+        }
+    }
+
+    #[test]
+    fn q6_k_stays_close_to_the_exact_dot() {
+        for blocks in [1, 2, 8] {
+            let error = relative_error(GgmlType::Q6_K, blocks);
+            assert!(error < 5e-3, "{blocks} blocks: relative error {error}");
+        }
+    }
+
     /// When the activation happens to quantize losslessly, the approximation
     /// should vanish entirely.
     ///
@@ -279,15 +394,21 @@ mod tests {
         let mut quantized = Quantized::with_capacity(256);
         quantized.fill(&[0.0; 256]);
         assert_eq!(q4_k(&row(GgmlType::Q4_K, 1), &quantized), 0.0);
+        assert_eq!(q5_k(&row(GgmlType::Q5_K, 1), &quantized), 0.0);
+        assert_eq!(q6_k(&row(GgmlType::Q6_K, 1), &quantized), 0.0);
         assert_eq!(q8_0(&row(GgmlType::Q8_0, 8), &quantized), 0.0);
     }
 
     #[test]
     fn types_without_an_integer_kernel_report_themselves() {
         assert!(supports(GgmlType::Q4_K));
-        assert!(!supports(GgmlType::Q6_K));
+        assert!(supports(GgmlType::Q5_K));
+        assert!(supports(GgmlType::Q6_K));
+        assert!(supports(GgmlType::Q4_0));
+        assert!(supports(GgmlType::Q8_0));
+        assert!(!supports(GgmlType::F16));
         assert!(!supports(GgmlType::F32));
         let quantized = Quantized::with_capacity(256);
-        assert!(integer(GgmlType::Q6_K, &row(GgmlType::Q6_K, 1), &quantized).is_none());
+        assert!(integer(GgmlType::F16, &[0u8; 64], &quantized).is_none());
     }
 }

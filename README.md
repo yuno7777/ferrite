@@ -33,7 +33,7 @@ Reads GGUF. Runs natively. Fully offline.
 
 ```console
 $ cargo tree --prefix none --no-dedupe
-ferrite v0.1.0 (/home/abhishek/Projects/ferrite-audit)
+ferrite v0.2.0 (/home/abhishek/Projects/ferrite)
 ```
 
 Ferrite contains zero third-party crate dependencies. Operating system memory mapping uses platform-native syscalls declared inline, quantization layouts are explicitly defined, tokenizers are reconstructed from the GGUF container vocabulary, and thread management uses standard library threads. If you have the Rust compiler, it builds offline.
@@ -183,69 +183,86 @@ Ferrite provides pure-Rust dequantization and matrix-vector kernels across 17 fo
 
 ---
 
-## Microbenchmark Performance
+## Microbenchmark Performance & `llama.cpp` Verification
 
-Run the GEMV benchmark harness to evaluate kernel throughput on synthetic tensors:
+Run the built-in benchmark suite (`ferrite bench`) or the GEMV microbenchmark (`examples/bench.rs`):
 
 ```bash
+target/release/ferrite bench --threads 4
 cargo run --release --example bench
 ```
 
 > [!NOTE]
-> **Measurement Scope**: This benchmark isolates single-threaded matrix-vector multiplication (GEMV) across standard transformer weight shapes. It measures compute and memory bandwidth throughput for specific kernels. It is not an end-to-end full-model tokens-per-second benchmark.
+> **Measurement Scope**: `examples/bench.rs` isolates single-threaded matrix-vector multiplication (GEMV) across standard transformer weight shapes, while `ferrite bench` measures both single-thread and multi-thread AVX2 integer dot products (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`) plus batched prefill (`pp64`) and token decode (`tg32`).
 
-### Genuine Host Hardware Measurements
+### Genuine Host Hardware Measurements (`examples/bench.rs`)
 
 - **Processor**: AMD Ryzen 5 2500U with Radeon Vega Mobile Gfx (4 physical cores, 8 threads)
-- **SIMD Capabilities**: AVX2, FMA, BMI1, BMI2 (AVX-512 absent)
+- **SIMD Capabilities**: AVX2, FMA, F16C, BMI1, BMI2 (AVX-512 absent)
 - **Operating System**: Linux 7.3.1-cachyos x86_64
 - **Rust Toolchain**: rustc 1.99.1
 
 ```text
 shape                         type  reference      fused       int8     best     GB/s
-1B  attn_q   2048x2048        Q4_K     2.01ms     1.93ms   0.50ms    4.03x      4.4
-1B  attn_q   2048x2048        Q5_K     4.65ms     1.87ms        -    2.48x      1.4
-1B  attn_q   2048x2048        Q6_K     5.83ms     2.23ms        -    2.62x      1.4
-1B  attn_q   2048x2048        Q8_0     1.96ms     1.08ms   0.52ms    3.77x      8.0
-1B  attn_q   2048x2048        Q4_0     1.90ms     1.14ms        -    1.67x      1.9
+1B  attn_q   2048x2048        Q4_K     2.41ms     2.96ms   0.54ms    4.45x      4.1
+1B  attn_q   2048x2048        Q5_K     2.96ms     2.34ms   0.73ms    4.05x      3.7
+1B  attn_q   2048x2048        Q6_K     7.97ms     2.53ms   0.77ms   10.35x      4.2
+1B  attn_q   2048x2048        Q8_0     1.91ms     1.21ms   0.60ms    3.20x      7.0
+1B  attn_q   2048x2048        Q4_0     2.10ms     1.27ms   0.62ms    3.41x      3.6
 
-1B  ffn_up   2048x8192        Q4_K     7.55ms     7.59ms   2.03ms    3.72x      4.3
-1B  ffn_up   2048x8192        Q5_K    18.69ms     7.48ms        -    2.50x      1.4
-1B  ffn_up   2048x8192        Q6_K    23.38ms     8.96ms        -    2.61x      1.4
-1B  ffn_up   2048x8192        Q8_0     6.75ms     4.33ms   2.16ms    3.13x      7.7
-1B  ffn_up   2048x8192        Q4_0     7.57ms     4.55ms        -    1.66x      1.9
+1B  ffn_up   2048x8192        Q4_K     8.35ms     8.29ms   2.28ms    3.67x      3.9
+1B  ffn_up   2048x8192        Q5_K    10.59ms     8.61ms   3.05ms    3.48x      3.5
+1B  ffn_up   2048x8192        Q6_K    25.59ms    10.19ms   3.03ms    8.46x      4.2
+1B  ffn_up   2048x8192        Q8_0     7.73ms     4.88ms   2.58ms    2.99x      6.4
+1B  ffn_up   2048x8192        Q4_0     8.52ms     5.13ms   2.48ms    3.44x      3.5
 
-8B  attn_q   4096x4096        Q4_K     7.57ms     7.59ms   2.02ms    3.75x      4.4
-8B  attn_q   4096x4096        Q5_K    19.73ms     9.79ms        -    2.02x      1.1
-8B  attn_q   4096x4096        Q6_K    33.39ms     9.87ms        -    3.38x      1.3
-8B  attn_q   4096x4096        Q8_0    14.69ms     9.47ms   2.98ms    4.93x      5.6
-8B  attn_q   4096x4096        Q4_0     7.54ms     4.51ms        -    1.67x      1.9
+8B  attn_q   4096x4096        Q4_K     8.51ms    12.58ms   3.26ms    2.61x      2.7
+8B  attn_q   4096x4096        Q5_K    11.57ms     8.69ms   3.04ms    3.80x      3.5
+8B  attn_q   4096x4096        Q6_K    25.91ms    10.29ms   3.06ms    8.47x      4.2
+8B  attn_q   4096x4096        Q8_0     7.82ms     4.93ms   2.53ms    3.09x      6.6
+8B  attn_q   4096x4096        Q4_0     8.57ms     5.18ms   2.46ms    3.48x      3.6
 
-8B  ffn_down 14336x4096       Q4_K    28.18ms    26.46ms   6.74ms    4.18x      4.6
-8B  ffn_down 14336x4096       Q5_K    66.16ms    26.03ms        -    2.54x      1.4
-8B  ffn_down 14336x4096       Q6_K    81.97ms    33.41ms        -    2.45x      1.3
-8B  ffn_down 14336x4096       Q8_0    23.60ms    15.23ms   7.98ms    2.96x      7.3
-8B  ffn_down 14336x4096       Q4_0    28.47ms    17.01ms        -    1.67x      1.8
+8B  ffn_down 14336x4096       Q4_K    31.04ms    30.07ms   7.87ms    3.94x      3.9
+8B  ffn_down 14336x4096       Q5_K    38.08ms    30.52ms  10.40ms    3.66x      3.6
+8B  ffn_down 14336x4096       Q6_K    91.45ms    36.24ms  10.66ms    8.58x      4.2
+8B  ffn_down 14336x4096       Q8_0    27.85ms    17.34ms   8.88ms    3.14x      6.5
+8B  ffn_down 14336x4096       Q4_0    31.44ms    18.14ms   8.56ms    3.67x      3.6
 ```
+
+### Head-to-Head Verification Against `llama.cpp` (GGML C++ AVX2 + OpenMP)
+
+Evaluated on identical `4096x4096` quantized weight tensors and activations (`threads = 4`, `g++ -O3 -mavx2 -mfma -mf16c -fopenmp`):
+
+| Quant | Cosine Similarity | Ferrite Rel L2 Err | GGML C++ Rel L2 Err | Ferrite 1T | GGML C++ 1T | Ferrite 4T | GGML C++ 4T |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Q4_K** | `0.99997366` | `0.006924` | `0.004188` | **1.980 ms** | 1.839 ms | **1.259 ms** | 1.059 ms |
+| **Q5_K** | `0.99996585` | `0.008181` | `0.006054` | 3.241 ms | 2.515 ms | 1.704 ms | 1.113 ms |
+| **Q6_K** | `0.99997904` | `0.007200` | `0.006830` | 3.226 ms | 3.050 ms | **1.720 ms** | 1.631 ms |
+| **Q8_0** | `1.00000000` | `0.012148` | `0.012148` | 1.945 ms | 1.753 ms | 1.519 ms | 0.800 ms |
+| **Q4_0** | `1.00000000` | `0.007835` | `0.007835` | **2.085 ms** | 2.183 ms | 1.630 ms | 1.169 ms |
 
 For complete analysis and methodology, see [docs/benchmarking.md](docs/benchmarking.md).
 
 ---
 
-## LM Studio Integration
+## Universal Local Model Discovery
 
-Ferrite automatically detects and accesses models downloaded via LM Studio without moving or duplicating files:
+Ferrite automatically detects and accesses `.gguf` models downloaded across local AI tools without moving or duplicating files:
 
-| Storage Location | Operating System / Application Default |
+| Storage Location | Ecosystem / Application |
 | :--- | :--- |
-| `~/.lmstudio/models` | Standard model directory for LM Studio 0.3+ |
-| `~/.cache/lm-studio/models` | Legacy directory for LM Studio 0.2 and earlier |
+| `~/.lmstudio/models`, `~/.cache/lm-studio/models` | LM Studio (0.2 and 0.3+) |
+| `~/.cache/huggingface/hub`, `$HF_HOME/hub` | Hugging Face Hub cache (`models--<org>--<repo>/snapshots/...`) |
+| `~/jan/models`, `~/.config/Jan/data/models` | Jan.ai local model store |
+| `~/.local/share/nomic.ai/GPT4All` | GPT4All local model store |
+| `~/.local/share/ferrite/models`, `~/models` | Native Ferrite & user model directories |
 | `$FERRITE_MODELS_DIR` | Custom environment variable override |
 
-You can specify a model by its file path or any unique substring from `ferrite list`:
+You can specify a model by its file path or any unique substring from `ferrite list`, or run `ferrite doctor` to check hardware readiness:
 
 ```bash
-ferrite run llama-3.2 "Hello world"
+ferrite doctor
+ferrite chat llama-3.2
 ```
 
 ---

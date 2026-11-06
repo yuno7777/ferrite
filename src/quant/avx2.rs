@@ -138,6 +138,168 @@ pub unsafe fn q4_k(row: &[u8], x: &Quantized) -> f32 {
     acc
 }
 
+/// # Safety
+/// Caller must have checked [`available`].
+#[target_feature(enable = "avx2")]
+pub unsafe fn q4_0(row: &[u8], x: &Quantized) -> f32 {
+    let low_mask = _mm_set1_epi8(0x0F);
+    let ones = _mm256_set1_epi16(1);
+    let mut acc = 0.0f32;
+
+    for (index, block) in row.chunks_exact(18).enumerate() {
+        let d = half::read_f16(block);
+        let quants = _mm_loadu_si128(block[2..18].as_ptr() as *const __m128i);
+        let low = _mm_and_si128(quants, low_mask);
+        let high = _mm_and_si128(_mm_srli_epi16(quants, 4), low_mask);
+        let nibbles = _mm256_set_m128i(high, low);
+
+        let (acts, scale, sum) = x.block(index);
+        let a = _mm256_loadu_si256(acts.as_ptr() as *const __m256i);
+        let pairs = _mm256_maddubs_epi16(nibbles, a);
+        let dot = hsum(_mm256_madd_epi16(pairs, ones));
+
+        acc += d * scale * (dot - 8 * sum) as f32;
+    }
+    acc
+}
+
+/// # Safety
+/// Caller must have checked [`available`].
+#[target_feature(enable = "avx2")]
+pub unsafe fn q5_k(row: &[u8], x: &Quantized) -> f32 {
+    let low_mask = _mm256_set1_epi8(0x0F);
+    let bit16 = _mm256_set1_epi8(16);
+    let zeros = _mm256_setzero_si256();
+    let mut acc = 0.0f32;
+
+    for (super_index, block) in row.chunks_exact(176).enumerate() {
+        let d = half::read_f16(block);
+        let dmin = half::read_f16(&block[2..]);
+        let scales = &block[4..16];
+        let qh = _mm256_loadu_si256(block[16..48].as_ptr() as *const __m256i);
+        let qs = &block[48..176];
+        let first_sub = super_index * 8;
+
+        for group in 0..4 {
+            let bytes = _mm256_loadu_si256(qs[group * 32..].as_ptr() as *const __m256i);
+            let low4 = _mm256_and_si256(bytes, low_mask);
+            let high4 = _mm256_and_si256(_mm256_srli_epi16(bytes, 4), low_mask);
+
+            let mask_low = _mm256_set1_epi8(1i8 << (group * 2));
+            let mask_high = _mm256_set1_epi8(2i8 << (group * 2));
+
+            let has_low = _mm256_cmpeq_epi8(_mm256_and_si256(qh, mask_low), zeros);
+            let fifth_low = _mm256_andnot_si256(has_low, bit16);
+            let has_high = _mm256_cmpeq_epi8(_mm256_and_si256(qh, mask_high), zeros);
+            let fifth_high = _mm256_andnot_si256(has_high, bit16);
+
+            let low = _mm256_or_si256(low4, fifth_low);
+            let high = _mm256_or_si256(high4, fifth_high);
+
+            let (scale_low, min_low) = k::scale_min(group * 2, scales);
+            let (scale_high, min_high) = k::scale_min(group * 2 + 1, scales);
+            let (acts_low, s_low, sum_low) = x.block(first_sub + group * 2);
+            let (acts_high, s_high, sum_high) = x.block(first_sub + group * 2 + 1);
+
+            let dot_low = dot_nibbles(low, acts_low.as_ptr());
+            let dot_high = dot_nibbles(high, acts_high.as_ptr());
+
+            acc += s_low
+                * ((d * scale_low as f32) * dot_low as f32
+                    - (dmin * min_low as f32) * sum_low as f32);
+            acc += s_high
+                * ((d * scale_high as f32) * dot_high as f32
+                    - (dmin * min_high as f32) * sum_high as f32);
+        }
+    }
+    acc
+}
+
+/// Horizontal sum of four i32 lanes in a 128-bit register.
+#[target_feature(enable = "avx2")]
+unsafe fn hsum128(v: __m128i) -> i32 {
+    let pairs = _mm_add_epi32(v, _mm_shuffle_epi32(v, 0b01_00_11_10));
+    let single = _mm_add_epi32(pairs, _mm_shuffle_epi32(pairs, 0b00_01_00_01));
+    _mm_cvtsi128_si32(single)
+}
+
+/// # Safety
+/// Caller must have checked [`available`].
+#[target_feature(enable = "avx2")]
+pub unsafe fn q6_k(row: &[u8], x: &Quantized) -> f32 {
+    let low_mask = _mm256_set1_epi8(0x0F);
+    let high_mask = _mm256_set1_epi8(0x30);
+    let offset32 = _mm256_set1_epi8(32);
+    let ones128 = _mm_set1_epi16(1);
+    let mut acc = 0.0f32;
+
+    for (super_index, block) in row.chunks_exact(210).enumerate() {
+        let ql = &block[0..128];
+        let qh = &block[128..192];
+        let scales = &block[192..208];
+        let d = half::read_f16(&block[208..]);
+        let first_sub = super_index * 8;
+
+        for half_block in 0..2 {
+            let ql_half = &ql[half_block * 64..(half_block + 1) * 64];
+            let qh_vec = _mm256_loadu_si256(qh[half_block * 32..].as_ptr() as *const __m256i);
+            let ql_0 = _mm256_loadu_si256(ql_half[0..32].as_ptr() as *const __m256i);
+            let ql_1 = _mm256_loadu_si256(ql_half[32..64].as_ptr() as *const __m256i);
+            let sc = &scales[half_block * 8..(half_block + 1) * 8];
+
+            let q0 = _mm256_sub_epi8(
+                _mm256_or_si256(
+                    _mm256_and_si256(ql_0, low_mask),
+                    _mm256_and_si256(_mm256_slli_epi16(qh_vec, 4), high_mask),
+                ),
+                offset32,
+            );
+            let q1 = _mm256_sub_epi8(
+                _mm256_or_si256(
+                    _mm256_and_si256(ql_1, low_mask),
+                    _mm256_and_si256(_mm256_slli_epi16(qh_vec, 2), high_mask),
+                ),
+                offset32,
+            );
+            let q2 = _mm256_sub_epi8(
+                _mm256_or_si256(
+                    _mm256_and_si256(_mm256_srli_epi16(ql_0, 4), low_mask),
+                    _mm256_and_si256(qh_vec, high_mask),
+                ),
+                offset32,
+            );
+            let q3 = _mm256_sub_epi8(
+                _mm256_or_si256(
+                    _mm256_and_si256(_mm256_srli_epi16(ql_1, 4), low_mask),
+                    _mm256_and_si256(_mm256_srli_epi16(qh_vec, 2), high_mask),
+                ),
+                offset32,
+            );
+
+            let quads = [q0, q1, q2, q3];
+            for (quad_idx, &w) in quads.iter().enumerate() {
+                let sub_idx = first_sub + half_block * 4 + quad_idx;
+                let (acts, s_act, _) = x.block(sub_idx);
+                let a = _mm256_loadu_si256(acts.as_ptr() as *const __m256i);
+                let mag = _mm256_sign_epi8(w, w);
+                let signed = _mm256_sign_epi8(a, w);
+                let pairs = _mm256_maddubs_epi16(mag, signed);
+
+                let lo16 = _mm256_castsi256_si128(pairs);
+                let hi16 = _mm256_extracti128_si256(pairs, 1);
+                let dot_lo = hsum128(_mm_madd_epi16(lo16, ones128));
+                let dot_hi = hsum128(_mm_madd_epi16(hi16, ones128));
+
+                let sc_lo = sc[quad_idx * 2] as i8 as i32;
+                let sc_hi = sc[quad_idx * 2 + 1] as i8 as i32;
+                let weighted = sc_lo * dot_lo + sc_hi * dot_hi;
+                acc += d * s_act * weighted as f32;
+            }
+        }
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,13 +323,20 @@ mod tests {
 
         let scalar = match ty {
             GgmlType::Q8_0 => idot::q8_0(&weights, &quantized),
+            GgmlType::Q4_0 => idot::q4_0(&weights, &quantized),
             GgmlType::Q4_K => idot::q4_k(&weights, &quantized),
+            GgmlType::Q5_K => idot::q5_k(&weights, &quantized),
+            GgmlType::Q6_K => idot::q6_k(&weights, &quantized),
             other => panic!("no scalar kernel for {}", other.name()),
         };
         let vector = unsafe {
             match ty {
                 GgmlType::Q8_0 => q8_0(&weights, &quantized),
-                _ => q4_k(&weights, &quantized),
+                GgmlType::Q4_0 => q4_0(&weights, &quantized),
+                GgmlType::Q4_K => q4_k(&weights, &quantized),
+                GgmlType::Q5_K => q5_k(&weights, &quantized),
+                GgmlType::Q6_K => q6_k(&weights, &quantized),
+                other => panic!("no vector kernel for {}", other.name()),
             }
         };
 
@@ -186,9 +355,27 @@ mod tests {
     }
 
     #[test]
+    fn q4_0_matches_the_scalar_kernel_exactly() {
+        assert_matches_scalar(GgmlType::Q4_0, 1);
+        assert_matches_scalar(GgmlType::Q4_0, 9);
+    }
+
+    #[test]
     fn q4_k_matches_the_scalar_kernel_exactly() {
         assert_matches_scalar(GgmlType::Q4_K, 1);
         assert_matches_scalar(GgmlType::Q4_K, 5);
+    }
+
+    #[test]
+    fn q5_k_matches_the_scalar_kernel_exactly() {
+        assert_matches_scalar(GgmlType::Q5_K, 1);
+        assert_matches_scalar(GgmlType::Q5_K, 5);
+    }
+
+    #[test]
+    fn q6_k_matches_the_scalar_kernel_exactly() {
+        assert_matches_scalar(GgmlType::Q6_K, 1);
+        assert_matches_scalar(GgmlType::Q6_K, 5);
     }
 
     #[test]

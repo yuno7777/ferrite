@@ -1,8 +1,17 @@
 # Changelog
 
-All notable changes to Ferrite are documented in this file. This project has not cut an official release version yet, so all entries below are unreleased.
+All notable changes to Ferrite are documented in this file.
 
-## Unreleased
+## [0.2.0] - 2026-11-07
+
+### Added
+
+- **AVX2 & Scalar Integer Kernels for Q5_K, Q6_K, and Q4_0**: Expanded vectorized integer dot product (`iDot`) kernels across all primary K-quants and legacy formats (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`), delivering up to 10.35x speedup on `Q6_K` and 4.45x on `Q4_K` with bit-identical agreement between scalar and AVX2 paths (`src/quant/avx2.rs`, `src/quant/idot.rs`).
+- **Lock-Free Persistent ThreadPool & Batched INT8 Prefill**: Replaced per-operation `std::thread::scope` OS thread spawning in `Weight::matvec_threaded` and `Weight::matmul_threaded` with a persistent, lock-free spin-then-park `ThreadPool` (`src/tp.rs`, `src/model.rs`) where the calling thread participates as worker 0, alongside batched INT8 activation pre-quantization during prompt prefill.
+- **Universal Local Model Discovery**: Expanded `src/lmstudio.rs` to automatically discover GGUF models across LM Studio (`~/.lmstudio/models`, `~/.cache/lm-studio/models`), Hugging Face Hub (`~/.cache/huggingface/hub`, `$HF_HOME/hub`), Jan.ai (`~/jan/models`, `~/.config/Jan/data/models`), GPT4All (`~/.local/share/nomic.ai/GPT4All`), and local model directories (`~/.local/share/ferrite/models`, `~/models`).
+- **Full-Featured Local CLI Suite (`doctor`, `bench`, `chat`, `split`, `prune`, `edit`, `watermark`)**: Added hardware readiness and SIMD diagnostics (`ferrite doctor`), multi-threaded kernel and end-to-end inference benchmarking with `llama.cpp` C++ verification bundle export (`ferrite bench`), interactive multi-turn terminal chat (`ferrite chat`), and CLI subcommands for GGUF sharding (`ferrite split`), magnitude pruning (`ferrite prune`), zero-copy tensor editing (`ferrite edit`), and cryptographic token watermarking (`ferrite watermark`), plus `--json`, `--json-schema`, and `--regex` grammar constraints on `ferrite run` (`src/main.rs`).
+
+## [0.1.0] - 2026-11-06
 
 ### Added
 

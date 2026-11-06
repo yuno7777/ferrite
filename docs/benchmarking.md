@@ -49,51 +49,58 @@ The following measurements were collected by running `cargo run --release --exam
 - **Rust Toolchain**: rustc 1.99.1, cargo 1.99.1
 - **Build Profile**: Release (`opt-level = 3`, LTO enabled)
 
-### Measured Kernel Timings
+### Measured Kernel Timings (`examples/bench.rs`)
 
 | Shape | Layer | Dimension | Type | Reference | Fused | Integer (int8) | Best Speedup | Bandwidth |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1B** | `attn_q` | 2048x2048 | Q4_K | 2.01 ms | 1.93 ms | **0.50 ms** | 4.03x | 4.4 GB/s |
-| **1B** | `attn_q` | 2048x2048 | Q5_K | 4.65 ms | **1.87 ms** | – | 2.48x | 1.4 GB/s |
-| **1B** | `attn_q` | 2048x2048 | Q6_K | 5.83 ms | **2.23 ms** | – | 2.62x | 1.4 GB/s |
-| **1B** | `attn_q` | 2048x2048 | Q8_0 | 1.96 ms | 1.08 ms | **0.52 ms** | 3.77x | 8.0 GB/s |
-| **1B** | `attn_q` | 2048x2048 | Q4_0 | 1.90 ms | **1.14 ms** | – | 1.67x | 1.9 GB/s |
-| **1B** | `ffn_up` | 2048x8192 | Q4_K | 7.55 ms | 7.59 ms | **2.03 ms** | 3.72x | 4.3 GB/s |
-| **1B** | `ffn_up` | 2048x8192 | Q5_K | 18.69 ms | **7.48 ms** | – | 2.50x | 1.4 GB/s |
-| **1B** | `ffn_up` | 2048x8192 | Q6_K | 23.38 ms | **8.96 ms** | – | 2.61x | 1.4 GB/s |
-| **1B** | `ffn_up` | 2048x8192 | Q8_0 | 6.75 ms | 4.33 ms | **2.16 ms** | 3.13x | 7.7 GB/s |
-| **1B** | `ffn_up` | 2048x8192 | Q4_0 | 7.57 ms | **4.55 ms** | – | 1.66x | 1.9 GB/s |
-| **8B** | `attn_q` | 4096x4096 | Q4_K | 7.57 ms | 7.59 ms | **2.02 ms** | 3.75x | 4.4 GB/s |
-| **8B** | `attn_q` | 4096x4096 | Q5_K | 19.73 ms | **9.79 ms** | – | 2.02x | 1.1 GB/s |
-| **8B** | `attn_q` | 4096x4096 | Q6_K | 33.39 ms | **9.87 ms** | – | 3.38x | 1.3 GB/s |
-| **8B** | `attn_q` | 4096x4096 | Q8_0 | 14.69 ms | 9.47 ms | **2.98 ms** | 4.93x | 5.6 GB/s |
-| **8B** | `attn_q` | 4096x4096 | Q4_0 | 7.54 ms | **4.51 ms** | – | 1.67x | 1.9 GB/s |
-| **8B** | `ffn_down` | 14336x4096 | Q4_K | 28.18 ms | 26.46 ms | **6.74 ms** | 4.18x | 4.6 GB/s |
-| **8B** | `ffn_down` | 14336x4096 | Q5_K | 66.16 ms | **26.03 ms** | – | 2.54x | 1.4 GB/s |
-| **8B** | `ffn_down` | 14336x4096 | Q6_K | 81.97 ms | **33.41 ms** | – | 2.45x | 1.3 GB/s |
-| **8B** | `ffn_down` | 14336x4096 | Q8_0 | 23.60 ms | 15.23 ms | **7.98 ms** | 2.96x | 7.3 GB/s |
-| **8B** | `ffn_down` | 14336x4096 | Q4_0 | 28.47 ms | **17.01 ms** | – | 1.67x | 1.8 GB/s |
+| **1B** | `attn_q` | 2048x2048 | Q4_K | 2.41 ms | 2.96 ms | **0.54 ms** | 4.45x | 4.1 GB/s |
+| **1B** | `attn_q` | 2048x2048 | Q5_K | 2.96 ms | 2.34 ms | **0.73 ms** | 4.05x | 3.7 GB/s |
+| **1B** | `attn_q` | 2048x2048 | Q6_K | 7.97 ms | 2.53 ms | **0.77 ms** | 10.35x | 4.2 GB/s |
+| **1B** | `attn_q` | 2048x2048 | Q8_0 | 1.91 ms | 1.21 ms | **0.60 ms** | 3.20x | 7.0 GB/s |
+| **1B** | `attn_q` | 2048x2048 | Q4_0 | 2.10 ms | 1.27 ms | **0.62 ms** | 3.41x | 3.6 GB/s |
+| **1B** | `ffn_up` | 2048x8192 | Q4_K | 8.35 ms | 8.29 ms | **2.28 ms** | 3.67x | 3.9 GB/s |
+| **1B** | `ffn_up` | 2048x8192 | Q5_K | 10.59 ms | 8.61 ms | **3.05 ms** | 3.48x | 3.5 GB/s |
+| **1B** | `ffn_up` | 2048x8192 | Q6_K | 25.59 ms | 10.19 ms | **3.03 ms** | 8.46x | 4.2 GB/s |
+| **1B** | `ffn_up` | 2048x8192 | Q8_0 | 7.73 ms | 4.88 ms | **2.58 ms** | 2.99x | 6.4 GB/s |
+| **1B** | `ffn_up` | 2048x8192 | Q4_0 | 8.52 ms | 5.13 ms | **2.48 ms** | 3.44x | 3.5 GB/s |
+| **8B** | `attn_q` | 4096x4096 | Q4_K | 8.51 ms | 12.58 ms | **3.26 ms** | 2.61x | 2.7 GB/s |
+| **8B** | `attn_q` | 4096x4096 | Q5_K | 11.57 ms | 8.69 ms | **3.04 ms** | 3.80x | 3.5 GB/s |
+| **8B** | `attn_q` | 4096x4096 | Q6_K | 25.91 ms | 10.29 ms | **3.06 ms** | 8.47x | 4.2 GB/s |
+| **8B** | `attn_q` | 4096x4096 | Q8_0 | 7.82 ms | 4.93 ms | **2.53 ms** | 3.09x | 6.6 GB/s |
+| **8B** | `attn_q` | 4096x4096 | Q4_0 | 8.57 ms | 5.18 ms | **2.46 ms** | 3.48x | 3.6 GB/s |
+| **8B** | `ffn_down` | 14336x4096 | Q4_K | 31.04 ms | 30.07 ms | **7.87 ms** | 3.94x | 3.9 GB/s |
+| **8B** | `ffn_down` | 14336x4096 | Q5_K | 38.08 ms | 30.52 ms | **10.40 ms** | 3.66x | 3.6 GB/s |
+| **8B** | `ffn_down` | 14336x4096 | Q6_K | 91.45 ms | 36.24 ms | **10.66 ms** | 8.58x | 4.2 GB/s |
+| **8B** | `ffn_down` | 14336x4096 | Q8_0 | 27.85 ms | 17.34 ms | **8.88 ms** | 3.14x | 6.5 GB/s |
+| **8B** | `ffn_down` | 14336x4096 | Q4_0 | 31.44 ms | 18.14 ms | **8.56 ms** | 3.67x | 3.6 GB/s |
 
-## 4. Key Performance Observations
+## 4. Head-to-Head Verification Against `llama.cpp` (GGML C++)
 
-1. **Integer Dot Product Wins on Q4_K and Q8_0**:
-   - `Q4_K` drops from 2.01 ms (reference) to 0.50 ms (integer AVX2 path), achieving a 4.03x speedup.
-   - `Q8_0` drops from 1.96 ms to 0.52 ms, achieving a 3.77x speedup and reaching 8.0 GB/s single-core effective weight bandwidth.
-2. **Fused Kernels Win on Complex Formats**:
-   - For `Q6_K` and `Q5_K`, unpacking multi-byte super-blocks in registers eliminates temporary heap allocations and yields 2.4x to 3.3x improvements.
-3. **Where Fusion Does Not Win**:
-   - Unfused `Q4_K` reference is nearly identical in latency to fused `Q4_K` (2.01 ms vs 1.93 ms). The simple nibble structure allows the compiler to vectorize the reference loop, leaving integer activation quantization as the only effective acceleration path.
+In v0.2.0, `ferrite bench` includes `--export-verify <file>`, which exports the exact `4096x4096` quantized weight tensors, activation vector, exact dequantized FP32 reference outputs, and Ferrite's AVX2 `iDot` outputs and timings for direct verification against `llama.cpp`'s C++ `ggml_vec_dot_*` AVX2 + OpenMP kernels (`g++ -O3 -mavx2 -mfma -mf16c -fopenmp`):
 
-## 5. How to Reproduce
+| Quant | Cosine Similarity | Ferrite Rel L2 Err | GGML C++ Rel L2 Err | Ferrite 1T | GGML C++ 1T | Ferrite 4T | GGML C++ 4T |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Q4_K** | `0.99997366` | `0.006924` | `0.004188` | **1.980 ms** | 1.839 ms | **1.259 ms** | 1.059 ms |
+| **Q5_K** | `0.99996585` | `0.008181` | `0.006054` | 3.241 ms | 2.515 ms | 1.704 ms | 1.113 ms |
+| **Q6_K** | `0.99997904` | `0.007200` | `0.006830` | 3.226 ms | 3.050 ms | **1.720 ms** | 1.631 ms |
+| **Q8_0** | `1.00000000` | `0.012148` | `0.012148` | 1.945 ms | 1.753 ms | 1.519 ms | 0.800 ms |
+| **Q4_0** | `1.00000000` | `0.007835` | `0.007835` | **2.085 ms** | 2.183 ms | 1.630 ms | 1.169 ms |
 
-Run the benchmark with optimizations enabled:
+## 5. Key Performance Observations
+
+1. **Full AVX2 Integer Dot Product Coverage (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`)**:
+   - `Q6_K` drops from 7.97 ms (reference) to 0.77 ms (AVX2 integer path), achieving a **10.35x** speedup.
+   - `Q4_K` drops from 2.41 ms to 0.54 ms (4.45x speedup), and `Q5_K` drops from 2.96 ms to 0.73 ms (4.05x speedup).
+   - `Q8_0` and `Q4_0` match `llama.cpp` C++ with `1.00000000` cosine similarity, and Ferrite's `Q4_0` single-thread kernel (`2.085 ms`) outperforms `llama.cpp` C++ (`2.183 ms`).
+2. **Lock-Free Persistent ThreadPool**:
+   - Calling thread participates as worker 0 while background workers synchronize via a lock-free atomic spin-then-park barrier, reaching 10.93 GiB/s multi-threaded bandwidth on `Q8_0` and 7.45 GiB/s on `Q6_K`.
+
+## 6. How to Reproduce
+
+Run the CLI benchmark suite or example microbenchmark:
 
 ```bash
+target/release/ferrite bench --threads 4
 cargo run --release --example bench
 ```
 
-To run with explicit CPU architecture flags:
-
-```bash
-RUSTFLAGS="-C target-cpu=native" cargo run --release --example bench
-```
