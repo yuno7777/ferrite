@@ -86,6 +86,25 @@ impl MlaKvCache {
         }
     }
 
+    /// Copy key and value representations from `src_pos` to `dst_pos` across all layers.
+    pub fn copy_token_slot(&mut self, src_pos: usize, dst_pos: usize) {
+        if src_pos == dst_pos || src_pos >= self.context || dst_pos >= self.context {
+            return;
+        }
+        for layer in 0..self.layers {
+            let src_slot = layer * self.context + src_pos;
+            let dst_slot = layer * self.context + dst_pos;
+            let src_latent = src_slot * self.latent_dim;
+            let dst_latent = dst_slot * self.latent_dim;
+            self.latent
+                .copy_within(src_latent..src_latent + self.latent_dim, dst_latent);
+            let src_rope = src_slot * self.rope_dim;
+            let dst_rope = dst_slot * self.rope_dim;
+            self.rope_key
+                .copy_within(src_rope..src_rope + self.rope_dim, dst_rope);
+        }
+    }
+
     /// Evaluates direct latent attention over cached latent representations.
     pub fn attention(
         &self,
@@ -535,6 +554,74 @@ impl KvCache {
                         key[slot..slot + *blocks_per_token].fill(BlockQ4_0::default());
                         value[slot..slot + *blocks_per_token].fill(BlockQ4_0::default());
                     }
+                }
+            }
+        }
+    }
+
+    /// Copy key and value representations from `src_pos` to `dst_pos` across all layers.
+    ///
+    /// Used for speculative branch cloning and KV cache recycling without recomputation.
+    pub fn copy_token_slot(&mut self, src_pos: usize, dst_pos: usize) {
+        if src_pos == dst_pos {
+            return;
+        }
+        match self {
+            Self::F32 {
+                key,
+                value,
+                layers,
+                context,
+                kv_dim,
+            } => {
+                if src_pos >= *context || dst_pos >= *context {
+                    return;
+                }
+                let v_dim = value.len() / (*layers * *context);
+                for layer in 0..*layers {
+                    let src_k = (layer * *context + src_pos) * *kv_dim;
+                    let dst_k = (layer * *context + dst_pos) * *kv_dim;
+                    key.copy_within(src_k..src_k + *kv_dim, dst_k);
+
+                    let src_v = (layer * *context + src_pos) * v_dim;
+                    let dst_v = (layer * *context + dst_pos) * v_dim;
+                    value.copy_within(src_v..src_v + v_dim, dst_v);
+                }
+            }
+            Self::Q8_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                if src_pos >= *context || dst_pos >= *context {
+                    return;
+                }
+                for layer in 0..*layers {
+                    let src = (layer * *context + src_pos) * *blocks_per_token;
+                    let dst = (layer * *context + dst_pos) * *blocks_per_token;
+                    key.copy_within(src..src + *blocks_per_token, dst);
+                    value.copy_within(src..src + *blocks_per_token, dst);
+                }
+            }
+            Self::Q4_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                if src_pos >= *context || dst_pos >= *context {
+                    return;
+                }
+                for layer in 0..*layers {
+                    let src = (layer * *context + src_pos) * *blocks_per_token;
+                    let dst = (layer * *context + dst_pos) * *blocks_per_token;
+                    key.copy_within(src..src + *blocks_per_token, dst);
+                    value.copy_within(src..src + *blocks_per_token, dst);
                 }
             }
         }

@@ -2942,6 +2942,11 @@ impl State {
         self.kv_cache.truncate(keep_pos, end_pos);
     }
 
+    /// Copy key and value representations from `src_pos` to `dst_pos` across all layers.
+    pub fn copy_cache_slot(&mut self, src_pos: usize, dst_pos: usize) {
+        self.kv_cache.copy_token_slot(src_pos, dst_pos);
+    }
+
     /// Set `logits` buffer to the given slice.
     pub fn set_logits(&mut self, new_logits: &[f32]) {
         self.logits.copy_from_slice(new_logits);

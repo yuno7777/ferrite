@@ -61,8 +61,8 @@ pub use scheduler::{
 };
 pub use server::{Server, ServerConfig};
 pub use speculative::{
-    MedusaEngine, MedusaHead, MtpEngine, MtpTreeEngine, SpeculativeEngine, SpeculativeStats,
-    SpeculativeTreeEngine,
+    DraftKvRecycler, MedusaEngine, MedusaHead, MtpEngine, MtpTreeEngine, SpeculativeEngine,
+    SpeculativeRecycleEngine, SpeculativeStats, SpeculativeTreeEngine,
 };
 pub use split::{split_gguf, SplitOptions};
 pub use template::{ChatMessage, ChatTemplate};

@@ -885,3 +885,94 @@ fn test_medusa_speculative_decoding_matches_baseline_forward() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn test_draft_kv_cache_recycling_matches_baseline_forward() {
+    let target_path = make_model_fixture("recycle_target", 0.0);
+    let draft_path = make_model_fixture("recycle_draft", 0.0);
+
+    let target_gguf = Gguf::open(&target_path).expect("open target");
+    let target_model = Model::load(&target_gguf).expect("load target");
+
+    let draft_gguf = Gguf::open(&draft_path).expect("open draft");
+    let draft_model = Model::load(&draft_gguf).expect("load draft");
+
+    let prompt = vec![0u32, 1, 2];
+    let total_to_generate = 10;
+
+    // 1. Target model baseline decode
+    let mut base_state = State::new(&target_model.config);
+    target_model
+        .prefill(&mut base_state, &prompt, 0)
+        .expect("prefill base");
+    let mut baseline_tokens = Vec::new();
+    let mut sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = sampler.sample(&mut base_state.logits);
+        baseline_tokens.push(tok);
+        target_model
+            .forward(&mut base_state, tok, pos)
+            .expect("forward base");
+        pos += 1;
+    }
+
+    // 2. SpeculativeRecycleEngine decode
+    let mut target_state = State::new(&target_model.config);
+    let mut draft_state = State::new(&draft_model.config);
+    target_model
+        .prefill(&mut target_state, &prompt, 0)
+        .expect("prefill target");
+    draft_model
+        .prefill(&mut draft_state, &prompt, 0)
+        .expect("prefill draft");
+
+    let mut recycle_engine = ferrite::SpeculativeRecycleEngine::new(&target_model, &draft_model, 2);
+    let mut recycle_tokens = Vec::new();
+    let mut recycle_pos = prompt.len();
+
+    while recycle_tokens.len() < total_to_generate {
+        let emitted = recycle_engine
+            .step(
+                &mut target_state,
+                &mut draft_state,
+                recycle_pos,
+                &mut sampler,
+            )
+            .expect("recycle step");
+        recycle_pos += emitted.len();
+        recycle_tokens.extend(emitted);
+    }
+    recycle_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        recycle_tokens, baseline_tokens,
+        "SpeculativeRecycleEngine tokens must be identical to baseline target"
+    );
+    assert!(recycle_engine.recycler.recycled_bytes > 0);
+
+    // Test DraftKvRecycler primitives
+    let mut recycler = ferrite::DraftKvRecycler::new();
+    recycler.record_token(0, 10, 64);
+    recycler.record_token(1, 20, 64);
+    recycler.record_token(2, 30, 64);
+    assert!(recycler.is_token_valid(0, 10));
+    assert!(recycler.is_token_valid(1, 20));
+    assert!(!recycler.is_token_valid(1, 99));
+    assert_eq!(recycler.matching_prefix(0, &[10, 20, 30]), 3);
+    assert_eq!(recycler.matching_prefix(0, &[10, 20, 99]), 2);
+
+    let cp = recycler.checkpoint();
+    recycler.invalidate_from(1);
+    assert!(!recycler.is_token_valid(1, 20));
+    recycler.restore_checkpoint(cp);
+    assert!(recycler.is_token_valid(1, 20));
+
+    // Test copy_cache_slot
+    let mut state = State::new(&target_model.config);
+    state.copy_cache_slot(0, 1);
+
+    fs::remove_file(target_path).ok();
+    fs::remove_file(draft_path).ok();
+}

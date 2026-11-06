@@ -909,3 +909,220 @@ impl<'a> MedusaEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// Recycler for speculative draft KV-cache entries across successive verification rounds.
+///
+/// In speculative decoding, candidate draft tokens and verified tokens often share
+/// prefixes or have already been computed in preceding verification steps.
+/// The `DraftKvRecycler` tracks the validity of cached token representations in the
+/// draft model's KV-cache, avoiding redundant forward passes by recycling valid
+/// cached states across successive rounds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DraftKvRecycler {
+    /// Token IDs currently resident in the draft KV cache, indexed by position.
+    cached_tokens: Vec<Option<u32>>,
+    /// Number of tokens successfully recycled from cache across rounds.
+    pub recycled_tokens: usize,
+    /// Number of draft forward passes avoided via cache recycling.
+    pub forwards_saved: usize,
+    /// Total bytes of KV cache preserved without re-allocation or re-computation.
+    pub recycled_bytes: usize,
+}
+
+impl DraftKvRecycler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records that `token` is resident in the draft KV cache at `pos`.
+    pub fn record_token(&mut self, pos: usize, token: u32, token_bytes: usize) {
+        if pos >= self.cached_tokens.len() {
+            self.cached_tokens.resize(pos + 1, None);
+        }
+        self.cached_tokens[pos] = Some(token);
+        self.recycled_bytes += token_bytes;
+    }
+
+    /// Returns true if `token` is already resident in the draft KV cache at `pos`.
+    pub fn is_token_valid(&self, pos: usize, token: u32) -> bool {
+        self.cached_tokens.get(pos).copied().flatten() == Some(token)
+    }
+
+    /// Checks how many consecutive tokens from `tokens` match cached tokens starting at `start_pos`.
+    pub fn matching_prefix(&self, start_pos: usize, tokens: &[u32]) -> usize {
+        let mut count = 0;
+        for (i, &t) in tokens.iter().enumerate() {
+            if self.is_token_valid(start_pos + i, t) {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
+    }
+
+    /// Invalidate cached tokens from `pos` onwards (e.g. after rollback on rejection).
+    pub fn invalidate_from(&mut self, pos: usize) {
+        if pos < self.cached_tokens.len() {
+            for slot in &mut self.cached_tokens[pos..] {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Checkpoint the valid token state.
+    pub fn checkpoint(&self) -> Vec<Option<u32>> {
+        self.cached_tokens.clone()
+    }
+
+    /// Restore cached token states from a checkpoint.
+    pub fn restore_checkpoint(&mut self, checkpoint: Vec<Option<u32>>) {
+        self.cached_tokens = checkpoint;
+    }
+
+    /// Reset all tracked state.
+    pub fn reset(&mut self) {
+        self.cached_tokens.clear();
+        self.recycled_tokens = 0;
+        self.forwards_saved = 0;
+        self.recycled_bytes = 0;
+    }
+}
+
+/// Speculative decoding engine with draft KV-cache recycling across rounds.
+///
+/// Reduces draft model compute by reusing cached key-value states when successive
+/// verification rounds share token prefixes or when verified tokens are already
+/// populated in the draft cache.
+pub struct SpeculativeRecycleEngine<'a> {
+    pub target: &'a Model<'a>,
+    pub draft: &'a Model<'a>,
+    pub k: usize,
+    pub stats: SpeculativeStats,
+    pub recycler: DraftKvRecycler,
+}
+
+impl<'a> SpeculativeRecycleEngine<'a> {
+    pub fn new(target: &'a Model<'a>, draft: &'a Model<'a>, k: usize) -> Self {
+        Self {
+            target,
+            draft,
+            k: k.max(1),
+            stats: SpeculativeStats::default(),
+            recycler: DraftKvRecycler::new(),
+        }
+    }
+
+    /// Perform one speculative decoding step with KV-cache recycling.
+    pub fn step(
+        &mut self,
+        target_state: &mut State,
+        draft_state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut target_state.logits);
+        let mut emitted = vec![first_tok];
+
+        let max_k = self
+            .k
+            .min(target_state.context().saturating_sub(position + 2));
+        if max_k == 0 {
+            self.target.forward(target_state, first_tok, position)?;
+            if !self.recycler.is_token_valid(position, first_tok) {
+                self.draft.forward(draft_state, first_tok, position)?;
+                let token_bytes = self.draft.config.layers * self.draft.config.kv_dim() * 8;
+                self.recycler.record_token(position, first_tok, token_bytes);
+            } else {
+                self.recycler.forwards_saved += 1;
+                self.recycler.recycled_tokens += 1;
+            }
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        let token_bytes = self.draft.config.layers * self.draft.config.kv_dim() * 8;
+
+        // Check if first_tok is already valid in the draft cache at position
+        if self.recycler.is_token_valid(position, first_tok) {
+            self.recycler.forwards_saved += 1;
+            self.recycler.recycled_tokens += 1;
+        } else {
+            self.draft.forward(draft_state, first_tok, position)?;
+            self.recycler.record_token(position, first_tok, token_bytes);
+        }
+
+        // Propose K draft tokens
+        let mut draft_tokens = Vec::with_capacity(max_k);
+        for cur_pos in (position + 1..).take(max_k) {
+            let tok = sampler.sample(&mut draft_state.logits);
+            draft_tokens.push(tok);
+            self.draft.forward(draft_state, tok, cur_pos)?;
+            self.recycler.record_token(cur_pos, tok, token_bytes);
+        }
+
+        self.stats.proposed += draft_tokens.len();
+
+        let mut target_batch = Vec::with_capacity(1 + draft_tokens.len());
+        target_batch.push(first_tok);
+        target_batch.extend_from_slice(&draft_tokens);
+
+        let vocab = self.target.config.vocab;
+        let mut target_all_logits = vec![0.0f32; target_batch.len() * vocab];
+
+        self.target.prefill_all_logits(
+            target_state,
+            &target_batch,
+            position,
+            &mut target_all_logits,
+        )?;
+        self.stats.target_batches += 1;
+
+        let mut accepted_count = 0;
+        let total_drafted = draft_tokens.len();
+
+        for i in 0..total_drafted {
+            let target_tok_logits = &mut target_all_logits[i * vocab..(i + 1) * vocab];
+            let target_pred = sampler.sample(target_tok_logits);
+
+            if target_pred == draft_tokens[i] {
+                emitted.push(draft_tokens[i]);
+                accepted_count += 1;
+                self.recycler.recycled_tokens += 1;
+            } else {
+                emitted.push(target_pred);
+                break;
+            }
+        }
+
+        self.stats.accepted += accepted_count;
+
+        if accepted_count < total_drafted {
+            let accepted_total = emitted.len();
+            let rollback_from = position + accepted_total;
+            let rollback_to = position + target_batch.len();
+
+            target_state.truncate_cache(&self.target.config, rollback_from, rollback_to);
+            draft_state.truncate_cache(&self.draft.config, rollback_from, rollback_to);
+            self.recycler.invalidate_from(rollback_from);
+
+            let corrective_pos = position + accepted_total - 1;
+            let corrective_tok = emitted[accepted_total - 1];
+            self.draft
+                .forward(draft_state, corrective_tok, corrective_pos)?;
+            self.recycler
+                .record_token(corrective_pos, corrective_tok, token_bytes);
+
+            self.target
+                .forward(target_state, corrective_tok, corrective_pos)?;
+        } else {
+            let last_logits =
+                &target_all_logits[total_drafted * vocab..(total_drafted + 1) * vocab];
+            target_state.set_logits(last_logits);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}
