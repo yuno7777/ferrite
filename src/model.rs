@@ -1963,6 +1963,28 @@ impl<'a> Model<'a> {
         }
         Ok(())
     }
+
+    /// Decode a single token with automatic KV cache eviction when current position reaches context capacity.
+    ///
+    /// Preserves initial `sink_tokens` (default 4 if 0) and evicts oldest middle tokens so continuous
+    /// generation can proceed indefinitely without memory exhaustion.
+    pub fn forward_streaming(
+        &self,
+        state: &mut State,
+        token: u32,
+        current_pos: &mut usize,
+        sink_tokens: usize,
+    ) -> Result<()> {
+        if *current_pos >= state.context() {
+            let sinks = if sink_tokens == 0 { 4 } else { sink_tokens };
+            *current_pos = state
+                .kv_cache
+                .evict_streaming(*current_pos, state.context() - 1, sinks);
+        }
+        self.forward(state, token, *current_pos)?;
+        *current_pos += 1;
+        Ok(())
+    }
 }
 
 /// Stateful, interruptible chunked prompt prefill runner.
@@ -2154,5 +2176,22 @@ impl State {
     /// Set `logits` buffer to the given slice.
     pub fn set_logits(&mut self, new_logits: &[f32]) {
         self.logits.copy_from_slice(new_logits);
+    }
+
+    /// Evict cached tokens according to StreamingLLM policy when context capacity is reached.
+    /// Returns the new sequence position.
+    pub fn evict_cache(
+        &mut self,
+        current_pos: usize,
+        max_capacity: usize,
+        sink_tokens: usize,
+    ) -> usize {
+        self.kv_cache
+            .evict_streaming(current_pos, max_capacity, sink_tokens)
+    }
+
+    /// Selectively compact KV-cache entries to retain only the specified sorted `keep_indices`.
+    pub fn compact_cache(&mut self, keep_indices: &[usize]) {
+        self.kv_cache.compact_indices(keep_indices);
     }
 }

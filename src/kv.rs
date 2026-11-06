@@ -428,6 +428,198 @@ impl KvCache {
         }
     }
 
+    /// Shift tokens left across all layers by evicting `evict_count` entries starting at `evict_start`.
+    ///
+    /// Tokens in `[evict_start + evict_count .. current_len]` are shifted left to `evict_start`,
+    /// and the vacated slots at the tail are cleared.
+    pub fn evict_range(&mut self, evict_start: usize, evict_count: usize, current_len: usize) {
+        if evict_count == 0 || evict_start >= current_len {
+            return;
+        }
+        let actual_count = evict_count.min(current_len - evict_start);
+        let shift_src_start = evict_start + actual_count;
+        let shift_len = current_len.saturating_sub(shift_src_start);
+        let new_len = current_len - actual_count;
+
+        match self {
+            Self::F32 {
+                key,
+                value,
+                layers,
+                context,
+                kv_dim,
+            } => {
+                for layer in 0..*layers {
+                    let base = layer * *context * *kv_dim;
+                    let dst_offset = base + evict_start * *kv_dim;
+                    let src_offset = base + shift_src_start * *kv_dim;
+                    let num_floats = shift_len * *kv_dim;
+                    if num_floats > 0 {
+                        key.copy_within(src_offset..src_offset + num_floats, dst_offset);
+                        value.copy_within(src_offset..src_offset + num_floats, dst_offset);
+                    }
+                    let clear_offset = base + new_len * *kv_dim;
+                    let clear_floats = actual_count * *kv_dim;
+                    key[clear_offset..clear_offset + clear_floats].fill(0.0);
+                    value[clear_offset..clear_offset + clear_floats].fill(0.0);
+                }
+            }
+            Self::Q8_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                for layer in 0..*layers {
+                    let base = layer * *context * *blocks_per_token;
+                    let dst_offset = base + evict_start * *blocks_per_token;
+                    let src_offset = base + shift_src_start * *blocks_per_token;
+                    let num_blocks = shift_len * *blocks_per_token;
+                    if num_blocks > 0 {
+                        key.copy_within(src_offset..src_offset + num_blocks, dst_offset);
+                        value.copy_within(src_offset..src_offset + num_blocks, dst_offset);
+                    }
+                    let clear_offset = base + new_len * *blocks_per_token;
+                    let clear_blocks = actual_count * *blocks_per_token;
+                    key[clear_offset..clear_offset + clear_blocks].fill(BlockQ8_0::default());
+                    value[clear_offset..clear_offset + clear_blocks].fill(BlockQ8_0::default());
+                }
+            }
+            Self::Q4_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                for layer in 0..*layers {
+                    let base = layer * *context * *blocks_per_token;
+                    let dst_offset = base + evict_start * *blocks_per_token;
+                    let src_offset = base + shift_src_start * *blocks_per_token;
+                    let num_blocks = shift_len * *blocks_per_token;
+                    if num_blocks > 0 {
+                        key.copy_within(src_offset..src_offset + num_blocks, dst_offset);
+                        value.copy_within(src_offset..src_offset + num_blocks, dst_offset);
+                    }
+                    let clear_offset = base + new_len * *blocks_per_token;
+                    let clear_blocks = actual_count * *blocks_per_token;
+                    key[clear_offset..clear_offset + clear_blocks].fill(BlockQ4_0::default());
+                    value[clear_offset..clear_offset + clear_blocks].fill(BlockQ4_0::default());
+                }
+            }
+        }
+    }
+
+    /// Evict middle tokens using StreamingLLM policy:
+    /// Preserves initial `sink_tokens` (0..sink_tokens) and shifts recent tokens left to maintain
+    /// the total length at `max_len`. Returns the new effective sequence length.
+    pub fn evict_streaming(
+        &mut self,
+        current_len: usize,
+        max_len: usize,
+        sink_tokens: usize,
+    ) -> usize {
+        if current_len <= max_len || current_len <= sink_tokens {
+            return current_len;
+        }
+        let evict_count = current_len - max_len;
+        let evict_start = sink_tokens;
+        self.evict_range(evict_start, evict_count, current_len);
+        current_len - evict_count
+    }
+
+    /// Selectively compact KV cache to retain only entries in `keep_indices` (must be sorted ascending).
+    ///
+    /// Copies retained entries to sequential positions `0..keep_indices.len()` and clears the remainder.
+    pub fn compact_indices(&mut self, keep_indices: &[usize]) {
+        if keep_indices.is_empty() {
+            return;
+        }
+
+        match self {
+            Self::F32 {
+                key,
+                value,
+                layers,
+                context,
+                kv_dim,
+            } => {
+                for layer in 0..*layers {
+                    let base = layer * *context * *kv_dim;
+                    for (dst_pos, &src_pos) in keep_indices.iter().enumerate() {
+                        if dst_pos != src_pos && src_pos < *context {
+                            let dst = base + dst_pos * *kv_dim;
+                            let src = base + src_pos * *kv_dim;
+                            key.copy_within(src..src + *kv_dim, dst);
+                            value.copy_within(src..src + *kv_dim, dst);
+                        }
+                    }
+                    let clear_start = base + keep_indices.len() * *kv_dim;
+                    let clear_end = base + *context * *kv_dim;
+                    if clear_start < clear_end {
+                        key[clear_start..clear_end].fill(0.0);
+                        value[clear_start..clear_end].fill(0.0);
+                    }
+                }
+            }
+            Self::Q8_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                for layer in 0..*layers {
+                    let base = layer * *context * *blocks_per_token;
+                    for (dst_pos, &src_pos) in keep_indices.iter().enumerate() {
+                        if dst_pos != src_pos && src_pos < *context {
+                            let dst = base + dst_pos * *blocks_per_token;
+                            let src = base + src_pos * *blocks_per_token;
+                            key.copy_within(src..src + *blocks_per_token, dst);
+                            value.copy_within(src..src + *blocks_per_token, dst);
+                        }
+                    }
+                    let clear_start = base + keep_indices.len() * *blocks_per_token;
+                    let clear_end = base + *context * *blocks_per_token;
+                    if clear_start < clear_end {
+                        key[clear_start..clear_end].fill(BlockQ8_0::default());
+                        value[clear_start..clear_end].fill(BlockQ8_0::default());
+                    }
+                }
+            }
+            Self::Q4_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                for layer in 0..*layers {
+                    let base = layer * *context * *blocks_per_token;
+                    for (dst_pos, &src_pos) in keep_indices.iter().enumerate() {
+                        if dst_pos != src_pos && src_pos < *context {
+                            let dst = base + dst_pos * *blocks_per_token;
+                            let src = base + src_pos * *blocks_per_token;
+                            key.copy_within(src..src + *blocks_per_token, dst);
+                            value.copy_within(src..src + *blocks_per_token, dst);
+                        }
+                    }
+                    let clear_start = base + keep_indices.len() * *blocks_per_token;
+                    let clear_end = base + *context * *blocks_per_token;
+                    if clear_start < clear_end {
+                        key[clear_start..clear_end].fill(BlockQ4_0::default());
+                        value[clear_start..clear_end].fill(BlockQ4_0::default());
+                    }
+                }
+            }
+        }
+    }
+
     /// Access raw f32 key/value slices if this cache is in F32 format.
     pub fn as_f32_slices(&self) -> Option<(&[f32], &[f32])> {
         match self {
@@ -435,6 +627,54 @@ impl KvCache {
             _ => None,
         }
     }
+}
+
+/// Eviction policy configurations for context compression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvictionPolicy {
+    /// StreamingLLM: Retain `sink_tokens` initial tokens + recent `window_tokens`.
+    StreamingLLM {
+        sink_tokens: usize,
+        window_tokens: usize,
+    },
+    /// Heavy-Hitter Oracle (H2O): Retain initial `sink_tokens`, top `heavy_hitters`, and recent `window_tokens`.
+    H2O {
+        sink_tokens: usize,
+        heavy_hitters: usize,
+        window_tokens: usize,
+    },
+}
+
+/// Compute retained indices using H2O (Heavy-Hitter Oracle) policy over cumulative attention scores.
+pub fn select_h2o_indices(
+    scores: &[f32],
+    sink_tokens: usize,
+    heavy_hitters: usize,
+    window_tokens: usize,
+) -> Vec<usize> {
+    let n = scores.len();
+    if n <= sink_tokens + heavy_hitters + window_tokens {
+        return (0..n).collect();
+    }
+    let sinks_end = sink_tokens.min(n);
+    let window_start = n.saturating_sub(window_tokens);
+    let mut selected: std::collections::HashSet<usize> =
+        (0..sinks_end).chain(window_start..n).collect();
+
+    let mut middle_indices: Vec<usize> = (sinks_end..window_start).collect();
+    middle_indices.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for &idx in middle_indices.iter().take(heavy_hitters) {
+        selected.insert(idx);
+    }
+
+    let mut result: Vec<usize> = selected.into_iter().collect();
+    result.sort_unstable();
+    result
 }
 
 fn attention_online_q8_0(

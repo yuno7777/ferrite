@@ -322,10 +322,11 @@
 
 ### Phase 38: Context Compression & KV Cache Eviction (StreamingLLM / Heavy-Hitter Oracle H2O)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Maintain infinite streaming generation within bounded memory by retaining initial sink tokens and evicting middle tokens based on cumulative attention scores.
 - Files: `src/kv.rs`, `src/model.rs`, `tests/kv.rs`
 - Acceptance: Continuous generation beyond physical context limit without OOM or catastrophic perplexity collapse.
+- Completion evidence: Added `KvCache::evict_range`, `KvCache::evict_streaming`, `KvCache::compact_indices`, `select_h2o_indices`, and `EvictionPolicy` supporting F32, Q8_0, and Q4_0 KV caches. Added `Model::forward_streaming`, `State::evict_cache`, and `State::compact_cache` enabling continuous generation beyond context limits without OOM. Added regression test suite `tests/kv.rs` covering streaming eviction, H2O heavy-hitter selection, and infinite 64-step generation on a 16-token physical context window. All checks pass with 0 external dependencies.
 
 ### Phase 39: Speculative Lookahead Decoding (Self-Speculation / Jacobi-like n-gram speculation)
 - Priority: P2

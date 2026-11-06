@@ -315,3 +315,23 @@
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` prints exactly 1 line (0 external dependencies).
 
+## Autonomous Execution — Phase 38 Completion
+- Branch: `codex/audit-baseline`
+- Phase 38 (Context Compression & KV Cache Eviction — StreamingLLM / H2O):
+  - Added in `src/kv.rs`:
+    - `KvCache::evict_range`: multi-layer shifting of tokens using `copy_within` and tail zeroing across F32, Q8_0, and Q4_0 caches.
+    - `KvCache::evict_streaming`: StreamingLLM sink token retention (`0..sinks`) and sliding window compaction.
+    - `KvCache::compact_indices`: arbitrary subset compaction to sequential positions.
+    - `select_h2o_indices`: Heavy-Hitter Oracle score-based index selection retaining sinks, highest attention positions, and local window.
+    - `EvictionPolicy` configuration enum.
+  - Added in `src/model.rs`:
+    - `Model::forward_streaming`: automatic KV cache eviction when reaching context limit, enabling continuous generation beyond context without errors.
+    - `State::evict_cache` and `State::compact_cache`.
+  - Added integration test suite `tests/kv.rs` verifying F32/Q8/Q4 eviction correctness, H2O heavy-hitter selection, and continuous 64-token streaming generation on a 16-token physical context window.
+- Validation:
+  - `cargo test --all-targets` passes (100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` prints exactly 1 line (0 external dependencies).
+
+
