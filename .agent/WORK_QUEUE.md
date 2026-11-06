@@ -192,10 +192,11 @@
 
 ### Phase 22: Min-P and Tail Free Sampling (Adaptive Logit Filtering)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Modern sampling strategies outperforming traditional Top-P: Min-P scales truncation dynamically with top logit probability ($p \ge p_{\max} \cdot \text{scale}$); TFS calculates second derivative of sorted probabilities.
 - Files: `src/sample.rs`, `src/main.rs`, `src/server.rs`
 - Acceptance: Add `--min-p` and `--tfs` CLI and server flags; unit tests validating distribution truncation.
+- Completion evidence: Added `min_p` and `tfs_z` to `Sampler` in `src/sample.rs`. Implemented dynamic Min-P thresholding ($p \ge p_{\max} \cdot \text{min\_p}$) and Tail Free Sampling (normalized second derivative of descending probability curve cut off at $z$). Added builder methods `with_min_p` and `with_tfs`. Wired CLI flags `--min-p` and `--tfs` into `src/main.rs` and JSON request extraction in `src/server.rs`. Added unit tests in `src/sample.rs` verifying sub-threshold tail removal. All 146 tests pass.
 
 ### Phase 23: Repetition & Frequency/Presence Penalty Engine
 - Priority: P2

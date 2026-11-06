@@ -141,12 +141,18 @@
    - Built `Grammar::filter_logits` to mask non-conforming tokens to `-f32::INFINITY` and suppress EOS until completion.
    - Exposed `Grammar`, `RegexMatcher`, `JsonGrammar`, `ChoiceGrammar` in `src/lib.rs`.
    - Created integration test suite `tests/grammar.rs` verifying logit filtering, EOS suppression, and guided greedy token sampling.
-25. Verification after Phase 21:
-   - `cargo test --all-targets` passes (144 tests).
+26. Phase 22 Min-P and Tail Free Sampling (TFS):
+   - Added `min_p` and `tfs_z` adaptive logit filtering to `Sampler` in `src/sample.rs`.
+   - Built dynamic Min-P truncation ($p \ge p_{\max} \cdot \text{scale}$) and TFS second-derivative cumulative mass filtering.
+   - Added `--min-p` and `--tfs` CLI options in `src/main.rs`.
+   - Wired `min_p` and `tfs` into HTTP daemon OpenAI completions parsing in `src/server.rs`.
+   - Added unit tests verifying tail truncation without affecting high-probability head tokens.
+27. Verification after Phase 22:
+   - `cargo test --all-targets` passes (146 tests).
    - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
    - `cargo clippy --all-targets -- -D warnings` passes without warnings.
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 22: Min-P and Tail Free Sampling (Adaptive Logit Filtering; status QUEUED).
+- Phase 23: Repetition & Frequency/Presence Penalty Engine (status QUEUED).

@@ -44,6 +44,10 @@ pub struct Sampler {
     pub top_k: usize,
     /// Keep the smallest set whose probabilities reach p. 1.0 disables.
     pub top_p: f32,
+    /// Minimum probability scale relative to top token (p >= p_max * min_p). 0.0 disables.
+    pub min_p: f32,
+    /// Tail free sampling parameter z in (0, 1]. 1.0 disables.
+    pub tfs_z: f32,
     pub rng: Rng,
 }
 
@@ -61,6 +65,8 @@ impl Sampler {
             temperature: 0.0,
             top_k: 0,
             top_p: 1.0,
+            min_p: 0.0,
+            tfs_z: 1.0,
             rng: Rng::new(1),
         }
     }
@@ -70,8 +76,38 @@ impl Sampler {
             temperature,
             top_k,
             top_p,
+            min_p: 0.0,
+            tfs_z: 1.0,
             rng: Rng::new(seed),
         }
+    }
+
+    pub fn new_advanced(
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        tfs_z: f32,
+        seed: u64,
+    ) -> Self {
+        Self {
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            tfs_z,
+            rng: Rng::new(seed),
+        }
+    }
+
+    pub fn with_min_p(mut self, min_p: f32) -> Self {
+        self.min_p = min_p;
+        self
+    }
+
+    pub fn with_tfs(mut self, tfs_z: f32) -> Self {
+        self.tfs_z = tfs_z;
+        self
     }
 
     /// Pick a token. `logits` is modified in place — it is scratch after this.
@@ -89,8 +125,7 @@ impl Sampler {
         }
         ops::softmax(logits);
 
-        // Index by probability, descending. Only the head matters, so when
-        // top-k is small the rest is left unsorted.
+        // Index by probability, descending.
         let mut ranked: Vec<(f32, u32)> = logits
             .iter()
             .enumerate()
@@ -107,17 +142,58 @@ impl Sampler {
         }
         ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
 
-        // Nucleus: the shortest prefix whose mass reaches top_p.
-        let mut total = 0.0;
-        let mut cutoff = ranked.len();
-        for (position, (probability, _)) in ranked.iter().enumerate() {
-            total += probability;
-            if total >= self.top_p {
-                cutoff = position + 1;
-                break;
+        // 1. Min-P truncation: remove tokens where p < p_max * min_p
+        if self.min_p > 0.0 && !ranked.is_empty() {
+            let threshold = ranked[0].0 * self.min_p;
+            let mut keep_count = 0;
+            for (p, _) in &ranked {
+                if *p >= threshold {
+                    keep_count += 1;
+                } else {
+                    break;
+                }
+            }
+            ranked.truncate(keep_count.max(1));
+        }
+
+        // 2. Tail Free Sampling (TFS): truncate based on normalized second derivative
+        if self.tfs_z < 1.0 && ranked.len() > 2 {
+            let mut d = Vec::with_capacity(ranked.len() - 1);
+            for i in 0..ranked.len() - 1 {
+                d.push(ranked[i].0 - ranked[i + 1].0);
+            }
+            let mut d2 = Vec::with_capacity(d.len() - 1);
+            for i in 0..d.len() - 1 {
+                d2.push((d[i] - d[i + 1]).abs());
+            }
+            let d2_sum: f32 = d2.iter().sum();
+            if d2_sum > 0.0 {
+                let mut cum = 0.0;
+                let mut cutoff = ranked.len();
+                for (i, v) in d2.iter().enumerate() {
+                    cum += v / d2_sum;
+                    if cum >= self.tfs_z {
+                        cutoff = i + 1;
+                        break;
+                    }
+                }
+                ranked.truncate(cutoff.max(1));
             }
         }
-        ranked.truncate(cutoff.max(1));
+
+        // 3. Nucleus (Top-P): the shortest prefix whose mass reaches top_p.
+        if self.top_p < 1.0 {
+            let mut total = 0.0;
+            let mut cutoff = ranked.len();
+            for (position, (probability, _)) in ranked.iter().enumerate() {
+                total += probability;
+                if total >= self.top_p {
+                    cutoff = position + 1;
+                    break;
+                }
+            }
+            ranked.truncate(cutoff.max(1));
+        }
 
         let mass: f32 = ranked.iter().map(|(p, _)| p).sum();
         let mut target = self.rng.next_f32() * mass;
@@ -211,5 +287,29 @@ mod tests {
         }
         let mean = sum / 10_000.0;
         assert!((mean - 0.5f32).abs() < 0.02, "mean {mean}");
+    }
+
+    #[test]
+    fn min_p_drops_sub_threshold_tail() {
+        // Logits: token 0 is dominant (~0.8), token 1 is ~0.15, token 2 is ~0.05
+        // With min_p = 0.2, threshold is 0.8 * 0.2 = 0.16. Token 2 must be dropped.
+        let mut sampler = Sampler::new(1.0, 0, 1.0, 42).with_min_p(0.25);
+        for _ in 0..50 {
+            let res = sampler.sample(&mut [5.0, 3.5, 0.0]);
+            assert!(
+                res == 0 || res == 1,
+                "token 2 should be filtered out by min_p"
+            );
+        }
+    }
+
+    #[test]
+    fn tfs_truncates_long_tail() {
+        let mut sampler = Sampler::new(1.0, 0, 1.0, 42).with_tfs(0.9);
+        // Logits with a sharp drop after token 1
+        for _ in 0..50 {
+            let res = sampler.sample(&mut [10.0, 8.0, 1.0, 0.5, 0.1, 0.05]);
+            assert!(res == 0 || res == 1, "tail tokens should be removed by TFS");
+        }
     }
 }

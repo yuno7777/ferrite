@@ -50,6 +50,8 @@ pub struct RequestParams {
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: usize,
+    pub min_p: f32,
+    pub tfs_z: f32,
     pub seed: u64,
     pub stream: bool,
 }
@@ -173,7 +175,9 @@ impl<'a> Server<'a> {
 
         self.model.prefill(&mut state, &tokens, 0)?;
 
-        let mut sampler = Sampler::new(params.temperature, params.top_k, params.top_p, params.seed);
+        let mut sampler = Sampler::new(params.temperature, params.top_k, params.top_p, params.seed)
+            .with_min_p(params.min_p)
+            .with_tfs(params.tfs_z);
 
         let mut generated_tokens = Vec::new();
         let mut completion_text = String::new();
@@ -234,7 +238,9 @@ impl<'a> Server<'a> {
 
         self.model.prefill(&mut state, &tokens, 0)?;
 
-        let mut sampler = Sampler::new(params.temperature, params.top_k, params.top_p, params.seed);
+        let mut sampler = Sampler::new(params.temperature, params.top_k, params.top_p, params.seed)
+            .with_min_p(params.min_p)
+            .with_tfs(params.tfs_z);
 
         // Send SSE Header
         write!(
@@ -343,6 +349,8 @@ pub fn parse_request_json(json: &str) -> RequestParams {
         temperature: 0.0,
         top_p: 0.95,
         top_k: 40,
+        min_p: 0.0,
+        tfs_z: 1.0,
         seed: 1,
         stream: false,
         prompt: String::new(),
@@ -359,6 +367,12 @@ pub fn parse_request_json(json: &str) -> RequestParams {
     }
     if let Some(val) = extract_number(json, "top_k") {
         params.top_k = val as usize;
+    }
+    if let Some(val) = extract_number(json, "min_p") {
+        params.min_p = val as f32;
+    }
+    if let Some(val) = extract_number(json, "tfs_z").or_else(|| extract_number(json, "tfs")) {
+        params.tfs_z = val as f32;
     }
     if let Some(val) = extract_number(json, "seed") {
         params.seed = val as u64;

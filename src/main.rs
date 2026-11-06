@@ -35,6 +35,8 @@ run/serve options:
   --lora <adapter> apply GGUF LoRA adapter dynamically
   --chunk-size <n> chunk size for prompt prefill (default 512)
   --kv-cache <t>  KV cache quantization: f32, q8_0, q4_0 (default f32)
+  --min-p <p>     minimum probability scale relative to top token (default 0.0)
+  --tfs <z>       tail free sampling z parameter in (0, 1] (default 1.0)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -250,6 +252,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let temperature: f32 = flag(args, "--temp", 0.0)?;
     let top_k: usize = flag(args, "--top-k", 40)?;
     let top_p: f32 = flag(args, "--top-p", 0.95)?;
+    let min_p: f32 = flag(args, "--min-p", 0.0)?;
+    let tfs: f32 = flag(args, "--tfs", 1.0)?;
     let seed: u64 = flag(args, "--seed", 1)?;
     let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
     let threads: usize = flag(args, "--threads", 0)?;
@@ -274,6 +278,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--temp",
         "--top-k",
         "--top-p",
+        "--min-p",
+        "--tfs",
         "--seed",
         "--ctx",
         "--threads",
@@ -322,7 +328,9 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     if threads > 0 {
         state.threads = threads;
     }
-    let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
+    let mut sampler = Sampler::new(temperature, top_k, top_p, seed)
+        .with_min_p(min_p)
+        .with_tfs(tfs);
 
     // Optional draft model for speculative decoding
     let draft_gguf = if let Some(dq) = &draft_query {
