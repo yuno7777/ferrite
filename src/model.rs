@@ -2731,6 +2731,32 @@ impl<'a> Model<'a> {
         *current_pos += 1;
         Ok(())
     }
+
+    /// Streaming forward pass with adaptive entropy-bounded rolling sink cache eviction.
+    pub fn forward_adaptive_streaming(
+        &self,
+        state: &mut State,
+        token: u32,
+        current_pos: &mut usize,
+        config: &crate::kv::AdaptiveEntropyConfig,
+        attention_scores: Option<&[f32]>,
+    ) -> Result<()> {
+        if *current_pos >= state.context() {
+            let default_scores;
+            let scores = match attention_scores {
+                Some(s) => s,
+                None => {
+                    default_scores =
+                        state.logits[..(*current_pos).min(state.logits.len())].to_vec();
+                    &default_scores
+                }
+            };
+            *current_pos = state.evict_adaptive_entropy(config, scores);
+        }
+        self.forward(state, token, *current_pos)?;
+        *current_pos += 1;
+        Ok(())
+    }
 }
 
 /// Stateful, interruptible chunked prompt prefill runner.
@@ -2902,11 +2928,33 @@ impl State {
 
     /// Turn the integer kernels on or off.
     ///
-    /// On by default. Off gives the exact f32 arithmetic — slower, and the
+    /// On by default. Off gives the exact f32 arithmetic, which is slower, and the
     /// thing to reach for when deciding whether a numerical oddity comes from
     /// the activation quantization or from somewhere else.
     pub fn set_int8(&mut self, enabled: bool) {
         self.workspace.int8 = enabled;
+    }
+
+    /// Dynamic context truncation using rolling sink cache eviction.
+    pub fn truncate_context_rolling_sink(
+        &mut self,
+        current_pos: usize,
+        target_len: usize,
+        sink_tokens: usize,
+    ) -> usize {
+        self.kv_cache
+            .evict_streaming(current_pos, target_len, sink_tokens)
+    }
+
+    /// Dynamic context truncation using adaptive entropy bounds.
+    pub fn evict_adaptive_entropy(
+        &mut self,
+        config: &crate::kv::AdaptiveEntropyConfig,
+        scores: &[f32],
+    ) -> usize {
+        let keep = crate::kv::select_adaptive_entropy_indices(scores, config);
+        self.kv_cache.compact_indices(&keep);
+        keep.len()
     }
 
     /// Bytes held by the KV cache, which dominates everything else here.

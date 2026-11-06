@@ -105,6 +105,92 @@ impl MlaKvCache {
         }
     }
 
+    /// Evict a contiguous range of tokens from the MLA cache and shift subsequent tokens left.
+    pub fn evict_range(&mut self, evict_start: usize, evict_count: usize, current_len: usize) {
+        if evict_count == 0 || evict_start >= current_len {
+            return;
+        }
+        let actual_count = evict_count.min(current_len - evict_start);
+        let shift_src_start = evict_start + actual_count;
+        let shift_len = current_len - shift_src_start;
+        let new_len = current_len - actual_count;
+
+        for layer in 0..self.layers {
+            let base = layer * self.context;
+            let dst_latent = (base + evict_start) * self.latent_dim;
+            let src_latent = (base + shift_src_start) * self.latent_dim;
+            let num_latent = shift_len * self.latent_dim;
+            if num_latent > 0 {
+                self.latent
+                    .copy_within(src_latent..src_latent + num_latent, dst_latent);
+            }
+            let clear_latent_start = (base + new_len) * self.latent_dim;
+            let clear_latent_len = actual_count * self.latent_dim;
+            self.latent[clear_latent_start..clear_latent_start + clear_latent_len].fill(0.0);
+
+            let dst_rope = (base + evict_start) * self.rope_dim;
+            let src_rope = (base + shift_src_start) * self.rope_dim;
+            let num_rope = shift_len * self.rope_dim;
+            if num_rope > 0 {
+                self.rope_key
+                    .copy_within(src_rope..src_rope + num_rope, dst_rope);
+            }
+            let clear_rope_start = (base + new_len) * self.rope_dim;
+            let clear_rope_len = actual_count * self.rope_dim;
+            self.rope_key[clear_rope_start..clear_rope_start + clear_rope_len].fill(0.0);
+        }
+    }
+
+    /// Evicts middle tokens using StreamingLLM rolling sink policy for MLA cache.
+    pub fn evict_streaming(
+        &mut self,
+        current_len: usize,
+        max_len: usize,
+        sink_tokens: usize,
+    ) -> usize {
+        if current_len <= max_len || current_len <= sink_tokens {
+            return current_len;
+        }
+        let evict_count = current_len - max_len;
+        let evict_start = sink_tokens;
+        self.evict_range(evict_start, evict_count, current_len);
+        current_len - evict_count
+    }
+
+    /// Selectively compact MLA KV cache to retain only entries in `keep_indices`.
+    pub fn compact_indices(&mut self, keep_indices: &[usize]) {
+        if keep_indices.is_empty() {
+            return;
+        }
+        for layer in 0..self.layers {
+            let base = layer * self.context;
+            for (dst_pos, &src_pos) in keep_indices.iter().enumerate() {
+                if dst_pos != src_pos && src_pos < self.context {
+                    let dst_latent = (base + dst_pos) * self.latent_dim;
+                    let src_latent = (base + src_pos) * self.latent_dim;
+                    self.latent
+                        .copy_within(src_latent..src_latent + self.latent_dim, dst_latent);
+
+                    let dst_rope = (base + dst_pos) * self.rope_dim;
+                    let src_rope = (base + src_pos) * self.rope_dim;
+                    self.rope_key
+                        .copy_within(src_rope..src_rope + self.rope_dim, dst_rope);
+                }
+            }
+            let clear_start = (base + keep_indices.len()) * self.latent_dim;
+            let clear_end = (base + self.context) * self.latent_dim;
+            if clear_start < clear_end {
+                self.latent[clear_start..clear_end].fill(0.0);
+            }
+
+            let clear_rope_start = (base + keep_indices.len()) * self.rope_dim;
+            let clear_rope_end = (base + self.context) * self.rope_dim;
+            if clear_rope_start < clear_rope_end {
+                self.rope_key[clear_rope_start..clear_rope_end].fill(0.0);
+            }
+        }
+    }
+
     /// Evaluates direct latent attention over cached latent representations.
     pub fn attention(
         &self,
@@ -869,6 +955,125 @@ pub fn select_h2o_indices(
 
     for &idx in middle_indices.iter().take(heavy_hitters) {
         selected.insert(idx);
+    }
+
+    let mut result: Vec<usize> = selected.into_iter().collect();
+    result.sort_unstable();
+    result
+}
+
+/// Configuration for adaptive entropy-bounded rolling sink cache eviction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveEntropyConfig {
+    pub sink_tokens: usize,
+    pub window_tokens: usize,
+    pub min_capacity: usize,
+    pub max_capacity: usize,
+    pub target_entropy_ratio: f32,
+}
+
+impl Default for AdaptiveEntropyConfig {
+    fn default() -> Self {
+        Self {
+            sink_tokens: 4,
+            window_tokens: 16,
+            min_capacity: 32,
+            max_capacity: 128,
+            target_entropy_ratio: 0.8,
+        }
+    }
+}
+
+/// Computes Shannon entropy and normalized entropy over a probability or logit distribution.
+pub fn compute_distribution_entropy(logits_or_probs: &[f32], is_logits: bool) -> (f32, f32) {
+    if logits_or_probs.len() <= 1 {
+        return (0.0, 0.0);
+    }
+
+    let mut probs = vec![0.0f32; logits_or_probs.len()];
+    if is_logits {
+        let max_logit = logits_or_probs
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for (i, &l) in logits_or_probs.iter().enumerate() {
+            let p = (l - max_logit).exp();
+            probs[i] = p;
+            sum += p;
+        }
+        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+        for p in probs.iter_mut() {
+            *p *= inv_sum;
+        }
+    } else {
+        let sum: f32 = logits_or_probs.iter().sum();
+        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+        for (i, &p) in logits_or_probs.iter().enumerate() {
+            probs[i] = p * inv_sum;
+        }
+    }
+
+    let mut entropy = 0.0f32;
+    for &p in &probs {
+        if p > 1e-12 {
+            entropy -= p * p.ln();
+        }
+    }
+    let max_entropy = (logits_or_probs.len() as f32).ln();
+    let normalized = if max_entropy > 0.0 {
+        (entropy / max_entropy).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (entropy, normalized)
+}
+
+/// Computes retained token indices using adaptive entropy bounds and rolling sinks.
+///
+/// When attention distribution has high entropy (diffuse attention), retains up to `max_capacity`.
+/// When attention distribution has low entropy (concentrated attention), dynamically compacts closer to `min_capacity`.
+pub fn select_adaptive_entropy_indices(
+    scores: &[f32],
+    config: &AdaptiveEntropyConfig,
+) -> Vec<usize> {
+    let n = scores.len();
+    let min_req = config.sink_tokens + config.window_tokens;
+    let min_cap = config.min_capacity.max(min_req);
+    let max_cap = config.max_capacity.max(min_cap);
+
+    if n <= min_cap {
+        return (0..n).collect();
+    }
+
+    // Determine normalized entropy of attention scores
+    let (_, normalized_entropy) = compute_distribution_entropy(scores, true);
+
+    // Dynamic capacity interpolation based on entropy
+    let ratio = if config.target_entropy_ratio > 0.0 {
+        (normalized_entropy / config.target_entropy_ratio).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let target_capacity = min_cap + ((max_cap - min_cap) as f32 * ratio).round() as usize;
+    let effective_capacity = target_capacity.min(n).max(min_req);
+
+    let sinks_end = config.sink_tokens.min(n);
+    let window_start = n.saturating_sub(config.window_tokens);
+    let mut selected: std::collections::HashSet<usize> =
+        (0..sinks_end).chain(window_start..n).collect();
+
+    let middle_needed = effective_capacity.saturating_sub(selected.len());
+    if middle_needed > 0 && window_start > sinks_end {
+        let mut middle_indices: Vec<usize> = (sinks_end..window_start).collect();
+        middle_indices.sort_by(|&a, &b| {
+            scores[b]
+                .partial_cmp(&scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in middle_indices.iter().take(middle_needed) {
+            selected.insert(idx);
+        }
     }
 
     let mut result: Vec<usize> = selected.into_iter().collect();
