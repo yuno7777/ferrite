@@ -671,6 +671,195 @@ pub fn mrope(
     }
 }
 
+/// Precomputed Rotary Position Embedding (RoPE) frequency and trigonometric cache
+/// with Su-YaRN interpolation and dynamic context extension support.
+#[derive(Clone, Debug)]
+pub struct RopeCache {
+    dim: usize,
+    rotary_dim: usize,
+    base: f32,
+    scaling: Option<RopeScaling>,
+    inv_freq: Vec<f32>,
+    cos_sin_table: Vec<(f32, f32)>,
+    max_cached_positions: usize,
+    mscale: f32,
+}
+
+impl RopeCache {
+    /// Creates a new precomputed RoPE cache.
+    pub fn new(
+        dim: usize,
+        rotary_dim: usize,
+        base: f32,
+        initial_positions: usize,
+        scaling: Option<RopeScaling>,
+    ) -> Self {
+        let eff_rot_dim = rotary_dim.min(dim);
+        let pairs = eff_rot_dim / 2;
+        let (inv_freq, mscale) = Self::compute_inv_freq(eff_rot_dim, base, scaling.as_ref());
+        let mut cache = Self {
+            dim,
+            rotary_dim: eff_rot_dim,
+            base,
+            scaling,
+            inv_freq,
+            cos_sin_table: Vec::with_capacity(initial_positions * pairs),
+            max_cached_positions: 0,
+            mscale,
+        };
+        cache.ensure_capacity(initial_positions);
+        cache
+    }
+
+    /// Computes the inverse frequency array and attention multiplier according to RoPE scaling.
+    pub fn compute_inv_freq(
+        rotary_dim: usize,
+        base: f32,
+        scaling: Option<&RopeScaling>,
+    ) -> (Vec<f32>, f32) {
+        let pairs = rotary_dim / 2;
+        let mut inv_freq = Vec::with_capacity(pairs);
+        let mut mscale = 1.0f32;
+
+        match scaling {
+            None => {
+                for pair in 0..pairs {
+                    let freq = 1.0 / base.powf(2.0 * pair as f32 / rotary_dim as f32);
+                    inv_freq.push(freq);
+                }
+            }
+            Some(RopeScaling::Linear { factor }) => {
+                let eff_factor = if *factor > 0.0 { *factor } else { 1.0 };
+                for pair in 0..pairs {
+                    let freq =
+                        (1.0 / eff_factor) / base.powf(2.0 * pair as f32 / rotary_dim as f32);
+                    inv_freq.push(freq);
+                }
+            }
+            Some(RopeScaling::Yarn {
+                factor,
+                orig_ctx,
+                ext_factor: _,
+                attn_factor,
+                beta_fast,
+                beta_slow,
+            }) => {
+                let eff_factor = if *factor > 0.0 { *factor } else { 1.0 };
+                let orig_ctx_f = *orig_ctx as f32;
+                let (b_fast, b_slow) = (*beta_fast, *beta_slow);
+
+                mscale = if *attn_factor > 0.0 {
+                    *attn_factor
+                } else {
+                    0.1 * eff_factor.ln() + 1.0
+                };
+
+                for pair in 0..pairs {
+                    let base_freq = 1.0 / base.powf(2.0 * pair as f32 / rotary_dim as f32);
+                    let wavelength = 2.0 * std::f32::consts::PI / base_freq;
+                    let r = orig_ctx_f / wavelength;
+                    let gamma = if b_fast == b_slow {
+                        0.0
+                    } else {
+                        ((r - b_slow) / (b_fast - b_slow)).clamp(0.0, 1.0)
+                    };
+
+                    let interp_freq = base_freq / eff_factor;
+                    let freq = (1.0 - gamma) * interp_freq + gamma * base_freq;
+                    inv_freq.push(freq);
+                }
+            }
+        }
+
+        (inv_freq, mscale)
+    }
+
+    /// Precomputes trigonometric values up to `positions`.
+    pub fn ensure_capacity(&mut self, positions: usize) {
+        if positions <= self.max_cached_positions {
+            return;
+        }
+        let pairs = self.rotary_dim / 2;
+        let start = self.max_cached_positions;
+        let additional = (positions - start) * pairs;
+        self.cos_sin_table.reserve(additional);
+
+        for pos in start..positions {
+            for &freq in &self.inv_freq {
+                let angle = pos as f32 * freq;
+                let (sin, cos) = angle.sin_cos();
+                self.cos_sin_table.push((cos, sin));
+            }
+        }
+        self.max_cached_positions = positions;
+    }
+
+    /// Gets precomputed cos and sin for a given position and pair index.
+    #[inline]
+    pub fn get_cos_sin(&self, position: usize, pair: usize) -> (f32, f32) {
+        let pairs = self.rotary_dim / 2;
+        if position < self.max_cached_positions {
+            self.cos_sin_table[position * pairs + pair]
+        } else {
+            let freq = self.inv_freq[pair];
+            let angle = position as f32 * freq;
+            let (sin, cos) = angle.sin_cos();
+            (cos, sin)
+        }
+    }
+
+    /// Returns the number of precomputed positions currently resident in cache.
+    pub fn cached_positions(&self) -> usize {
+        self.max_cached_positions
+    }
+
+    /// Returns the total head dimension.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Returns the rotary dimension.
+    pub fn rotary_dim(&self) -> usize {
+        self.rotary_dim
+    }
+
+    /// Returns the RoPE base frequency.
+    pub fn base(&self) -> f32 {
+        self.base
+    }
+
+    /// Returns the active RoPE scaling configuration, if any.
+    pub fn scaling(&self) -> Option<&RopeScaling> {
+        self.scaling.as_ref()
+    }
+
+    /// Applies cached RoPE rotation to a vector in-place.
+    pub fn apply(&self, vector: &mut [f32], position: usize, rope_type: RoPEType) {
+        let rot_dim = self.rotary_dim.min(vector.len());
+        let half = rot_dim / 2;
+        let mscale = self.mscale;
+
+        match rope_type {
+            RoPEType::Normal => {
+                for pair in 0..half {
+                    let (cos, sin) = self.get_cos_sin(position, pair);
+                    let (x, y) = (vector[pair * 2] * mscale, vector[pair * 2 + 1] * mscale);
+                    vector[pair * 2] = x * cos - y * sin;
+                    vector[pair * 2 + 1] = x * sin + y * cos;
+                }
+            }
+            RoPEType::Neox => {
+                for pair in 0..half {
+                    let (cos, sin) = self.get_cos_sin(position, pair);
+                    let (x, y) = (vector[pair] * mscale, vector[pair + half] * mscale);
+                    vector[pair] = x * cos - y * sin;
+                    vector[pair + half] = x * sin + y * cos;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,5 +1185,111 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rope_cache_normal_matches_rope_scaled() {
+        let base = 10000.0;
+        let dim = 16;
+        let rotary_dim = 16;
+
+        let cache = RopeCache::new(dim, rotary_dim, base, 32, None);
+
+        for pos in 0..20 {
+            let mut v1 = [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 0.5, 0.4, 0.3, 0.2, 0.1, -1.0, -2.0, -3.0,
+            ];
+            let mut v2 = v1;
+
+            rope_scaled(&mut v1, pos, base, rotary_dim, None);
+            cache.apply(&mut v2, pos, RoPEType::Normal);
+
+            for (a, b) in v1.iter().zip(&v2) {
+                assert!((a - b).abs() < 1e-5, "pos {pos}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn rope_cache_neox_matches_rope_neox() {
+        let base = 10000.0;
+        let dim = 16;
+        let rotary_dim = 16;
+
+        let cache = RopeCache::new(dim, rotary_dim, base, 16, None);
+
+        for pos in 0..10 {
+            let mut v1 = [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 0.5, 0.4, 0.3, 0.2, 0.1, -1.0, -2.0, -3.0,
+            ];
+            let mut v2 = v1;
+
+            rope_neox(&mut v1, pos, base);
+            cache.apply(&mut v2, pos, RoPEType::Neox);
+
+            for (a, b) in v1.iter().zip(&v2) {
+                assert!((a - b).abs() < 1e-5, "pos {pos}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn rope_cache_yarn_matches_rope_scaled_yarn() {
+        let base = 10000.0;
+        let dim = 16;
+        let rotary_dim = 16;
+        let scaling = RopeScaling::Yarn {
+            factor: 2.0,
+            orig_ctx: 1024,
+            ext_factor: 1.0,
+            attn_factor: 1.1,
+            beta_fast: 32.0,
+            beta_slow: 1.0,
+        };
+
+        let cache = RopeCache::new(dim, rotary_dim, base, 16, Some(scaling.clone()));
+
+        for pos in 0..10 {
+            let mut v1 = [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 0.5, 0.4, 0.3, 0.2, 0.1, -1.0, -2.0, -3.0,
+            ];
+            let mut v2 = v1;
+
+            rope_scaled(&mut v1, pos, base, rotary_dim, Some(&scaling));
+            cache.apply(&mut v2, pos, RoPEType::Normal);
+
+            for (a, b) in v1.iter().zip(&v2) {
+                assert!((a - b).abs() < 1e-5, "yarn pos {pos}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn rope_cache_dynamic_capacity_expansion() {
+        let base = 10000.0;
+        let dim = 8;
+        let rotary_dim = 8;
+        let mut cache = RopeCache::new(dim, rotary_dim, base, 4, None);
+        assert_eq!(cache.cached_positions(), 4);
+
+        // Position within cache
+        let mut v1 = [1.0; 8];
+        let mut v2 = [1.0; 8];
+        rope(&mut v1, 2, base);
+        cache.apply(&mut v2, 2, RoPEType::Normal);
+        assert_eq!(v1, v2);
+
+        // Position beyond current cache: auto fallback and dynamic capacity expansion
+        let mut v3 = [1.0; 8];
+        let mut v4 = [1.0; 8];
+        rope(&mut v3, 10, base);
+        cache.apply(&mut v4, 10, RoPEType::Normal);
+        assert_eq!(v3, v4);
+
+        cache.ensure_capacity(16);
+        assert_eq!(cache.cached_positions(), 16);
+        let mut v5 = [1.0; 8];
+        cache.apply(&mut v5, 10, RoPEType::Normal);
+        assert_eq!(v3, v5);
     }
 }

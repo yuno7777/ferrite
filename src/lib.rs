@@ -47,6 +47,7 @@ pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType, MlaKvCache};
 pub use lora::{LoraAdapter, LoraPair};
 pub use map::Mmap;
 pub use model::ChunkedPrefill;
+pub use ops::RopeCache;
 pub use paged::{BlockId, PagedPool, PagedSequence, PhysicalBlock, DEFAULT_BLOCK_TOKENS};
 pub use prefix::{RadixCache, RadixNode};
 pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, dot_gptq_int4};
