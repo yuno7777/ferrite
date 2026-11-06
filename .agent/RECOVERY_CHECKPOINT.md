@@ -147,12 +147,19 @@
    - Added `--min-p` and `--tfs` CLI options in `src/main.rs`.
    - Wired `min_p` and `tfs` into HTTP daemon OpenAI completions parsing in `src/server.rs`.
    - Added unit tests verifying tail truncation without affecting high-probability head tokens.
-27. Verification after Phase 22:
-   - `cargo test --all-targets` passes (146 tests).
+28. Phase 23 Repetition & Frequency/Presence Penalty Engine:
+   - Created `PenaltyConfig` and `apply_penalties` in `src/sample.rs`.
+   - Supported multiplicative repetition penalty ($l / \text{rep}$ or $l \cdot \text{rep}$), frequency penalty ($l - \text{count} \cdot \text{freq}$), and presence penalty ($l - \text{pres}$) over trailing context window (`last_n`).
+   - Added `Sampler::sample_with_history` and builder methods in `src/sample.rs`.
+   - Wired `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--repeat-last-n` flags into CLI `src/main.rs`.
+   - Wired penalty parameters and token sequence tracking into HTTP completions in `src/server.rs`.
+   - Added unit tests in `src/sample.rs` verifying exact penalty behavior.
+29. Verification after Phase 23:
+   - `cargo test --all-targets` passes (148 tests).
    - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
    - `cargo clippy --all-targets -- -D warnings` passes without warnings.
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 23: Repetition & Frequency/Presence Penalty Engine (status QUEUED).
+- Phase 24: Continuous Batching & Multi-Sequence Scheduling (status QUEUED).

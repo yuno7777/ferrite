@@ -37,6 +37,10 @@ run/serve options:
   --kv-cache <t>  KV cache quantization: f32, q8_0, q4_0 (default f32)
   --min-p <p>     minimum probability scale relative to top token (default 0.0)
   --tfs <z>       tail free sampling z parameter in (0, 1] (default 1.0)
+  --repeat-penalty <p> multiplicative repetition penalty (default 1.0)
+  --frequency-penalty <p> additive frequency penalty (default 0.0)
+  --presence-penalty <p> additive presence penalty (default 0.0)
+  --repeat-last-n <n> window of recent tokens for penalties (default 64)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -254,6 +258,10 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let top_p: f32 = flag(args, "--top-p", 0.95)?;
     let min_p: f32 = flag(args, "--min-p", 0.0)?;
     let tfs: f32 = flag(args, "--tfs", 1.0)?;
+    let repeat_penalty: f32 = flag(args, "--repeat-penalty", 1.0)?;
+    let frequency_penalty: f32 = flag(args, "--frequency-penalty", 0.0)?;
+    let presence_penalty: f32 = flag(args, "--presence-penalty", 0.0)?;
+    let repeat_last_n: usize = flag(args, "--repeat-last-n", 64)?;
     let seed: u64 = flag(args, "--seed", 1)?;
     let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
     let threads: usize = flag(args, "--threads", 0)?;
@@ -280,6 +288,10 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--top-p",
         "--min-p",
         "--tfs",
+        "--repeat-penalty",
+        "--frequency-penalty",
+        "--presence-penalty",
+        "--repeat-last-n",
         "--seed",
         "--ctx",
         "--threads",
@@ -328,9 +340,16 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     if threads > 0 {
         state.threads = threads;
     }
+    let penalties = ferrite::sample::PenaltyConfig {
+        repetition_penalty: repeat_penalty,
+        frequency_penalty,
+        presence_penalty,
+        last_n: repeat_last_n,
+    };
     let mut sampler = Sampler::new(temperature, top_k, top_p, seed)
         .with_min_p(min_p)
-        .with_tfs(tfs);
+        .with_tfs(tfs)
+        .with_penalties(penalties);
 
     // Optional draft model for speculative decoding
     let draft_gguf = if let Some(dq) = &draft_query {
@@ -441,11 +460,13 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
             engine.stats.tokens_per_batch(),
         );
     } else {
+        let mut token_history = prompt_tokens.clone();
         while generated < limit && position < state.context() {
-            let token = sampler.sample(&mut state.logits);
+            let token = sampler.sample_with_history(&mut state.logits, &token_history);
             if Some(token) == tokenizer.eos {
                 break;
             }
+            token_history.push(token);
             pending.extend(tokenizer.piece(token));
             if let Ok(text) = std::str::from_utf8(&pending) {
                 print!("{text}");

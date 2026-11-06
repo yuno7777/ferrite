@@ -200,10 +200,11 @@
 
 ### Phase 23: Repetition & Frequency/Presence Penalty Engine
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Prevents degenerative repetitive loops by applying multiplicative and additive penalties on previously generated tokens within configurable context windows.
-- Files: `src/sample.rs`, `src/model.rs`, `src/server.rs`
+- Files: `src/sample.rs`, `src/main.rs`, `src/server.rs`
 - Acceptance: Apply repetition_penalty ($l / \text{penalty}$ or $l \cdot \text{penalty}$), frequency_penalty, and presence_penalty; support in `/v1/chat/completions`.
+- Completion evidence: Created `PenaltyConfig` and `apply_penalties` in `src/sample.rs` supporting multiplicative repetition penalties, frequency-proportional additive penalties, and one-time presence penalties over configurable trailing token windows (`last_n`). Added `Sampler::sample_with_history` and builder methods. Wired CLI flags `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--repeat-last-n` into `src/main.rs`. Added penalty parameter extraction and token history tracking in HTTP daemon completions in `src/server.rs`. Added unit tests in `src/sample.rs` validating exact penalty arithmetic. All 148 tests pass.
 
 ### Phase 24: Continuous Batching & Multi-Sequence Scheduling
 - Priority: P1

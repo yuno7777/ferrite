@@ -43,7 +43,7 @@ pub struct Server<'a> {
     pub config: ServerConfig,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RequestParams {
     pub prompt: String,
     pub max_tokens: usize,
@@ -52,8 +52,30 @@ pub struct RequestParams {
     pub top_k: usize,
     pub min_p: f32,
     pub tfs_z: f32,
+    pub repetition_penalty: f32,
+    pub frequency_penalty: f32,
+    pub presence_penalty: f32,
     pub seed: u64,
     pub stream: bool,
+}
+
+impl Default for RequestParams {
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            max_tokens: 128,
+            temperature: 0.0,
+            top_p: 0.95,
+            top_k: 40,
+            min_p: 0.0,
+            tfs_z: 1.0,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: 1,
+            stream: false,
+        }
+    }
 }
 
 impl<'a> Server<'a> {
@@ -175,9 +197,16 @@ impl<'a> Server<'a> {
 
         self.model.prefill(&mut state, &tokens, 0)?;
 
+        let penalties = crate::sample::PenaltyConfig {
+            repetition_penalty: params.repetition_penalty,
+            frequency_penalty: params.frequency_penalty,
+            presence_penalty: params.presence_penalty,
+            last_n: 64,
+        };
         let mut sampler = Sampler::new(params.temperature, params.top_k, params.top_p, params.seed)
             .with_min_p(params.min_p)
-            .with_tfs(params.tfs_z);
+            .with_tfs(params.tfs_z)
+            .with_penalties(penalties);
 
         let mut generated_tokens = Vec::new();
         let mut completion_text = String::new();
@@ -188,12 +217,14 @@ impl<'a> Server<'a> {
         } else {
             params.max_tokens
         };
+        let mut history = tokens.clone();
 
         while generated_tokens.len() < limit && pos < state.context() {
-            let tok = sampler.sample(&mut state.logits);
+            let tok = sampler.sample_with_history(&mut state.logits, &history);
             if Some(tok) == self.tokenizer.eos {
                 break;
             }
+            history.push(tok);
             generated_tokens.push(tok);
             pending.extend(self.tokenizer.piece(tok));
             if let Ok(text) = std::str::from_utf8(&pending) {
@@ -238,9 +269,16 @@ impl<'a> Server<'a> {
 
         self.model.prefill(&mut state, &tokens, 0)?;
 
+        let penalties = crate::sample::PenaltyConfig {
+            repetition_penalty: params.repetition_penalty,
+            frequency_penalty: params.frequency_penalty,
+            presence_penalty: params.presence_penalty,
+            last_n: 64,
+        };
         let mut sampler = Sampler::new(params.temperature, params.top_k, params.top_p, params.seed)
             .with_min_p(params.min_p)
-            .with_tfs(params.tfs_z);
+            .with_tfs(params.tfs_z)
+            .with_penalties(penalties);
 
         // Send SSE Header
         write!(
@@ -262,12 +300,14 @@ impl<'a> Server<'a> {
             params.max_tokens
         };
         let mut pending = Vec::new();
+        let mut history = tokens.clone();
 
         while generated < limit && pos < state.context() {
-            let tok = sampler.sample(&mut state.logits);
+            let tok = sampler.sample_with_history(&mut state.logits, &history);
             if Some(tok) == self.tokenizer.eos {
                 break;
             }
+            history.push(tok);
             generated += 1;
             pending.extend(self.tokenizer.piece(tok));
             if let Ok(text) = std::str::from_utf8(&pending) {
@@ -351,6 +391,9 @@ pub fn parse_request_json(json: &str) -> RequestParams {
         top_k: 40,
         min_p: 0.0,
         tfs_z: 1.0,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
         seed: 1,
         stream: false,
         prompt: String::new(),
@@ -373,6 +416,17 @@ pub fn parse_request_json(json: &str) -> RequestParams {
     }
     if let Some(val) = extract_number(json, "tfs_z").or_else(|| extract_number(json, "tfs")) {
         params.tfs_z = val as f32;
+    }
+    if let Some(val) = extract_number(json, "repetition_penalty")
+        .or_else(|| extract_number(json, "repeat_penalty"))
+    {
+        params.repetition_penalty = val as f32;
+    }
+    if let Some(val) = extract_number(json, "frequency_penalty") {
+        params.frequency_penalty = val as f32;
+    }
+    if let Some(val) = extract_number(json, "presence_penalty") {
+        params.presence_penalty = val as f32;
     }
     if let Some(val) = extract_number(json, "seed") {
         params.seed = val as u64;
