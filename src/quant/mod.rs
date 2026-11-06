@@ -18,6 +18,7 @@ pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx512;
 pub mod dot;
+pub mod fp8;
 pub mod half;
 pub mod idot;
 pub mod k;
@@ -84,6 +85,7 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], out: &mut [f32]) -> Result<()> {
         GgmlType::Q4_0 => per_block(bytes, out, 32, 18, legacy::q4_0),
         GgmlType::Q4_1 => per_block(bytes, out, 32, 20, legacy::q4_1),
         GgmlType::Q8_0 => per_block(bytes, out, 32, 34, legacy::q8_0),
+        GgmlType::F8_E4M3 => fp8::dequantize_e4m3(bytes, out),
         other => return Err(unsupported(other)),
     }
     Ok(())
@@ -146,6 +148,13 @@ pub(crate) mod testdata {
                 }
                 // Q6_K puts its scale last
                 GgmlType::Q6_K => block[208..210].copy_from_slice(&SCALE),
+                GgmlType::F8_E4M3 => {
+                    for b in block.iter_mut() {
+                        if *b == 0x7F || *b == 0xFF {
+                            *b = 0x7E;
+                        }
+                    }
+                }
                 other => panic!("no fixture for {}", other.name()),
             }
         }

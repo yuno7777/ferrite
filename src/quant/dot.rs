@@ -58,7 +58,7 @@ fn total(lanes: [f32; 4]) -> f32 {
 pub fn supports(ty: GgmlType) -> bool {
     matches!(
         ty,
-        GgmlType::Q8_0 | GgmlType::Q4_0 | GgmlType::Q5_K | GgmlType::Q6_K
+        GgmlType::Q8_0 | GgmlType::Q4_0 | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::F8_E4M3
     )
 }
 
@@ -76,8 +76,26 @@ pub fn fused(ty: GgmlType, row: &[u8], x: &[f32]) -> Option<f32> {
         GgmlType::Q4_0 => q4_0(row, x),
         GgmlType::Q5_K => q5_k(row, x),
         GgmlType::Q6_K => q6_k(row, x),
+        GgmlType::F8_E4M3 => f8_e4m3(row, x),
         _ => return None,
     })
+}
+
+pub fn f8_e4m3(row: &[u8], x: &[f32]) -> f32 {
+    let mut lanes = [0.0f32; 4];
+    for (quants, acts) in row.chunks_exact(4).zip(x.chunks_exact(4)) {
+        lanes[0] += super::fp8::fp8_e4m3_to_f32(quants[0]) * acts[0];
+        lanes[1] += super::fp8::fp8_e4m3_to_f32(quants[1]) * acts[1];
+        lanes[2] += super::fp8::fp8_e4m3_to_f32(quants[2]) * acts[2];
+        lanes[3] += super::fp8::fp8_e4m3_to_f32(quants[3]) * acts[3];
+    }
+    let full = row.len() - row.len() % 4;
+    let tail: f32 = row[full..]
+        .iter()
+        .zip(&x[full..])
+        .map(|(&q, &a)| super::fp8::fp8_e4m3_to_f32(q) * a)
+        .sum();
+    total(lanes) + tail
 }
 
 pub fn q8_0(row: &[u8], x: &[f32]) -> f32 {
@@ -281,6 +299,7 @@ mod tests {
             GgmlType::Q4_K => q4_k(&row, &x),
             GgmlType::Q5_K => q5_k(&row, &x),
             GgmlType::Q6_K => q6_k(&row, &x),
+            GgmlType::F8_E4M3 => f8_e4m3(&row, &x),
             other => panic!("no kernel for {}", other.name()),
         };
 
@@ -290,6 +309,12 @@ mod tests {
             "{}: fused {got} != reference {reference}",
             ty.name()
         );
+    }
+
+    #[test]
+    fn f8_e4m3_matches_the_reference_exactly() {
+        assert_identical(GgmlType::F8_E4M3, 16);
+        assert_identical(GgmlType::F8_E4M3, 64);
     }
 
     #[test]
@@ -329,6 +354,7 @@ mod tests {
             GgmlType::Q4_0,
             GgmlType::Q5_K,
             GgmlType::Q6_K,
+            GgmlType::F8_E4M3,
         ] {
             assert!(supports(ty), "{} should be fused", ty.name());
         }

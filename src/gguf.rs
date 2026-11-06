@@ -52,6 +52,7 @@ pub enum GgmlType {
     I64,
     F64,
     BF16,
+    F8_E4M3,
     /// A type we can name but not size — the IQ family, mostly. Inspecting a
     /// model that uses one works; reading its bytes does not.
     Other(u32),
@@ -80,6 +81,7 @@ impl GgmlType {
             27 => Self::I64,
             28 => Self::F64,
             30 => Self::BF16,
+            31 | 39 => Self::F8_E4M3,
             other => Self::Other(other),
         }
     }
@@ -89,7 +91,7 @@ impl GgmlType {
         Some(match self {
             Self::F32 | Self::I32 => (1, 4),
             Self::F16 | Self::BF16 | Self::I16 => (1, 2),
-            Self::I8 => (1, 1),
+            Self::I8 | Self::F8_E4M3 => (1, 1),
             Self::F64 | Self::I64 => (1, 8),
             Self::Q4_0 => (32, 18),
             Self::Q4_1 => (32, 20),
@@ -136,6 +138,7 @@ impl GgmlType {
             Self::I64 => 27,
             Self::F64 => 28,
             Self::BF16 => 30,
+            Self::F8_E4M3 => 31,
             Self::Other(id) => id,
         }
     }
