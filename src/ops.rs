@@ -148,6 +148,106 @@ pub fn attention_online(
     }
 }
 
+/// Parameters for Multi-Head Latent Attention direct latent evaluation.
+#[derive(Clone, Copy, Debug)]
+pub struct MlaAttentionParams {
+    pub latent_dim: usize,
+    pub rope_dim: usize,
+    pub len: usize,
+    pub scale: f32,
+    pub logit_cap: Option<f32>,
+}
+
+/// Multi-Head Latent Attention (MLA) direct latent cache attention kernel.
+/// Evaluates attention scores directly between the query and cached latent KV vectors (c_KV),
+/// along with decoupled RoPE keys (k_R), accumulating into an attention-weighted latent vector sum
+/// without ever expanding historical per-head keys and values in memory.
+pub fn attention_mla_latent(
+    q_nope_projected: &[f32],
+    q_rope: &[f32],
+    latents: &[f32],
+    rope_keys: &[f32],
+    params: MlaAttentionParams,
+    out_latent_sum: &mut [f32],
+) {
+    let MlaAttentionParams {
+        latent_dim,
+        rope_dim,
+        len,
+        scale,
+        logit_cap,
+    } = params;
+    debug_assert_eq!(q_nope_projected.len(), latent_dim);
+    debug_assert_eq!(q_rope.len(), rope_dim);
+    debug_assert!(latents.len() >= len * latent_dim);
+    debug_assert!(rope_keys.len() >= len * rope_dim);
+    debug_assert_eq!(out_latent_sum.len(), latent_dim);
+
+    out_latent_sum.fill(0.0);
+    if len == 0 {
+        return;
+    }
+
+    let mut max_score = f32::NEG_INFINITY;
+    let mut denominator = 0.0f32;
+    let tile_size = 64.min(len);
+    let mut scores = [0.0f32; 64];
+
+    for start in (0..len).step_by(tile_size) {
+        let end = (start + tile_size).min(len);
+        for (i, past) in (start..end).enumerate() {
+            let lat_slice = &latents[past * latent_dim..(past + 1) * latent_dim];
+            let rope_slice = &rope_keys[past * rope_dim..(past + 1) * rope_dim];
+            let dot_nope = dot(q_nope_projected, lat_slice);
+            let dot_rope = dot(q_rope, rope_slice);
+            let mut score = (dot_nope + dot_rope) * scale;
+            if let Some(cap) = logit_cap {
+                score = cap * (score / cap).tanh();
+            }
+            scores[i] = score;
+        }
+
+        let tile_max = scores[..end - start]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !tile_max.is_finite() {
+            continue;
+        }
+
+        let next_max = max_score.max(tile_max);
+        let old_scale = if max_score.is_finite() {
+            (max_score - next_max).exp()
+        } else {
+            0.0
+        };
+
+        denominator *= old_scale;
+        for v in out_latent_sum.iter_mut() {
+            *v *= old_scale;
+        }
+
+        for (i, past) in (start..end).enumerate() {
+            if !scores[i].is_finite() {
+                continue;
+            }
+            let weight = (scores[i] - next_max).exp();
+            denominator += weight;
+            let lat_slice = &latents[past * latent_dim..(past + 1) * latent_dim];
+            for (slot, &val) in out_latent_sum.iter_mut().zip(lat_slice) {
+                *slot += weight * val;
+            }
+        }
+        max_score = next_max;
+    }
+
+    if denominator > 0.0 {
+        for v in out_latent_sum.iter_mut() {
+            *v /= denominator;
+        }
+    }
+}
+
 /// `out[r] = dot(matrix row r, x)`, row-major with rows contiguous.
 ///
 /// Rows are contiguous because that is how GGUF stores them, and walking them

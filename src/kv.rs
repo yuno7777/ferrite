@@ -85,6 +85,28 @@ impl MlaKvCache {
             }
         }
     }
+
+    /// Evaluates direct latent attention over cached latent representations.
+    pub fn attention(
+        &self,
+        layer: usize,
+        q_nope_projected: &[f32],
+        q_rope: &[f32],
+        params: crate::ops::MlaAttentionParams,
+        out_latent_sum: &mut [f32],
+    ) {
+        assert!(layer < self.layers);
+        let lat_start = layer * self.context * self.latent_dim;
+        let rope_start = layer * self.context * self.rope_dim;
+        crate::ops::attention_mla_latent(
+            q_nope_projected,
+            q_rope,
+            &self.latent[lat_start..],
+            &self.rope_key[rope_start..],
+            params,
+            out_latent_sum,
+        );
+    }
 }
 
 impl std::str::FromStr for KvCacheType {
@@ -1004,6 +1026,49 @@ mod tests {
         assert_eq!(cache.cache_bytes(), 2 * 4 * 5 * std::mem::size_of::<f32>());
         cache.truncate(2, 3);
         assert_eq!(cache.get(1, 2), (&[0.0, 0.0, 0.0][..], &[0.0, 0.0][..]));
+    }
+
+    #[test]
+    fn mla_cache_direct_attention_evaluates_correctly() {
+        let mut cache = MlaKvCache::new(1, 2, 2, 2);
+        // Token 0: latent [1.0, 0.0], rope_key [0.0, 1.0]
+        cache.store(0, 0, &[1.0, 0.0], &[0.0, 1.0]);
+        // Token 1: latent [0.0, 2.0], rope_key [1.0, 0.0]
+        cache.store(0, 1, &[0.0, 2.0], &[1.0, 0.0]);
+
+        let q_nope = [1.0, 0.0];
+        let q_rope = [0.0, 1.0];
+        let mut out = [0.0; 2];
+
+        // Evaluating attention over 2 tokens with scale 1.0
+        cache.attention(
+            0,
+            &q_nope,
+            &q_rope,
+            crate::ops::MlaAttentionParams {
+                latent_dim: 2,
+                rope_dim: 2,
+                len: 2,
+                scale: 1.0,
+                logit_cap: None,
+            },
+            &mut out,
+        );
+
+        // Token 0 score: dot(q_nope, [1, 0]) + dot(q_rope, [0, 1]) = 1 + 1 = 2.0
+        // Token 1 score: dot(q_nope, [0, 2]) + dot(q_rope, [1, 0]) = 0 + 0 = 0.0
+        // Softmax weights:
+        // exp(2 - 2) = 1.0
+        // exp(0 - 2) = exp(-2) ~= 0.135335
+        // den = 1.0 + exp(-2) ~= 1.135335
+        // w0 = 1.0 / 1.135335 ~= 0.8808
+        // w1 = exp(-2) / 1.135335 ~= 0.1192
+        // out[0] = w0 * 1.0 + w1 * 0.0 = 0.8808
+        // out[1] = w0 * 0.0 + w1 * 2.0 = 0.2384
+        let w0 = 1.0f32 / (1.0f32 + (-2.0f32).exp());
+        let w1 = (-2.0f32).exp() / (1.0f32 + (-2.0f32).exp());
+        assert!((out[0] - (w0 * 1.0)).abs() < 1e-5);
+        assert!((out[1] - (w1 * 2.0)).abs() < 1e-5);
     }
 
     #[test]
