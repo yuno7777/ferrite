@@ -31,6 +31,7 @@ pub mod sample;
 pub mod scheduler;
 pub mod server;
 pub mod speculative;
+pub mod split;
 pub mod synth;
 pub mod template;
 pub mod tokenizer;
@@ -63,6 +64,7 @@ pub use speculative::{
     MedusaEngine, MedusaHead, MtpEngine, MtpTreeEngine, SpeculativeEngine, SpeculativeStats,
     SpeculativeTreeEngine,
 };
+pub use split::{split_gguf, SplitOptions};
 pub use template::{ChatMessage, ChatTemplate};
 pub use tokenizer::train::{
     train_bpe, train_vocab_file, write_vocab_gguf, TrainConfig, TrainedVocab,

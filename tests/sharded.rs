@@ -337,3 +337,96 @@ fn test_sharded_model_inference_matches_single_file() {
     let _ = fs::remove_file(shard0_path);
     let _ = fs::remove_file(shard1_path);
 }
+
+#[test]
+fn test_split_gguf_roundtrip() {
+    let mut dir = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    dir.push(format!("ferrite_split_test_{nanos}"));
+    fs::create_dir_all(&dir).unwrap();
+
+    let single_path = dir.join("monolith.gguf");
+    let dim = 32u64;
+    let vocab = 16u64;
+    let embed_bytes = pattern((dim * vocab * 4) as usize, 10);
+    let q_bytes = pattern((dim * dim * 4) as usize, 20);
+    let k_bytes = pattern((dim * dim * 4) as usize, 30);
+    let v_bytes = pattern((dim * dim * 4) as usize, 40);
+    let out_bytes = pattern((dim * dim * 4) as usize, 50);
+
+    let single_builder = Builder::new()
+        .meta("general.architecture", Value::String("llama".into()))
+        .meta("llama.block_count", Value::U32(1))
+        .meta("llama.embedding_length", Value::U32(dim as u32))
+        .meta("llama.feed_forward_length", Value::U32(dim as u32))
+        .meta("llama.attention.head_count", Value::U32(1))
+        .meta("llama.attention.head_count_kv", Value::U32(1))
+        .meta("llama.context_length", Value::U32(128))
+        .meta("llama.rope.freq_base", Value::F32(10000.0))
+        .tensor(
+            "token_embd.weight",
+            &[dim, vocab],
+            GgmlType::F32,
+            embed_bytes.clone(),
+        )
+        .tensor(
+            "blk.0.attn_q.weight",
+            &[dim, dim],
+            GgmlType::F32,
+            q_bytes.clone(),
+        )
+        .tensor(
+            "blk.0.attn_k.weight",
+            &[dim, dim],
+            GgmlType::F32,
+            k_bytes.clone(),
+        )
+        .tensor(
+            "blk.0.attn_v.weight",
+            &[dim, dim],
+            GgmlType::F32,
+            v_bytes.clone(),
+        )
+        .tensor(
+            "blk.0.attn_output.weight",
+            &[dim, dim],
+            GgmlType::F32,
+            out_bytes.clone(),
+        );
+    single_builder.write(&single_path).unwrap();
+
+    let split_prefix = dir.join("sharded_model");
+    let shards = ferrite::split_gguf(
+        &single_path,
+        &split_prefix,
+        &ferrite::SplitOptions {
+            shards: 2,
+            max_bytes_per_shard: None,
+        },
+    )
+    .expect("split_gguf");
+
+    assert_eq!(shards.len(), 2);
+    for shard in &shards {
+        assert!(shard.exists());
+    }
+
+    let loaded_shards = Gguf::open(&shards[0]).expect("open sharded from primary");
+    assert_eq!(loaded_shards.shard_count(), 2);
+    assert_eq!(loaded_shards.tensors.len(), 5);
+
+    let orig_gguf = Gguf::open(&single_path).unwrap();
+    for t_orig in &orig_gguf.tensors {
+        let t_split = loaded_shards
+            .tensor(&t_orig.name)
+            .expect("tensor in split model");
+        let b1 = orig_gguf.tensor_bytes(t_orig).unwrap();
+        let b2 = loaded_shards.tensor_bytes(t_split).unwrap();
+        assert_eq!(b1, b2, "tensor data mismatch for {}", t_orig.name);
+    }
+
+    let _ = fs::remove_dir_all(dir);
+}
