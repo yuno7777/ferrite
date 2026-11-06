@@ -68,7 +68,7 @@ pub use paged::{
     PhysicalBlock, BLOCKS_PER_PAGE_TABLE, DEFAULT_BLOCK_TOKENS,
 };
 pub use prefill::{AsyncChunkedPrefill, PrefillChunkEvent};
-pub use prefix::{RadixCache, RadixNode};
+pub use prefix::{PageSwapManager, RadixCache, RadixNode};
 pub use prune::{
     compute_channel_l2_norms, compute_head_l2_norms, prune_channels_slice, prune_heads_slice,
     prune_unstructured_slice, select_heads_to_prune, ModelPruner, PruningStats,
