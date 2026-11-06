@@ -42,6 +42,7 @@ pub fn softmax(x: &mut [f32]) {
 }
 
 /// Parameters for [`attention_online`].
+#[derive(Clone, Copy, Debug)]
 pub struct AttentionParams {
     pub row_width: usize,
     pub offset: usize,
@@ -268,6 +269,217 @@ pub fn attention_online_dynamic(
             *v *= inv_den;
         }
     }
+}
+
+/// Single context partition state for FlashDecoding parallel attention.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlashDecodingSplit {
+    pub max_score: f32,
+    pub denominator: f32,
+    pub output: Vec<f32>,
+}
+
+impl FlashDecodingSplit {
+    pub fn new(dim: usize) -> Self {
+        Self {
+            max_score: f32::NEG_INFINITY,
+            denominator: 0.0,
+            output: vec![0.0; dim],
+        }
+    }
+
+    /// Combines two split states using online softmax rescaling.
+    pub fn reduce(&self, other: &Self) -> Self {
+        if !self.max_score.is_finite() && !other.max_score.is_finite() {
+            return self.clone();
+        }
+        if !self.max_score.is_finite() {
+            return other.clone();
+        }
+        if !other.max_score.is_finite() {
+            return self.clone();
+        }
+
+        let new_max = self.max_score.max(other.max_score);
+        let alpha = (self.max_score - new_max).exp();
+        let beta = (other.max_score - new_max).exp();
+
+        let new_denom = alpha * self.denominator + beta * other.denominator;
+        let mut new_out = vec![0.0f32; self.output.len()];
+        for (i, slot) in new_out.iter_mut().enumerate() {
+            *slot = alpha * self.output[i] + beta * other.output[i];
+        }
+
+        Self {
+            max_score: new_max,
+            denominator: new_denom,
+            output: new_out,
+        }
+    }
+
+    /// Finalizes the combined split into the normalized attention vector.
+    pub fn finalize(&self, out: &mut [f32]) {
+        if self.denominator > 0.0 {
+            let inv_denom = 1.0 / self.denominator;
+            for (slot, &val) in out.iter_mut().zip(&self.output) {
+                *slot = val * inv_denom;
+            }
+        } else {
+            out.fill(0.0);
+        }
+    }
+}
+
+/// Logarithmic tree reduction combining S splits in O(log S) rounds.
+pub fn tree_reduce_splits(mut splits: Vec<FlashDecodingSplit>) -> FlashDecodingSplit {
+    if splits.is_empty() {
+        return FlashDecodingSplit {
+            max_score: f32::NEG_INFINITY,
+            denominator: 0.0,
+            output: Vec::new(),
+        };
+    }
+    while splits.len() > 1 {
+        let mut next_level = Vec::with_capacity(splits.len().div_ceil(2));
+        for chunk in splits.chunks(2) {
+            if chunk.len() == 2 {
+                next_level.push(chunk[0].reduce(&chunk[1]));
+            } else {
+                next_level.push(chunk[0].clone());
+            }
+        }
+        splits = next_level;
+    }
+    splits.pop().unwrap()
+}
+
+/// Compute partial attention for a split slice of the KV cache in `[split_start..split_end]`.
+pub fn compute_flash_decoding_split(
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    params: &AttentionParams,
+    split_start: usize,
+    split_end: usize,
+) -> FlashDecodingSplit {
+    let AttentionParams {
+        row_width,
+        offset,
+        scale,
+        logit_cap,
+        window,
+        position,
+        v_row_width,
+        v_offset,
+        ..
+    } = *params;
+    let val_row_width = v_row_width.unwrap_or(row_width);
+    let val_offset = v_offset.unwrap_or(offset);
+    let q_len = query.len();
+    let v_dim = q_len;
+
+    let split_len = split_end.saturating_sub(split_start);
+    if split_len == 0 {
+        return FlashDecodingSplit::new(v_dim);
+    }
+
+    let mut scores = vec![0.0f32; split_len];
+    for (i, past) in (split_start..split_end).enumerate() {
+        if window.is_some_and(|w| position.saturating_sub(past) >= w) {
+            scores[i] = f32::NEG_INFINITY;
+            continue;
+        }
+        let row = past * row_width + offset;
+        let mut score = dot(query, &keys[row..row + q_len]) * scale;
+        if let Some(cap) = logit_cap {
+            score = cap * (score / cap).tanh();
+        }
+        scores[i] = score;
+    }
+
+    let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+    if !max_score.is_finite() {
+        return FlashDecodingSplit::new(v_dim);
+    }
+
+    let mut denom = 0.0f32;
+    let mut out = vec![0.0f32; v_dim];
+
+    for (i, past) in (split_start..split_end).enumerate() {
+        let s = scores[i];
+        if s > f32::NEG_INFINITY {
+            let p = (s - max_score).exp();
+            denom += p;
+            let v_row = past * val_row_width + val_offset;
+            let val_slice = &values[v_row..v_row + v_dim];
+            for (out_slot, &v) in out.iter_mut().zip(val_slice) {
+                *out_slot += p * v;
+            }
+        }
+    }
+
+    FlashDecodingSplit {
+        max_score,
+        denominator: denom,
+        output: out,
+    }
+}
+
+/// FlashDecoding parallel attention over partitioned KV cache context splits
+/// with logarithmic tree reduction.
+pub fn flash_decoding_attention(
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    params: AttentionParams,
+    threads: usize,
+    out: &mut [f32],
+) {
+    let len = params.len;
+    if threads <= 1 || len <= 128 {
+        attention_online(query, keys, values, params, out);
+        return;
+    }
+
+    let num_splits = threads.min(len.div_ceil(64));
+    if num_splits <= 1 {
+        attention_online(query, keys, values, params, out);
+        return;
+    }
+
+    let chunk_size = len.div_ceil(num_splits);
+
+    let splits = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..num_splits)
+            .map(|split_idx| {
+                let split_start = split_idx * chunk_size;
+                let split_end = ((split_idx + 1) * chunk_size).min(len);
+                let params_ref = &params;
+                scope.spawn(move || {
+                    compute_flash_decoding_split(
+                        query,
+                        keys,
+                        values,
+                        params_ref,
+                        split_start,
+                        split_end,
+                    )
+                })
+            })
+            .collect();
+
+        workers
+            .into_iter()
+            .map(|w| {
+                w.join()
+                    .unwrap_or_else(|_| FlashDecodingSplit::new(out.len()))
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let reduced = tree_reduce_splits(splits);
+    reduced.finalize(out);
 }
 
 /// Parameters for Multi-Head Latent Attention direct latent evaluation.

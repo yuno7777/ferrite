@@ -51,7 +51,10 @@ pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType, MlaKvCache};
 pub use lora::{LoraAdapter, LoraPair};
 pub use map::{Mmap, MmapMut};
 pub use model::ChunkedPrefill;
-pub use ops::{dot_i8, gemm_int8_fused, quantize_int8_dynamic, RopeCache};
+pub use ops::{
+    dot_i8, flash_decoding_attention, gemm_int8_fused, quantize_int8_dynamic, tree_reduce_splits,
+    FlashDecodingSplit, RopeCache,
+};
 pub use paged::{
     BlockId, HierarchicalPageTable, PageTable, PagedPool, PagedSequence, PagedSequenceV2,
     PhysicalBlock, BLOCKS_PER_PAGE_TABLE, DEFAULT_BLOCK_TOKENS,
