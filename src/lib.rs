@@ -11,6 +11,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+pub mod audio;
 pub mod convert;
 pub mod distributed;
 pub mod dualpipe;
@@ -45,6 +46,10 @@ pub mod tools;
 pub mod tp;
 pub mod vision;
 
+pub use audio::{
+    extract_log_mel_spectrogram, stitch_audio_and_text_embeddings, AudioPatchExtractor,
+    AudioProjector, AudioWaveform, LogMelSpectrogram, SpectrogramConfig,
+};
 pub use convert::{convert_safetensors_to_gguf, JsonValue, SafeTensorsHeader};
 pub use dualpipe::{
     DualPipeDirection, DualPipeEngine, DualPipeOp, DualPipeSchedule, DualPipeStep, LayerPartition,
