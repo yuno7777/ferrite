@@ -24,6 +24,7 @@ usage:
   ferrite convert <src> <dst.gguf>  convert SafeTensors to GGUF format
   ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>
   ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]
+  ferrite embed <model> <text...>   generate vector embeddings & similarity
 
 run/serve options:
   -n <count>      tokens to generate (default 128)
@@ -66,6 +67,7 @@ fn main() -> ExitCode {
         Some("convert") => cmd_convert(&args[1..]),
         Some("lora") => cmd_lora(&args[1..]),
         Some("train-vocab") => cmd_train_vocab(&args[1..]),
+        Some("embed") => cmd_embed(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -130,6 +132,89 @@ fn cmd_train_vocab(args: &[String]) -> std::io::Result<()> {
         start.elapsed(),
         out_path.display()
     );
+    Ok(())
+}
+
+fn cmd_embed(args: &[String]) -> std::io::Result<()> {
+    if args.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite embed <model> <text...> [--pooling <mean|cls|last>] [--compare]",
+        ));
+    }
+    let path = lmstudio::resolve(&args[0])?;
+    let mut texts = Vec::new();
+    let mut pooling = ferrite::Pooling::Mean;
+    let mut compare = false;
+    let mut threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--pooling" && i + 1 < args.len() {
+            pooling = args[i + 1].parse().map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}"))
+            })?;
+            i += 2;
+        } else if args[i] == "--compare" {
+            compare = true;
+            i += 1;
+        } else if args[i] == "--threads" && i + 1 < args.len() {
+            threads = args[i + 1].parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid threads: {e}"),
+                )
+            })?;
+            i += 2;
+        } else if !args[i].starts_with("--") {
+            texts.push(args[i].clone());
+            i += 1;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unknown option {}", args[i]),
+            ));
+        }
+    }
+    if texts.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no input text provided to embed",
+        ));
+    }
+
+    let gguf = Gguf::open(&path)?;
+    let model = Model::load(&gguf)?;
+    let tokenizer = Tokenizer::from_gguf(&gguf)?;
+    let engine = ferrite::EmbedEngine::new(&model, pooling, true);
+
+    let mut state = State::new(&model.config);
+    state.threads = threads;
+
+    let mut vectors = Vec::new();
+    for (idx, text) in texts.iter().enumerate() {
+        let tokens = tokenizer.encode(text, true);
+        let vector = engine.embed(&mut state, &tokens)?;
+        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        println!(
+            "[{idx}] \"{text}\" -> dim {}, L2 norm: {norm:.4}",
+            vector.len()
+        );
+        vectors.push(vector);
+    }
+
+    if compare && vectors.len() >= 2 {
+        println!("\nCosine Similarity Matrix:");
+        for i in 0..vectors.len() {
+            for j in 0..vectors.len() {
+                let sim = ferrite::cosine_similarity(&vectors[i], &vectors[j]);
+                print!("{sim:8.4} ");
+            }
+            println!("  [{i}] \"{}\"", texts[i]);
+        }
+    }
+
     Ok(())
 }
 

@@ -1371,6 +1371,233 @@ impl<'a> Model<'a> {
         Ok(())
     }
 
+    /// Compute contextualized hidden states for a sequence of tokens without computing final vocabulary logits.
+    ///
+    /// Stores the normalized hidden representations of shape `[tokens.len() * embedding]` into `out_states`.
+    pub fn embed_hidden_states(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        out_states: &mut [f32],
+    ) -> Result<()> {
+        let n = tokens.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let c = &self.config;
+        if out_states.len() != n * c.embedding {
+            return Err(bad(format!(
+                "out_states length {} does not match n {} * embedding {}",
+                out_states.len(),
+                n,
+                c.embedding
+            )));
+        }
+
+        let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
+        let att_dim = c.heads * head_dim;
+
+        let mut x_batch = vec![0.0f32; n * c.embedding];
+        for (b, &tok) in tokens.iter().enumerate() {
+            let row = &mut x_batch[b * c.embedding..(b + 1) * c.embedding];
+            self.token_embd.row(tok as usize, row)?;
+        }
+        if let Some(scale) = c.embedding_scale {
+            for v in x_batch.iter_mut() {
+                *v *= scale;
+            }
+        }
+
+        let mut xb_batch = vec![0.0f32; n * c.embedding];
+        let mut xb2_batch = vec![0.0f32; n * c.embedding];
+        let mut att_batch = vec![0.0f32; n * att_dim];
+        let mut q_batch = vec![0.0f32; n * att_dim];
+        let mut k_batch = vec![0.0f32; n * kv_dim];
+        let mut v_batch = vec![0.0f32; n * kv_dim];
+        let mut hb_batch = vec![0.0f32; n * c.ffn];
+        let mut hb2_batch = vec![0.0f32; n * c.ffn];
+
+        let State {
+            workspace,
+            kv_cache,
+            threads,
+            ..
+        } = state;
+
+        let is_sliding_layer = |idx: usize| (idx % 2 == 0) && c.sliding_window.is_some();
+        let window = c.sliding_window.unwrap_or(usize::MAX);
+
+        for (index, layer) in self.layers.iter().enumerate() {
+            for b in 0..n {
+                let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                ops::rms_norm(x_tok, &layer.attn_norm, c.eps, xb_tok);
+            }
+
+            layer
+                .wq
+                .matmul_threaded(&xb_batch, &mut q_batch, n, *threads, workspace)?;
+            if let Some(bq) = &layer.bq {
+                for b in 0..n {
+                    let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
+                    for (slot, val) in q_tok.iter_mut().zip(bq) {
+                        *slot += val;
+                    }
+                }
+            }
+            if let Some(l) = &layer.lora_wq {
+                l.apply_batched_threaded(&xb_batch, n, &mut q_batch, *threads)?;
+            }
+
+            layer
+                .wk
+                .matmul_threaded(&xb_batch, &mut k_batch, n, *threads, workspace)?;
+            if let Some(bk) = &layer.bk {
+                for b in 0..n {
+                    let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
+                    for (slot, val) in k_tok.iter_mut().zip(bk) {
+                        *slot += val;
+                    }
+                }
+            }
+            if let Some(l) = &layer.lora_wk {
+                l.apply_batched_threaded(&xb_batch, n, &mut k_batch, *threads)?;
+            }
+
+            layer
+                .wv
+                .matmul_threaded(&xb_batch, &mut v_batch, n, *threads, workspace)?;
+            if let Some(bv) = &layer.bv {
+                for b in 0..n {
+                    let v_tok = &mut v_batch[b * kv_dim..(b + 1) * kv_dim];
+                    for (slot, val) in v_tok.iter_mut().zip(bv) {
+                        *slot += val;
+                    }
+                }
+            }
+            if let Some(l) = &layer.lora_wv {
+                l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
+            }
+
+            for b in 0..n {
+                let pos = b;
+                let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
+                let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
+                let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
+
+                for head in 0..c.heads {
+                    ops::rope_scaled(
+                        &mut q_tok[head * head_dim..(head + 1) * head_dim],
+                        pos,
+                        c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
+                    );
+                }
+                for head in 0..c.kv_heads {
+                    ops::rope_scaled(
+                        &mut k_tok[head * head_dim..(head + 1) * head_dim],
+                        pos,
+                        c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
+                    );
+                }
+
+                kv_cache.store(index, pos, k_tok, v_tok);
+            }
+
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let is_sliding = is_sliding_layer(index);
+            for b in 0..n {
+                let pos = b;
+                let q_tok = &q_batch[b * att_dim..(b + 1) * att_dim];
+                let att_tok = &mut att_batch[b * att_dim..(b + 1) * att_dim];
+
+                for head in 0..c.heads {
+                    let kv_head = head / group;
+                    let query = &q_tok[head * head_dim..(head + 1) * head_dim];
+
+                    let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
+                    kv_cache.attention(
+                        index,
+                        query,
+                        out,
+                        ops::AttentionParams {
+                            row_width: kv_dim,
+                            offset: kv_head * head_dim,
+                            len: pos + 1,
+                            scale,
+                            logit_cap: c.attn_logit_softcapping,
+                            window: is_sliding.then_some(window),
+                            position: pos,
+                            tile_size: 64,
+                        },
+                    );
+                }
+            }
+
+            layer
+                .wo
+                .matmul_threaded(&att_batch, &mut xb2_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_wo {
+                l.apply_batched_threaded(&att_batch, n, &mut xb2_batch, *threads)?;
+            }
+            if let Some(post_attn_norm) = &layer.post_attn_norm {
+                for b in 0..n {
+                    let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
+                    let tok_out = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                    ops::rms_norm(tok_in, post_attn_norm, c.eps, tok_out);
+                }
+                for (slot, delta) in x_batch.iter_mut().zip(xb_batch.iter()) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                    *slot += delta;
+                }
+            }
+
+            for b in 0..n {
+                let x_tok = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+                let xb_tok = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                ops::rms_norm(x_tok, &layer.ffn_norm, c.eps, xb_tok);
+            }
+
+            layer.eval_ffn(
+                c,
+                &xb_batch,
+                n,
+                &mut xb2_batch,
+                &mut hb_batch,
+                &mut hb2_batch,
+                *threads,
+                workspace,
+            )?;
+            if let Some(post_ffn_norm) = &layer.post_ffn_norm {
+                for b in 0..n {
+                    let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
+                    let tok_out = &mut xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                    ops::rms_norm(tok_in, post_ffn_norm, c.eps, tok_out);
+                }
+                for (slot, delta) in x_batch.iter_mut().zip(xb_batch.iter()) {
+                    *slot += delta;
+                }
+            } else {
+                for (slot, delta) in x_batch.iter_mut().zip(xb2_batch.iter()) {
+                    *slot += delta;
+                }
+            }
+        }
+
+        for b in 0..n {
+            let tok_x = &x_batch[b * c.embedding..(b + 1) * c.embedding];
+            let tok_out = &mut out_states[b * c.embedding..(b + 1) * c.embedding];
+            ops::rms_norm(tok_x, &self.output_norm, c.eps, tok_out);
+        }
+        Ok(())
+    }
+
     /// Process a batch of prompt/speculative tokens in one pass and emit the logits
     /// for *every* token in the batch into `all_logits` (sized `n * c.vocab`).
     ///

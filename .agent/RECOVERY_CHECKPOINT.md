@@ -264,4 +264,19 @@
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` prints exactly 1 line (0 external dependencies).
 
+## Autonomous Execution — Phase 35 Completion
+- Branch: `codex/audit-baseline`
+- Phase 35 (Embedding Model & Vector Search Engine):
+  - Implemented `Model::embed_hidden_states` in `src/model.rs` returning normalized token activations while skipping vocabulary projection matrix compute.
+  - Created `src/embed.rs` with `EmbedEngine`, pooling modes (`Mean`, `Cls`, `Last`), unit `l2_normalize`, and `cosine_similarity`.
+  - Added CLI `ferrite embed <model> <text...> [--pooling <mean|cls|last>] [--compare]` in `src/main.rs`.
+  - Added OpenAI-compatible `/v1/embeddings` endpoint in `src/server.rs` supporting single strings and batch string arrays.
+  - Added integration tests in `tests/embed.rs` verifying pooling strategies, unit L2 normalization, cosine distance, and HTTP `/v1/embeddings` API flow.
+- Validation:
+  - `cargo test --all-targets` passes (116 unit tests, 75 integration tests, 100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` prints exactly 1 line (0 external dependencies).
+
+
 

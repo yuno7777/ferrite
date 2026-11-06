@@ -298,10 +298,11 @@
 
 ### Phase 35: Embedding Model & Vector Search Engine (`ferrite embed` + `/v1/embeddings`)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Support embedding models (BERT, Nomic, BGE, Gemma-Embed) with pooling strategies (mean, CLS, last token), L2 normalization, cosine distance CLI, and OpenAI-compatible `/v1/embeddings` endpoint.
-- Files: `src/embed.rs`, `src/server.rs`, `src/main.rs`, `tests/embed.rs`
+- Files: `src/embed.rs`, `src/model.rs`, `src/server.rs`, `src/main.rs`, `tests/embed.rs`
 - Acceptance: CLI `ferrite embed` and `/v1/embeddings` returning unit-normalized float vectors.
+- Completion evidence: Implemented `Model::embed_hidden_states` in `src/model.rs` extracting normalized hidden states while skipping vocabulary matrix projection. Implemented `EmbedEngine`, pooling modes (`Mean`, `Cls`, `Last`), unit `l2_normalize`, and `cosine_similarity` in `src/embed.rs`. Added CLI `ferrite embed <model> <text...>` with similarity matrix comparison in `src/main.rs`. Added `/v1/embeddings` endpoint in `src/server.rs`. Verified unit and integration coverage in `tests/embed.rs` with 100% pass rate.
 
 ### Phase 36: Model Merging Engine (SLERP, TIES, DARE) (`ferrite merge`)
 - Priority: P2

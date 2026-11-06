@@ -195,6 +195,7 @@ impl<'a> Server<'a> {
                     self.handle_non_streaming(stream, &params)
                 }
             }
+            ("POST", "/v1/embeddings") => self.handle_embeddings(stream, &body_str),
             _ => self.write_error(stream, 404, "Not Found"),
         }
     }
@@ -377,6 +378,45 @@ impl<'a> Server<'a> {
             escape_json(msg)
         );
         self.write_json(stream, status, &json)
+    }
+
+    fn handle_embeddings(&self, stream: &mut TcpStream, body: &str) -> Result<()> {
+        let inputs = extract_string_or_array(body, "input");
+        if inputs.is_empty() {
+            return self.write_error(stream, 400, "Missing 'input' in request");
+        }
+
+        let engine = crate::embed::EmbedEngine::new(self.model, crate::embed::Pooling::Mean, true);
+        let mut state = State::with_kv_cache(
+            &self.model.config,
+            self.config.context,
+            self.config.kv_cache,
+        );
+        state.threads = self.config.threads;
+
+        let mut data_items = Vec::new();
+        let mut total_tokens = 0;
+
+        for (idx, text) in inputs.iter().enumerate() {
+            let tokens = self.tokenizer.encode(text, true);
+            total_tokens += tokens.len();
+            let vector = engine.embed(&mut state, &tokens)?;
+            let floats_str = vector
+                .iter()
+                .map(|f| format!("{f:.6}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            data_items.push(format!(
+                r#"{{"object":"embedding","index":{idx},"embedding":[{floats_str}]}}"#
+            ));
+        }
+
+        let json = format!(
+            r#"{{"object":"list","data":[{}],"model":"ferrite-model","usage":{{"prompt_tokens":{total_tokens},"total_tokens":{total_tokens}}}}}"#,
+            data_items.join(",")
+        );
+
+        self.write_json(stream, 200, &json)
     }
 }
 
@@ -579,6 +619,54 @@ fn extract_messages(json: &str) -> Vec<(String, String)> {
         let role = extract_string(obj_slice, "role").unwrap_or_else(|| "user".into());
         if let Some(content) = extract_string(obj_slice, "content") {
             out.push((role, content));
+        }
+    }
+    out
+}
+
+fn extract_string_or_array(json: &str, key: &str) -> Vec<String> {
+    if let Some(s) = extract_string(json, key) {
+        return vec![s];
+    }
+    let pattern = format!("\"{key}\"");
+    let Some(key_pos) = json.find(&pattern) else {
+        return Vec::new();
+    };
+    let after_key = &json[key_pos + pattern.len()..];
+    let Some(colon_pos) = after_key.find(':') else {
+        return Vec::new();
+    };
+    let after_colon = after_key[colon_pos + 1..].trim_start();
+    if !after_colon.starts_with('[') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut in_str = false;
+    let mut cur = String::new();
+    let mut chars = after_colon[1..].chars();
+    while let Some(c) = chars.next() {
+        if in_str {
+            if c == '"' {
+                in_str = false;
+                out.push(cur.clone());
+                cur.clear();
+            } else if c == '\\' {
+                if let Some(escaped) = chars.next() {
+                    match escaped {
+                        '"' => cur.push('"'),
+                        '\\' => cur.push('\\'),
+                        'n' => cur.push('\n'),
+                        't' => cur.push('\t'),
+                        other => cur.push(other),
+                    }
+                }
+            } else {
+                cur.push(c);
+            }
+        } else if c == '"' {
+            in_str = true;
+        } else if c == ']' {
+            break;
         }
     }
     out
