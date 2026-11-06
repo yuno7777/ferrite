@@ -655,9 +655,35 @@ impl<'a> Weight<'a> {
     }
 
     #[inline]
-    fn row_slice(&self, index: usize) -> &'a [u8] {
+    pub fn row_slice(&self, index: usize) -> &'a [u8] {
         let start = index * self.row_bytes;
         &self.bytes[start..start + self.row_bytes]
+    }
+
+    #[inline]
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Construct a Weight directly from raw bytes, type, and dimensions.
+    pub fn from_raw(bytes: &'a [u8], ty: GgmlType, rows: usize, cols: usize) -> Option<Self> {
+        let (block, size) = ty.layout()?;
+        let block = block as usize;
+        let size = size as usize;
+        if cols % block != 0 {
+            return None;
+        }
+        let row_bytes = (cols / block) * size;
+        if bytes.len() < rows * row_bytes {
+            return None;
+        }
+        Some(Self {
+            rows,
+            cols,
+            ty,
+            row_bytes,
+            bytes: &bytes[..rows * row_bytes],
+        })
     }
 }
 
