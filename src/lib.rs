@@ -48,7 +48,10 @@ pub use lora::{LoraAdapter, LoraPair};
 pub use map::Mmap;
 pub use model::ChunkedPrefill;
 pub use ops::{dot_i8, gemm_int8_fused, quantize_int8_dynamic, RopeCache};
-pub use paged::{BlockId, PagedPool, PagedSequence, PhysicalBlock, DEFAULT_BLOCK_TOKENS};
+pub use paged::{
+    BlockId, HierarchicalPageTable, PageTable, PagedPool, PagedSequence, PagedSequenceV2,
+    PhysicalBlock, BLOCKS_PER_PAGE_TABLE, DEFAULT_BLOCK_TOKENS,
+};
 pub use prefix::{RadixCache, RadixNode};
 pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, dot_gptq_int4};
 pub use quant::quantize::{quantize_file, quantize_model};
