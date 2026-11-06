@@ -1163,6 +1163,7 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
         threads,
         context,
         kv_cache,
+        tenant_registry: None,
     };
 
     let server = ferrite::server::Server::new(model, tokenizer, config);

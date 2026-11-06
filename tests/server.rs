@@ -152,6 +152,7 @@ fn setup_server(
         threads: 2,
         context: 16,
         kv_cache: ferrite::kv::KvCacheType::F32,
+        tenant_registry: None,
     };
 
     let server = Server::new(model, tokenizer, config);
@@ -388,6 +389,226 @@ fn test_chat_completions_tools_streaming() {
 
     assert!(!sse_lines.is_empty(), "expected SSE data chunks");
     assert_eq!(sse_lines.last().map(String::as_str), Some("data: [DONE]"));
+
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_tenant_priority_queue() {
+    use ferrite::tenant::{PriorityRequestQueue, RequestPriority};
+
+    let queue = PriorityRequestQueue::new();
+    assert!(queue.is_empty());
+
+    // Push items with different priorities
+    queue.push(RequestPriority::Standard, "std_1");
+    queue.push(RequestPriority::High, "high_1");
+    queue.push(RequestPriority::Background, "bg_1");
+    queue.push(RequestPriority::Critical, "crit_1");
+    queue.push(RequestPriority::High, "high_2");
+    queue.push(RequestPriority::Critical, "crit_2");
+
+    assert_eq!(queue.len(), 6);
+
+    // Pop order must be: Critical (FIFO: crit_1, crit_2), High (FIFO: high_1, high_2), Standard (std_1), Background (bg_1)
+    assert_eq!(queue.try_pop(), Some("crit_1"));
+    assert_eq!(queue.try_pop(), Some("crit_2"));
+    assert_eq!(queue.try_pop(), Some("high_1"));
+    assert_eq!(queue.try_pop(), Some("high_2"));
+    assert_eq!(queue.try_pop(), Some("std_1"));
+    assert_eq!(queue.try_pop(), Some("bg_1"));
+    assert_eq!(queue.try_pop(), None);
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn test_tenant_token_bucket() {
+    use ferrite::tenant::TokenBucket;
+
+    let mut bucket = TokenBucket::new(2.0, 10.0);
+    assert!(bucket.try_consume(1.0));
+    assert!(bucket.try_consume(1.0));
+    // Now bucket has 0 tokens left
+    assert!(!bucket.try_consume(1.0));
+
+    // After a brief sleep tokens refill
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(bucket.try_consume(1.0));
+}
+
+#[test]
+fn test_tenant_server_admission_and_rate_limit() {
+    use ferrite::tenant::{RequestPriority, TenantConfig, TenantRegistry};
+
+    let path = write_fixture("tenant_server");
+    let gguf = Box::leak(Box::new(Gguf::open(&path).expect("open")));
+    let model = Box::leak(Box::new(Model::load(gguf).expect("load")));
+    let tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(gguf).expect("tokenizer")));
+
+    let registry = Arc::new(TenantRegistry::new());
+    registry.register(TenantConfig::new(
+        "alpha",
+        "key-alpha",
+        RequestPriority::Standard,
+        1.0, // 1 req/sec
+        1.0, // burst capacity 1
+        10,
+    ));
+    registry.register(TenantConfig::new(
+        "beta",
+        "key-beta",
+        RequestPriority::High,
+        100.0,
+        100.0,
+        10,
+    ));
+
+    let config = ServerConfig {
+        host: "127.0.0.1".into(),
+        port: 0,
+        threads: 2,
+        context: 16,
+        kv_cache: ferrite::kv::KvCacheType::F32,
+        tenant_registry: Some(Arc::clone(&registry)),
+    };
+
+    let server = Server::new(model, tokenizer, config);
+    let listener = server.listen().expect("bind listener");
+    let port = listener.local_addr().expect("local addr").port();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_signal = Arc::clone(&shutdown);
+
+    let handle = std::thread::spawn(move || server.serve_with_shutdown(&listener, shutdown_signal));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // 1. Request with no authentication to completions should fail with 401
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let req_body =
+            r#"{"messages":[{"role":"user","content":"t0"}],"max_tokens":1,"stream":false}"#;
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+        stream.write_all(req.as_bytes()).expect("write request");
+
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).expect("read status");
+        assert!(
+            status_line.contains("401 Unauthorized"),
+            "expected 401, got {status_line}"
+        );
+    }
+
+    // 2. Request with invalid API key should fail with 401
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let req_body =
+            r#"{"messages":[{"role":"user","content":"t0"}],"max_tokens":1,"stream":false}"#;
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer invalid-key\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+        stream.write_all(req.as_bytes()).expect("write request");
+
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).expect("read status");
+        assert!(
+            status_line.contains("401 Unauthorized"),
+            "expected 401, got {status_line}"
+        );
+    }
+
+    // 3. Request with valid API key for alpha should succeed (200 OK)
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let req_body =
+            r#"{"messages":[{"role":"user","content":"t0"}],"max_tokens":1,"stream":false}"#;
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer key-alpha\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+        stream.write_all(req.as_bytes()).expect("write request");
+
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).expect("read status");
+        assert!(
+            status_line.contains("200 OK"),
+            "expected 200, got {status_line}"
+        );
+    }
+
+    // 4. Second immediate request from alpha should be rate limited (429 Too Many Requests)
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let req_body =
+            r#"{"messages":[{"role":"user","content":"t0"}],"max_tokens":1,"stream":false}"#;
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer key-alpha\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+        stream.write_all(req.as_bytes()).expect("write request");
+
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).expect("read status");
+        assert!(
+            status_line.contains("429 Too Many Requests"),
+            "expected 429, got {status_line}"
+        );
+    }
+
+    // 5. Request from beta should succeed despite alpha being rate limited (tenant isolation)
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let req_body =
+            r#"{"messages":[{"role":"user","content":"t0"}],"max_tokens":1,"stream":false}"#;
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer key-beta\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+            req_body.len(),
+            req_body
+        );
+        stream.write_all(req.as_bytes()).expect("write request");
+
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).expect("read status");
+        assert!(
+            status_line.contains("200 OK"),
+            "expected 200, got {status_line}"
+        );
+    }
+
+    // 6. Inspect tenant metrics endpoint
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .write_all(b"GET /v1/tenants/metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer key-beta\r\n\r\n")
+            .expect("write request");
+
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).expect("read status");
+        assert!(
+            status_line.contains("200 OK"),
+            "expected 200, got {status_line}"
+        );
+
+        let mut resp = String::new();
+        reader.read_to_string(&mut resp).expect("read metrics");
+        assert!(resp.contains("\"alpha\""));
+        assert!(resp.contains("\"beta\""));
+        assert!(resp.contains("\"rate_limited_requests\":1"));
+    }
 
     shutdown.store(true, Ordering::Relaxed);
     let _ = handle.join();

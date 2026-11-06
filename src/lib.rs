@@ -37,6 +37,7 @@ pub mod speculative;
 pub mod split;
 pub mod synth;
 pub mod template;
+pub mod tenant;
 pub mod tokenizer;
 pub mod tools;
 pub mod tp;
@@ -76,6 +77,10 @@ pub use speculative::{
 };
 pub use split::{split_gguf, SplitOptions};
 pub use template::{ChatMessage, ChatTemplate};
+pub use tenant::{
+    AdmissionError, PriorityRequestQueue, RequestPriority, TenantConfig, TenantGuard,
+    TenantMetrics, TenantRegistry, TokenBucket,
+};
 pub use tokenizer::train::{
     train_bpe, train_vocab_file, write_vocab_gguf, TrainConfig, TrainedVocab,
 };

@@ -22,6 +22,7 @@ pub struct ServerConfig {
     pub threads: usize,
     pub context: usize,
     pub kv_cache: KvCacheType,
+    pub tenant_registry: Option<Arc<crate::tenant::TenantRegistry>>,
 }
 
 impl Default for ServerConfig {
@@ -34,6 +35,7 @@ impl Default for ServerConfig {
                 .unwrap_or(4),
             context: 2048,
             kv_cache: KvCacheType::F32,
+            tenant_registry: None,
         }
     }
 }
@@ -146,6 +148,9 @@ impl<'a> Server<'a> {
         let path = parts[1];
 
         let mut content_length = 0usize;
+        let mut auth_header: Option<String> = None;
+        let mut tenant_header: Option<String> = None;
+
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line)? == 0 {
@@ -156,8 +161,14 @@ impl<'a> Server<'a> {
                 break;
             }
             if let Some((k, v)) = trimmed.split_once(':') {
-                if k.trim().eq_ignore_ascii_case("content-length") {
-                    content_length = v.trim().parse::<usize>().unwrap_or(0);
+                let k_trim = k.trim();
+                let v_trim = v.trim();
+                if k_trim.eq_ignore_ascii_case("content-length") {
+                    content_length = v_trim.parse::<usize>().unwrap_or(0);
+                } else if k_trim.eq_ignore_ascii_case("authorization") {
+                    auth_header = Some(v_trim.to_string());
+                } else if k_trim.eq_ignore_ascii_case("x-tenant-id") {
+                    tenant_header = Some(v_trim.to_string());
                 }
             }
         }
@@ -167,6 +178,69 @@ impl<'a> Server<'a> {
             reader.read_exact(&mut body)?;
         }
         let body_str = String::from_utf8_lossy(&body);
+
+        let _tenant_guard = if let Some(ref reg) = self.config.tenant_registry {
+            let is_inference_endpoint = matches!(
+                (method, path),
+                ("POST", "/v1/chat/completions")
+                    | ("POST", "/v1/completions")
+                    | ("POST", "/v1/embeddings")
+            );
+
+            if is_inference_endpoint {
+                let token = auth_header
+                    .as_deref()
+                    .and_then(|h| {
+                        h.strip_prefix("Bearer ")
+                            .or_else(|| h.strip_prefix("bearer "))
+                    })
+                    .or(tenant_header.as_deref())
+                    .unwrap_or("");
+
+                match reg.resolve_tenant_id(token) {
+                    Some(tenant_id) => match reg.acquire(&tenant_id) {
+                        Ok(guard) => Some(guard),
+                        Err(crate::tenant::AdmissionError::RateLimitExceeded {
+                            retry_after_secs,
+                        }) => {
+                            let resp = "{\"error\":{\"message\":\"Rate limit exceeded\",\"type\":\"rate_limit_error\",\"code\":429}}\n";
+                            write!(
+                                stream,
+                                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {retry_after_secs}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                resp.len(),
+                                resp
+                            )?;
+                            stream.flush()?;
+                            return Ok(());
+                        }
+                        Err(crate::tenant::AdmissionError::ConcurrencyLimitReached {
+                            current,
+                            max,
+                        }) => {
+                            return self.write_error(
+                                stream,
+                                429,
+                                &format!("Concurrency limit reached ({current}/{max})"),
+                            );
+                        }
+                        Err(_) => {
+                            return self.write_error(stream, 401, "Unauthorized");
+                        }
+                    },
+                    None => {
+                        return self.write_error(
+                            stream,
+                            401,
+                            "Unauthorized: missing or invalid credentials",
+                        );
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         match (method, path) {
             ("GET", "/health") | ("GET", "/") => {
@@ -182,6 +256,32 @@ impl<'a> Server<'a> {
                     escape_json(&self.model.config.arch)
                 );
                 self.write_json(stream, 200, &json)
+            }
+            ("GET", "/v1/tenants/metrics") => {
+                if let Some(ref reg) = self.config.tenant_registry {
+                    let metrics = reg.all_metrics();
+                    let mut json = String::from("{\"tenants\":{");
+                    let mut first = true;
+                    for (id, m) in metrics {
+                        if !first {
+                            json.push(',');
+                        }
+                        first = false;
+                        json.push_str(&format!(
+                            "\"{}\":{{\"total_requests\":{},\"active_requests\":{},\"rate_limited_requests\":{},\"prompt_tokens\":{},\"completion_tokens\":{}}}",
+                            escape_json(&id),
+                            m.total_requests,
+                            m.active_requests,
+                            m.rate_limited_requests,
+                            m.total_prompt_tokens,
+                            m.total_completion_tokens
+                        ));
+                    }
+                    json.push_str("}}\n");
+                    self.write_json(stream, 200, &json)
+                } else {
+                    self.write_error(stream, 404, "Tenant registry not configured")
+                }
             }
             ("POST", "/v1/chat/completions") => {
                 let params = parse_request_json_with_template(&body_str, &self.template);
@@ -426,7 +526,10 @@ impl<'a> Server<'a> {
         let status_text = match status {
             200 => "OK",
             400 => "Bad Request",
+            401 => "Unauthorized",
             404 => "Not Found",
+            429 => "Too Many Requests",
+            503 => "Service Unavailable",
             _ => "Error",
         };
         write!(
