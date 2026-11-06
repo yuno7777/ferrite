@@ -12,15 +12,22 @@ const USAGE: &str = "\
 ferrite: pure-Rust GGUF inference
 
 usage:
-  ferrite list                      models LM Studio has downloaded
+  ferrite list                      models discovered across local stores
   ferrite where                     directories being searched
+  ferrite doctor [model]            hardware profiler, SIMD check, & tuning advice
+  ferrite bench [--threads <n>]     GEMV, batched GEMM, & synthetic model benchmarks
   ferrite info <model|path> [-t]    header, hyperparameters, quant mix
                                     -t also dumps the tensor table
   ferrite tokenize <model> <text>   encode text, show ids and pieces
   ferrite run <model> <prompt>      generate, streaming to stdout
+  ferrite chat <model>              interactive multi-turn terminal chat TUI
   ferrite serve <model>             serve HTTP/SSE API daemon
   ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
   ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare> [--weight <0..1>]
+  ferrite split <src.gguf> <out_prefix> [--shards <n>] [--max-bytes <bytes>]
+  ferrite prune <model.gguf> --sparsity <0..1> [--tensor <name>]
+  ferrite edit <model.gguf> <info|scale> <tensor> [<factor>]
+  ferrite watermark <detect|generate> <model> <text_or_prompt> [--key <u64>]
   ferrite perplexity <model> <file> evaluate text perplexity and loss
   ferrite convert <src> <dst.gguf>  convert SafeTensors to GGUF format
   ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>
@@ -28,7 +35,7 @@ usage:
   ferrite embed <model> <text...>   generate vector embeddings & similarity
   ferrite vision <model> --image <image> --mmproj <mmproj.gguf> [prompt]
 
-run/serve options:
+run/chat/serve options:
   -n <count>      tokens to generate (default 128)
   --temp <t>      sampling temperature, 0 for greedy (default 0)
   --top-k <k>     keep only the k most likely tokens (default 40)
@@ -38,9 +45,14 @@ run/serve options:
   --threads <n>   workers per matvec (default: machine parallelism)
   --host <host>   host interface to bind (default: 127.0.0.1)
   --port <port>   port to bind (default: 8080)
+  --system <s>    system prompt for `ferrite chat`
+  --json          enforce valid RFC 8259 JSON output via grammar automaton
+  --json-schema <file_or_json> enforce JSON Schema conformance
+  --regex <pat>   enforce regular expression grammar on output
   --draft <model> draft model for speculative decoding acceleration
   --spec-k <k>    speculative candidate count / depth (default 3)
   --spec-tree <b> speculative candidate branch count (default 0, disabled)
+  --lookahead <k> n-gram self-speculative lookahead depth (no draft model needed)
   --mtp           enable DeepSeek Multi-Token Prediction (MTP) speculation
   --lora <adapter> apply GGUF LoRA adapter dynamically
   --chunk-size <n> chunk size for prompt prefill (default 512)
@@ -61,12 +73,19 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("list") => cmd_list(),
         Some("where") => cmd_where(),
+        Some("doctor") => cmd_doctor(&args[1..]),
+        Some("bench") => cmd_bench(&args[1..]),
         Some("info") => cmd_info(&args[1..]),
         Some("tokenize") => cmd_tokenize(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
+        Some("chat") => cmd_chat(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
         Some("quantize") => cmd_quantize(&args[1..]),
         Some("merge") => cmd_merge(&args[1..]),
+        Some("split") => cmd_split(&args[1..]),
+        Some("prune") => cmd_prune(&args[1..]),
+        Some("edit") => cmd_edit(&args[1..]),
+        Some("watermark") => cmd_watermark(&args[1..]),
         Some("perplexity") => cmd_perplexity(&args[1..]),
         Some("convert") => cmd_convert(&args[1..]),
         Some("lora") => cmd_lora(&args[1..]),
@@ -714,6 +733,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         at.and_then(|i| args.get(i + 1).cloned())
     };
 
+    let mut grammar = parse_grammar_args(args)?;
+
     // Positionals are whatever is left once flags and their values are removed.
     let flags = [
         "-n",
@@ -737,12 +758,19 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--lora",
         "--chunk-size",
         "--kv-cache",
+        "--json-schema",
+        "--regex",
     ];
+    let bool_flags = ["--mtp", "--json"];
     let mut positional = Vec::new();
     let mut index = 0;
     while index < args.len() {
         if flags.contains(&args[index].as_str()) {
             index += 2;
+            continue;
+        }
+        if bool_flags.contains(&args[index].as_str()) {
+            index += 1;
             continue;
         }
         positional.push(args[index].clone());
@@ -987,6 +1015,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         );
     } else if (args.iter().any(|a| a == "--mtp") || model.mtp_module.is_some())
         && model.mtp_module.is_some()
+        && grammar.is_none()
     {
         let mut engine = ferrite::speculative::MtpEngine::new(&model);
         while generated < limit && position < state.context() {
@@ -1028,9 +1057,15 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     } else {
         let mut token_history = prompt_tokens.clone();
         while generated < limit && position < state.context() {
+            if let Some(g) = &grammar {
+                g.filter_logits(&mut state.logits, &tokenizer);
+            }
             let token = sampler.sample_with_history(&mut state.logits, &token_history);
             if Some(token) == tokenizer.eos {
                 break;
+            }
+            if let Some(g) = &mut grammar {
+                g.advance_token(token, &tokenizer);
             }
             token_history.push(token);
             pending.extend(tokenizer.piece(token));
@@ -1055,6 +1090,40 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         );
     }
     Ok(())
+}
+
+fn parse_grammar_args(args: &[String]) -> std::io::Result<Option<ferrite::grammar::Grammar>> {
+    if args.iter().any(|a| a == "--json") {
+        return Ok(Some(ferrite::grammar::Grammar::json()));
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--json-schema") {
+        let val = args.get(pos + 1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--json-schema needs a schema file or JSON string",
+            )
+        })?;
+        let schema_str = if std::path::Path::new(val).is_file() {
+            std::fs::read_to_string(val)?
+        } else {
+            val.clone()
+        };
+        let g = ferrite::grammar::Grammar::schema(&schema_str)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        return Ok(Some(g));
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--regex") {
+        let pat = args.get(pos + 1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--regex needs a pattern string",
+            )
+        })?;
+        let g = ferrite::grammar::Grammar::regex(pat)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+        return Ok(Some(g));
+    }
+    Ok(None)
 }
 
 fn human(bytes: u64) -> String {
@@ -1306,4 +1375,1120 @@ fn cmd_vision(args: &[String]) -> std::io::Result<()> {
     );
 
     Ok(())
+}
+
+fn invalid_input(msg: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, msg.into())
+}
+
+fn read_linux_meminfo_bytes() -> (u64, u64) {
+    let Ok(text) = std::fs::read_to_string("/proc/meminfo") else {
+        return (0, 0);
+    };
+    let mut total_kb = 0u64;
+    let mut avail_kb = 0u64;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            avail_kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+    (total_kb * 1024, avail_kb * 1024)
+}
+
+fn valid_quant_bytes(ty: ferrite::GgmlType, elements: usize) -> Vec<u8> {
+    let (block, size) = ty.layout().expect("sized quant type");
+    let block = block as usize;
+    let size = size as usize;
+    let num_blocks = elements / block;
+    let mut out = vec![0u8; num_blocks * size];
+    // Safe non-NaN f16 scale bytes: 0x2C00 = 0.0625, 0x2000 = 0.0078125
+    let scale = [0x00u8, 0x2C];
+    let min_scale = [0x00u8, 0x20];
+    for (idx, blk) in out.chunks_exact_mut(size).enumerate() {
+        for (off, b) in blk.iter_mut().enumerate() {
+            *b = ((idx * 13 + off * 37 + 11) % 251) as u8;
+        }
+        match ty {
+            ferrite::GgmlType::Q4_0 | ferrite::GgmlType::Q8_0 => {
+                blk[0..2].copy_from_slice(&scale);
+            }
+            ferrite::GgmlType::Q4_K | ferrite::GgmlType::Q5_K => {
+                blk[0..2].copy_from_slice(&scale);
+                blk[2..4].copy_from_slice(&min_scale);
+            }
+            ferrite::GgmlType::Q6_K => {
+                blk[208..210].copy_from_slice(&scale);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn cmd_doctor(args: &[String]) -> std::io::Result<()> {
+    let mut model_query: Option<String> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            a if !a.starts_with('-') && model_query.is_none() => {
+                model_query = Some(a.to_string());
+            }
+            other => return Err(invalid_input(format!("unknown flag: {other}"))),
+        }
+    }
+
+    let arch = std::env::consts::ARCH;
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let (total_bytes, avail_bytes) = read_linux_meminfo_bytes();
+    let total_gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let avail_gb = avail_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+
+    #[cfg(target_arch = "x86_64")]
+    let (has_avx2, has_fma, has_f16c, has_avx512f) = (
+        std::arch::is_x86_feature_detected!("avx2"),
+        std::arch::is_x86_feature_detected!("fma"),
+        std::arch::is_x86_feature_detected!("f16c"),
+        std::arch::is_x86_feature_detected!("avx512f"),
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    let (has_avx2, has_fma, has_f16c, has_avx512f) = (false, false, false, false);
+
+    #[cfg(target_arch = "aarch64")]
+    let has_neon = true;
+    #[cfg(not(target_arch = "aarch64"))]
+    let has_neon = false;
+
+    println!("Ferrite Hardware & Local Readiness Doctor");
+    println!("=========================================");
+    println!("Architecture:      {arch}");
+    println!("Logical CPUs:      {cpus}");
+    if total_bytes > 0 {
+        println!("Total RAM:         {total_gb:.2} GiB");
+        println!("Available RAM:     {avail_gb:.2} GiB");
+    }
+    println!("SIMD Extensions:");
+    println!(
+        "  AVX2:            {}",
+        if has_avx2 { "yes (active)" } else { "no" }
+    );
+    println!(
+        "  FMA:             {}",
+        if has_fma { "yes (active)" } else { "no" }
+    );
+    println!(
+        "  F16C:            {}",
+        if has_f16c { "yes (active)" } else { "no" }
+    );
+    println!(
+        "  AVX-512F:        {}",
+        if has_avx512f { "yes (active)" } else { "no" }
+    );
+    println!(
+        "  ARM NEON:        {}",
+        if has_neon { "yes (active)" } else { "no" }
+    );
+
+    // Quick Q4_K integer dot bandwidth probe (4096 x 1024)
+    let cols = 4096usize;
+    let rows = 1024usize;
+    let raw = valid_quant_bytes(ferrite::GgmlType::Q4_K, rows * cols);
+    let row_bytes = raw.len() / rows;
+    let act: Vec<f32> = (0..cols).map(|i| (i as f32 * 0.13).sin()).collect();
+    let mut quantized = ferrite::quant::activation::Quantized::with_capacity(cols);
+    quantized.fill(&act);
+    let iters = 16usize;
+    let t0 = Instant::now();
+    let mut sink = 0.0f32;
+    for _ in 0..iters {
+        for r in 0..rows {
+            sink += ferrite::quant::idot::integer(
+                ferrite::GgmlType::Q4_K,
+                &raw[r * row_bytes..(r + 1) * row_bytes],
+                &quantized,
+            )
+            .unwrap_or(0.0);
+        }
+    }
+    let dt = t0.elapsed().as_secs_f64().max(1e-9);
+    std::hint::black_box(sink);
+    let bw_1t = (raw.len() as f64 * iters as f64) / dt / (1024.0 * 1024.0 * 1024.0);
+    println!("Q4_K iDot Speed:   {bw_1t:.1} GiB/s (single-core streaming)");
+
+    if total_bytes > 0 {
+        println!("\nModel Tier Recommendations (Q4_K_M quantization):");
+        let tiers = [
+            ("1B - 3B (Llama-3.2-3B / Qwen2.5-3B)", 2.2),
+            ("7B - 8B (Llama-3.1-8B / Qwen2.5-7B)", 5.2),
+            ("13B - 14B (Qwen2.5-14B / Phi-4)", 9.0),
+            ("32B (Qwen2.5-32B / DeepSeek-R1-32B)", 20.0),
+            ("70B (Llama-3.3-70B)", 42.0),
+        ];
+        for (name, req_gb) in tiers {
+            let status = if avail_gb >= req_gb * 1.15 {
+                "READY (fits comfortably in available RAM)"
+            } else if total_gb >= req_gb * 1.05 {
+                "TIGHT (fits in total RAM; close background apps)"
+            } else {
+                "TOO LARGE (requires mmap paging or smaller quant)"
+            };
+            println!("  {name:<38} ~{req_gb:>4.1} GiB -> {status}");
+        }
+    }
+
+    if let Some(q) = model_query {
+        let path = lmstudio::resolve(&q)?;
+        let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let gguf = Gguf::open(&path)?;
+        let size_gb = file_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        println!("\nTarget Model Diagnosis: {}", path.display());
+        println!("  File Size:       {size_gb:.2} GiB");
+        println!("  Architecture:    {}", gguf.arch().unwrap_or("unknown"));
+        println!("  Tensors:         {}", gguf.tensors.len());
+    }
+
+    let discovered = lmstudio::list();
+    println!(
+        "\nDiscovered Local GGUF Models: {} found across LM Studio / HF / Jan / GPT4All / local",
+        discovered.len()
+    );
+    for m in discovered.iter().take(10) {
+        let mb = m.size as f64 / (1024.0 * 1024.0);
+        println!("  - {} ({mb:.1} MiB)", m.id);
+    }
+    if discovered.len() > 10 {
+        println!(
+            "  ... and {} more (run `ferrite list` to see all)",
+            discovered.len() - 10
+        );
+    }
+
+    Ok(())
+}
+
+fn build_synthetic_bench_gguf(path: &std::path::Path) -> std::io::Result<()> {
+    let dim = 256usize;
+    let ffn = 512usize;
+    let vocab = 256usize;
+    let heads = 4u32;
+    let kv_heads = 4u32;
+
+    let bytes_f32 =
+        |vals: &[f32]| -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let emb: Vec<f32> = (0..vocab * dim)
+        .map(|i| ((i * 17 + 3) % 97) as f32 * 0.01 - 0.5)
+        .collect();
+    let norm = vec![1.0f32; dim];
+
+    let q_q4k = valid_quant_bytes(ferrite::GgmlType::Q4_K, dim * dim);
+    let k_q8 = valid_quant_bytes(ferrite::GgmlType::Q8_0, dim * dim);
+    let v_q8 = valid_quant_bytes(ferrite::GgmlType::Q8_0, dim * dim);
+    let o_q4k = valid_quant_bytes(ferrite::GgmlType::Q4_K, dim * dim);
+    let ffn_up = valid_quant_bytes(ferrite::GgmlType::Q4_K, dim * ffn);
+    let ffn_gate = valid_quant_bytes(ferrite::GgmlType::Q5_K, dim * ffn);
+    let ffn_down = valid_quant_bytes(ferrite::GgmlType::Q6_K, ffn * dim);
+    let out_w = valid_quant_bytes(ferrite::GgmlType::Q8_0, dim * vocab);
+
+    use ferrite::gguf::Value;
+    let tokens: Vec<Value> = (0..vocab)
+        .map(|i| Value::String(format!("tok{i}")))
+        .collect();
+
+    ferrite::synth::Builder::new()
+        .meta("general.architecture", Value::String("llama".into()))
+        .meta("llama.block_count", Value::U32(2))
+        .meta("llama.embedding_length", Value::U32(dim as u32))
+        .meta("llama.feed_forward_length", Value::U32(ffn as u32))
+        .meta("llama.attention.head_count", Value::U32(heads))
+        .meta("llama.attention.head_count_kv", Value::U32(kv_heads))
+        .meta("llama.context_length", Value::U32(512))
+        .meta("llama.attention.layer_norm_rms_epsilon", Value::F32(1e-5))
+        .meta("llama.rope.freq_base", Value::F32(10000.0))
+        .meta("tokenizer.ggml.model", Value::String("llama".into()))
+        .meta("tokenizer.ggml.tokens", Value::Array(tokens))
+        .tensor(
+            "token_embd.weight",
+            &[dim as u64, vocab as u64],
+            ferrite::GgmlType::F32,
+            bytes_f32(&emb),
+        )
+        .tensor(
+            "blk.0.attn_norm.weight",
+            &[dim as u64],
+            ferrite::GgmlType::F32,
+            bytes_f32(&norm),
+        )
+        .tensor(
+            "blk.0.attn_q.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q4_K,
+            q_q4k.clone(),
+        )
+        .tensor(
+            "blk.0.attn_k.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q8_0,
+            k_q8.clone(),
+        )
+        .tensor(
+            "blk.0.attn_v.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q8_0,
+            v_q8.clone(),
+        )
+        .tensor(
+            "blk.0.attn_output.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q4_K,
+            o_q4k.clone(),
+        )
+        .tensor(
+            "blk.0.ffn_norm.weight",
+            &[dim as u64],
+            ferrite::GgmlType::F32,
+            bytes_f32(&norm),
+        )
+        .tensor(
+            "blk.0.ffn_up.weight",
+            &[dim as u64, ffn as u64],
+            ferrite::GgmlType::Q4_K,
+            ffn_up.clone(),
+        )
+        .tensor(
+            "blk.0.ffn_gate.weight",
+            &[dim as u64, ffn as u64],
+            ferrite::GgmlType::Q5_K,
+            ffn_gate.clone(),
+        )
+        .tensor(
+            "blk.0.ffn_down.weight",
+            &[ffn as u64, dim as u64],
+            ferrite::GgmlType::Q6_K,
+            ffn_down.clone(),
+        )
+        .tensor(
+            "blk.1.attn_norm.weight",
+            &[dim as u64],
+            ferrite::GgmlType::F32,
+            bytes_f32(&norm),
+        )
+        .tensor(
+            "blk.1.attn_q.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q4_K,
+            q_q4k,
+        )
+        .tensor(
+            "blk.1.attn_k.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q8_0,
+            k_q8,
+        )
+        .tensor(
+            "blk.1.attn_v.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q8_0,
+            v_q8,
+        )
+        .tensor(
+            "blk.1.attn_output.weight",
+            &[dim as u64, dim as u64],
+            ferrite::GgmlType::Q4_K,
+            o_q4k,
+        )
+        .tensor(
+            "blk.1.ffn_norm.weight",
+            &[dim as u64],
+            ferrite::GgmlType::F32,
+            bytes_f32(&norm),
+        )
+        .tensor(
+            "blk.1.ffn_up.weight",
+            &[dim as u64, ffn as u64],
+            ferrite::GgmlType::Q4_K,
+            ffn_up,
+        )
+        .tensor(
+            "blk.1.ffn_gate.weight",
+            &[dim as u64, ffn as u64],
+            ferrite::GgmlType::Q5_K,
+            ffn_gate,
+        )
+        .tensor(
+            "blk.1.ffn_down.weight",
+            &[ffn as u64, dim as u64],
+            ferrite::GgmlType::Q6_K,
+            ffn_down,
+        )
+        .tensor(
+            "output_norm.weight",
+            &[dim as u64],
+            ferrite::GgmlType::F32,
+            bytes_f32(&norm),
+        )
+        .tensor(
+            "output.weight",
+            &[dim as u64, vocab as u64],
+            ferrite::GgmlType::Q8_0,
+            out_w,
+        )
+        .write(path)
+}
+
+struct BenchPoolCtx {
+    qtype: ferrite::GgmlType,
+    raw_ptr: usize,
+    row_bytes: usize,
+    q_ptr: usize,
+    out_ptr: usize,
+}
+
+unsafe fn bench_pool_worker(ctx_ptr: *const (), start: usize, end: usize, _tid: usize) {
+    let ctx = &*(ctx_ptr as *const BenchPoolCtx);
+    let q = &*(ctx.q_ptr as *const ferrite::quant::activation::Quantized);
+    for r in start..end {
+        let row_slice = std::slice::from_raw_parts(
+            (ctx.raw_ptr as *const u8).add(r * ctx.row_bytes),
+            ctx.row_bytes,
+        );
+        let val = ferrite::quant::idot::integer(ctx.qtype, row_slice, q).unwrap_or(0.0);
+        *(ctx.out_ptr as *mut f32).add(r) = val;
+    }
+}
+
+fn cmd_bench(args: &[String]) -> std::io::Result<()> {
+    let mut model_arg: Option<String> = None;
+    let mut threads: usize = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let mut pp_tokens: usize = 64;
+    let mut tg_tokens: usize = 32;
+    let mut json_out = false;
+    let mut export_verify: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--model" | "-m" => {
+                i += 1;
+                model_arg = Some(
+                    args.get(i)
+                        .ok_or_else(|| invalid_input("--model requires a path"))?
+                        .clone(),
+                );
+            }
+            "--threads" => {
+                i += 1;
+                threads = args
+                    .get(i)
+                    .ok_or_else(|| invalid_input("--threads requires a number"))?
+                    .parse()
+                    .map_err(|_| invalid_input("invalid --threads"))?;
+            }
+            "--prompt-tokens" => {
+                i += 1;
+                pp_tokens = args
+                    .get(i)
+                    .ok_or_else(|| invalid_input("--prompt-tokens requires a number"))?
+                    .parse()
+                    .map_err(|_| invalid_input("invalid --prompt-tokens"))?;
+            }
+            "--gen-tokens" => {
+                i += 1;
+                tg_tokens = args
+                    .get(i)
+                    .ok_or_else(|| invalid_input("--gen-tokens requires a number"))?
+                    .parse()
+                    .map_err(|_| invalid_input("invalid --gen-tokens"))?;
+            }
+            "--export-verify" => {
+                i += 1;
+                export_verify = Some(
+                    args.get(i)
+                        .ok_or_else(|| invalid_input("--export-verify requires a path"))?
+                        .clone(),
+                );
+            }
+            "--json" => {
+                json_out = true;
+            }
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            arg if !arg.starts_with('-') && model_arg.is_none() => {
+                model_arg = Some(arg.to_string());
+            }
+            arg => return Err(invalid_input(format!("unknown flag: {arg}"))),
+        }
+        i += 1;
+    }
+
+    let rows = 4096usize;
+    let cols = 4096usize;
+    let act: Vec<f32> = (0..cols).map(|idx| (idx as f32 * 0.37).sin()).collect();
+
+    struct KernelResult {
+        name: String,
+        ms_f32_1t: f64,
+        ms_i8_1t: f64,
+        gbs_1t: f64,
+        ms_i8_mt: f64,
+        gbs_mt: f64,
+        rel_err: f64,
+        raw: Vec<u8>,
+        f32_out: Vec<f32>,
+        out: Vec<f32>,
+    }
+
+    let types = [
+        ferrite::GgmlType::Q4_K,
+        ferrite::GgmlType::Q5_K,
+        ferrite::GgmlType::Q6_K,
+        ferrite::GgmlType::Q8_0,
+        ferrite::GgmlType::Q4_0,
+    ];
+
+    let pool = std::sync::Arc::new(ferrite::tp::ThreadPool::new(threads.max(1)));
+    let mut results = Vec::new();
+    let mut scratch = vec![0.0f32; cols];
+
+    for qtype in types {
+        let raw = valid_quant_bytes(qtype, rows * cols);
+        let row_bytes = raw.len() / rows;
+        let mut quantized = ferrite::quant::activation::Quantized::with_capacity(cols);
+        quantized.fill(&act);
+
+        // Compute exact dequantized FP32 reference across all rows
+        let mut f32_out = vec![0.0f32; rows];
+        for (r, slot) in f32_out.iter_mut().enumerate() {
+            let row_slice = &raw[r * row_bytes..(r + 1) * row_bytes];
+            ferrite::quant::dequantize(qtype, row_slice, &mut scratch)?;
+            *slot = ferrite::ops::dot(&scratch, &act);
+        }
+
+        // Compare integer dot against exact dequantized f32 dot across all rows
+        let mut diff_sq = 0.0f64;
+        let mut ref_sq = 0.0f64;
+        for (r, &f_val) in f32_out.iter().enumerate() {
+            let row_slice = &raw[r * row_bytes..(r + 1) * row_bytes];
+            let i_val = ferrite::quant::idot::integer(qtype, row_slice, &quantized).unwrap_or(0.0);
+            let d = (i_val - f_val) as f64;
+            diff_sq += d * d;
+            ref_sq += (f_val as f64) * (f_val as f64);
+        }
+        let rel_err = diff_sq.sqrt() / ref_sq.sqrt().max(1e-9);
+
+        let iters = 16usize;
+        let mut out = vec![0.0f32; rows];
+
+        // 1T F32 reference / fused dot
+        let t_f32 = Instant::now();
+        for _ in 0..4 {
+            for (r, slot) in out.iter_mut().enumerate() {
+                let row_slice = &raw[r * row_bytes..(r + 1) * row_bytes];
+                *slot = match ferrite::quant::dot::fused(qtype, row_slice, &act) {
+                    Some(v) => v,
+                    None => {
+                        ferrite::quant::dequantize(qtype, row_slice, &mut scratch)?;
+                        ferrite::ops::dot(&scratch, &act)
+                    }
+                };
+            }
+            std::hint::black_box(&out);
+        }
+        let ms_f32_1t = (t_f32.elapsed().as_secs_f64() * 1000.0) / 4.0;
+
+        // Warmup 1T INT8 iDot
+        quantized.fill(&act);
+        for (r, slot) in out.iter_mut().enumerate() {
+            *slot = ferrite::quant::idot::integer(
+                qtype,
+                &raw[r * row_bytes..(r + 1) * row_bytes],
+                &quantized,
+            )
+            .unwrap_or(0.0);
+        }
+
+        // 1T INT8 iDot
+        let t_i8_1t = Instant::now();
+        for _ in 0..iters {
+            quantized.fill(&act);
+            for (r, slot) in out.iter_mut().enumerate() {
+                *slot = ferrite::quant::idot::integer(
+                    qtype,
+                    &raw[r * row_bytes..(r + 1) * row_bytes],
+                    &quantized,
+                )
+                .unwrap_or(0.0);
+            }
+            std::hint::black_box(&out);
+        }
+        let dt_1t = t_i8_1t.elapsed().as_secs_f64().max(1e-9);
+        let ms_i8_1t = (dt_1t * 1000.0) / iters as f64;
+        let gbs_1t = (raw.len() as f64 * iters as f64) / dt_1t / (1024.0 * 1024.0 * 1024.0);
+
+        // Warmup MT INT8 iDot
+        {
+            let ctx = BenchPoolCtx {
+                qtype,
+                raw_ptr: raw.as_ptr() as usize,
+                row_bytes,
+                q_ptr: (&quantized as *const ferrite::quant::activation::Quantized) as usize,
+                out_ptr: out.as_mut_ptr() as usize,
+            };
+            pool.dispatch(rows, &ctx, bench_pool_worker);
+        }
+
+        // MT INT8 iDot via persistent ThreadPool
+        let t_i8_mt = Instant::now();
+        for _ in 0..iters {
+            quantized.fill(&act);
+            let ctx = BenchPoolCtx {
+                qtype,
+                raw_ptr: raw.as_ptr() as usize,
+                row_bytes,
+                q_ptr: (&quantized as *const ferrite::quant::activation::Quantized) as usize,
+                out_ptr: out.as_mut_ptr() as usize,
+            };
+            pool.dispatch(rows, &ctx, bench_pool_worker);
+            std::hint::black_box(&out);
+        }
+        let dt_mt = t_i8_mt.elapsed().as_secs_f64().max(1e-9);
+        let ms_i8_mt = (dt_mt * 1000.0) / iters as f64;
+        let gbs_mt = (raw.len() as f64 * iters as f64) / dt_mt / (1024.0 * 1024.0 * 1024.0);
+
+        results.push(KernelResult {
+            name: qtype.name().to_string(),
+            ms_f32_1t,
+            ms_i8_1t,
+            gbs_1t,
+            ms_i8_mt,
+            gbs_mt,
+            rel_err,
+            raw,
+            f32_out,
+            out,
+        });
+    }
+
+    if let Some(ref verify_path) = export_verify {
+        let mut f = std::fs::File::create(verify_path)?;
+        f.write_all(&(rows as u32).to_le_bytes())?;
+        f.write_all(&(cols as u32).to_le_bytes())?;
+        f.write_all(&(results.len() as u32).to_le_bytes())?;
+        for &v in &act {
+            f.write_all(&v.to_le_bytes())?;
+        }
+        for k in &results {
+            let mut name_buf = [0u8; 8];
+            let b = k.name.as_bytes();
+            name_buf[..b.len().min(7)].copy_from_slice(&b[..b.len().min(7)]);
+            f.write_all(&name_buf)?;
+            f.write_all(&(k.raw.len() as u64).to_le_bytes())?;
+            f.write_all(&k.ms_i8_1t.to_le_bytes())?;
+            f.write_all(&k.ms_i8_mt.to_le_bytes())?;
+            f.write_all(&k.raw)?;
+            for &v in &k.f32_out {
+                f.write_all(&v.to_le_bytes())?;
+            }
+            for &v in &k.out {
+                f.write_all(&v.to_le_bytes())?;
+            }
+        }
+    }
+
+    // End-to-end model prefill (pp) and token generation (tg) benchmark
+    let temp_path =
+        std::env::temp_dir().join(format!("ferrite_bench_model_{}.gguf", std::process::id()));
+    let model_path = if let Some(ref m) = model_arg {
+        lmstudio::resolve(m)?
+    } else {
+        build_synthetic_bench_gguf(&temp_path)?;
+        temp_path.clone()
+    };
+
+    let gguf = Gguf::open(&model_path)?;
+    let model = Model::load(&gguf)?;
+    let ctx_len = (pp_tokens + tg_tokens + 32).max(256);
+    let mut state = State::with_context(&model.config, ctx_len);
+    state.threads = threads.max(1);
+
+    let prompt_tokens: Vec<u32> = (0..pp_tokens)
+        .map(|idx| (idx as u32) % (model.config.vocab as u32).max(1))
+        .collect();
+
+    // Warmup
+    model.prefill(&mut state, &prompt_tokens[..pp_tokens.min(8)], 0)?;
+
+    // Measure prefill (pp)
+    let t_pp = Instant::now();
+    model.prefill(&mut state, &prompt_tokens, 0)?;
+    let dt_pp = t_pp.elapsed().as_secs_f64().max(1e-9);
+    let pp_tok_s = pp_tokens as f64 / dt_pp;
+
+    // Measure decode (tg)
+    let mut tok = 1u32 % (model.config.vocab as u32).max(1);
+    let t_tg = Instant::now();
+    for pos in (pp_tokens..).take(tg_tokens) {
+        model.forward(&mut state, tok, pos)?;
+        tok = (tok + 1) % (model.config.vocab as u32).max(1);
+    }
+    let dt_tg = t_tg.elapsed().as_secs_f64().max(1e-9);
+    let tg_tok_s = tg_tokens as f64 / dt_tg;
+
+    drop(model);
+    drop(gguf);
+    if model_arg.is_none() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    if json_out {
+        print!("{{\"threads\":{threads},\"kernels\":[");
+        for (idx, k) in results.iter().enumerate() {
+            if idx > 0 {
+                print!(",");
+            }
+            print!(
+                "{{\"type\":\"{}\",\"ms_f32_1t\":{:.4},\"ms_i8_1t\":{:.4},\"gbs_1t\":{:.2},\"ms_i8_mt\":{:.4},\"gbs_mt\":{:.2},\"rel_l2_err\":{:.6}}}",
+                k.name, k.ms_f32_1t, k.ms_i8_1t, k.gbs_1t, k.ms_i8_mt, k.gbs_mt, k.rel_err
+            );
+        }
+        println!(
+            "],\"pp_tokens\":{pp_tokens},\"pp_tok_s\":{pp_tok_s:.2},\"tg_tokens\":{tg_tokens},\"tg_tok_s\":{tg_tok_s:.2}}}"
+        );
+    } else {
+        println!("Ferrite Benchmark Suite (threads = {threads}, matrix = {rows}x{cols})");
+        println!(
+            "| {:<6} | {:>11} | {:>11} | {:>10} | {:>11} | {:>10} | {:>10} |",
+            "Quant",
+            "1T F32 (ms)",
+            "1T i8 (ms)",
+            "1T (GiB/s)",
+            "MT i8 (ms)",
+            "MT (GiB/s)",
+            "Rel L2 Err"
+        );
+        println!(
+            "|--------|-------------|-------------|------------|-------------|------------|------------|"
+        );
+        for k in &results {
+            println!(
+                "| {:<6} | {:>11.3} | {:>11.3} | {:>10.2} | {:>11.3} | {:>10.2} | {:>10.5} |",
+                k.name, k.ms_f32_1t, k.ms_i8_1t, k.gbs_1t, k.ms_i8_mt, k.gbs_mt, k.rel_err
+            );
+        }
+        println!();
+        println!(
+            "End-to-End Inference ({}):",
+            model_arg.as_deref().unwrap_or("synthetic 2-layer GGUF")
+        );
+        println!(
+            "  pp{pp_tokens} (batched prefill): {:>10.1} tok/s ({:.2} ms)",
+            pp_tok_s,
+            dt_pp * 1000.0
+        );
+        println!(
+            "  tg{tg_tokens} (token decode):    {:>10.1} tok/s ({:.2} ms)",
+            tg_tok_s,
+            dt_tg * 1000.0
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_chat(args: &[String]) -> std::io::Result<()> {
+    let limit: usize = flag(args, "-n", 256)?;
+    let temperature: f32 = flag(args, "--temp", 0.7)?;
+    let top_k: usize = flag(args, "--top-k", 40)?;
+    let top_p: f32 = flag(args, "--top-p", 0.9)?;
+    let seed: u64 = flag(args, "--seed", 42)?;
+    let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
+    let threads: usize = flag(args, "--threads", 0)?;
+    let mut system_prompt: String = flag(
+        args,
+        "--system",
+        "You are a helpful AI assistant.".to_string(),
+    )?;
+
+    let mut model_arg: Option<String> = None;
+    let flags = [
+        "-n",
+        "--temp",
+        "--top-k",
+        "--top-p",
+        "--seed",
+        "--ctx",
+        "--threads",
+        "--system",
+    ];
+    let mut i = 0;
+    while i < args.len() {
+        if flags.contains(&args[i].as_str()) {
+            i += 2;
+            continue;
+        }
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            arg if !arg.starts_with('-') && model_arg.is_none() => {
+                model_arg = Some(arg.to_string());
+            }
+            other => return Err(invalid_input(format!("unknown flag: {other}"))),
+        }
+        i += 1;
+    }
+
+    let model_str =
+        model_arg.ok_or_else(|| invalid_input("missing <model> argument for `ferrite chat`"))?;
+    let path = lmstudio::resolve(&model_str)?;
+    let gguf = Gguf::open(&path)?;
+    let model = Model::load(&gguf)?;
+    let tokenizer = Tokenizer::from_gguf(&gguf)?;
+
+    let mut state = State::with_context(&model.config, context);
+    if threads > 0 {
+        state.threads = threads;
+    }
+    let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
+    let mut pos = 0usize;
+
+    let sys_text = format!("<|im_start|>system\n{system_prompt}<|im_end|>\n");
+    let sys_tokens = tokenizer.encode(&sys_text, true);
+    if !sys_tokens.is_empty() {
+        model.prefill(&mut state, &sys_tokens, pos)?;
+        pos += sys_tokens.len();
+    }
+
+    println!("Ferrite Interactive Chat ({})", path.display());
+    println!("Commands: /clear, /system <prompt>, /stats, /exit");
+
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut line = String::new();
+    let mut last_tok_s = 0.0f64;
+
+    loop {
+        print!("\n> ");
+        stdout.flush()?;
+        line.clear();
+        let n = stdin.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "/exit" || trimmed == "/quit" {
+            break;
+        }
+        if trimmed == "/clear" {
+            state = State::with_context(&model.config, context);
+            if threads > 0 {
+                state.threads = threads;
+            }
+            pos = 0;
+            let formatted = format!("<|im_start|>system\n{system_prompt}<|im_end|>\n");
+            let st = tokenizer.encode(&formatted, true);
+            if !st.is_empty() {
+                model.prefill(&mut state, &st, pos)?;
+                pos += st.len();
+            }
+            println!("Conversation context cleared.");
+            continue;
+        }
+        if let Some(new_sys) = trimmed.strip_prefix("/system ") {
+            system_prompt = new_sys.trim().to_string();
+            state = State::with_context(&model.config, context);
+            if threads > 0 {
+                state.threads = threads;
+            }
+            pos = 0;
+            let formatted = format!("<|im_start|>system\n{system_prompt}<|im_end|>\n");
+            let st = tokenizer.encode(&formatted, true);
+            if !st.is_empty() {
+                model.prefill(&mut state, &st, pos)?;
+                pos += st.len();
+            }
+            println!("System prompt updated and context reset.");
+            continue;
+        }
+        if trimmed == "/stats" {
+            println!(
+                "KV cache position: {pos} / {context} tokens | Last decode speed: {last_tok_s:.1} tok/s"
+            );
+            continue;
+        }
+
+        let turn_text = format!("<|im_start|>user\n{trimmed}<|im_end|>\n<|im_start|>assistant\n");
+        let turn_tokens = tokenizer.encode(&turn_text, false);
+        let t0 = Instant::now();
+        model.prefill(&mut state, &turn_tokens, pos)?;
+        pos += turn_tokens.len();
+
+        let mut next_token = sampler.sample(&mut state.logits);
+        let mut gen_count = 0usize;
+        while gen_count < limit && pos < context {
+            if Some(next_token) == tokenizer.eos {
+                break;
+            }
+            let piece = tokenizer.piece(next_token);
+            stdout.write_all(&piece)?;
+            stdout.flush()?;
+            model.forward(&mut state, next_token, pos)?;
+            pos += 1;
+            gen_count += 1;
+            next_token = sampler.sample(&mut state.logits);
+        }
+        println!();
+        let dt = t0.elapsed().as_secs_f64().max(1e-9);
+        last_tok_s = gen_count as f64 / dt;
+    }
+
+    Ok(())
+}
+
+fn cmd_split(args: &[String]) -> std::io::Result<()> {
+    let shards: usize = flag(args, "--shards", 2)?;
+    let max_bytes: usize = flag(args, "--max-bytes", 0)?;
+
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--shards" | "--max-bytes" => {
+                i += 2;
+                continue;
+            }
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            a if !a.starts_with('-') => positional.push(a.to_string()),
+            other => return Err(invalid_input(format!("unknown flag: {other}"))),
+        }
+        i += 1;
+    }
+
+    if positional.len() != 2 {
+        return Err(invalid_input(
+            "usage: ferrite split <src.gguf> <out_prefix> [--shards <n>] [--max-bytes <bytes>]",
+        ));
+    }
+
+    let src_path = lmstudio::resolve(&positional[0])?;
+    let out_prefix = std::path::Path::new(&positional[1]);
+    let options = ferrite::split::SplitOptions {
+        shards,
+        max_bytes_per_shard: if max_bytes > 0 { Some(max_bytes) } else { None },
+    };
+    let written = ferrite::split::split_gguf(&src_path, out_prefix, &options)?;
+    for p in &written {
+        println!("Wrote shard {}", p.display());
+    }
+    Ok(())
+}
+
+fn cmd_prune(args: &[String]) -> std::io::Result<()> {
+    let sparsity: f32 = flag(args, "--sparsity", 0.2)?;
+    let tensor_opt: String = flag(args, "--tensor", String::new())?;
+
+    let mut model_arg: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--sparsity" | "--tensor" => {
+                i += 2;
+                continue;
+            }
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            a if !a.starts_with('-') && model_arg.is_none() => {
+                model_arg = Some(a.to_string());
+            }
+            other => return Err(invalid_input(format!("unknown flag: {other}"))),
+        }
+        i += 1;
+    }
+
+    let model_str = model_arg.ok_or_else(|| {
+        invalid_input("usage: ferrite prune <model.gguf> --sparsity <0..1> [--tensor <name>]")
+    })?;
+    let path = lmstudio::resolve(&model_str)?;
+    let names_vec: Vec<&str> = if tensor_opt.is_empty() {
+        Vec::new()
+    } else {
+        vec![tensor_opt.as_str()]
+    };
+    let filter = if names_vec.is_empty() {
+        None
+    } else {
+        Some(names_vec.as_slice())
+    };
+    let stats = ferrite::prune::ModelPruner::prune_unstructured_inplace(&path, sparsity, filter)?;
+    println!(
+        "Pruned {} / {} parameters ({:.2}% sparsity across {} tensors)",
+        stats.pruned_parameters,
+        stats.total_parameters,
+        stats.sparsity * 100.0,
+        stats.tensors_pruned
+    );
+    Ok(())
+}
+
+fn cmd_edit(args: &[String]) -> std::io::Result<()> {
+    if args.len() < 3 {
+        return Err(invalid_input(
+            "usage: ferrite edit <model.gguf> <info|scale> <tensor> [<factor>]",
+        ));
+    }
+    let path = lmstudio::resolve(&args[0])?;
+    let op = args[1].as_str();
+    let tensor_name = args[2].as_str();
+
+    let mut editor = ferrite::edit::GgufEditor::open(&path)?;
+    match op {
+        "info" => {
+            let info = editor
+                .tensor(tensor_name)
+                .ok_or_else(|| invalid_input(format!("tensor {tensor_name} not found")))?;
+            println!(
+                "Tensor {}: type={:?}, dims={:?}, offset={}",
+                info.name, info.ty, info.dims, info.offset
+            );
+            Ok(())
+        }
+        "scale" => {
+            let factor: f32 = args
+                .get(3)
+                .ok_or_else(|| invalid_input("scale requires a <factor>"))?
+                .parse()
+                .map_err(|_| invalid_input("invalid scale factor"))?;
+            let mut vals = editor.read_tensor_f32(tensor_name)?;
+            for v in &mut vals {
+                *v *= factor;
+            }
+            editor.write_tensor_f32(tensor_name, &vals)?;
+            editor.flush()?;
+            println!(
+                "Scaled {} elements in tensor {} by {}",
+                vals.len(),
+                tensor_name,
+                factor
+            );
+            Ok(())
+        }
+        other => Err(invalid_input(format!(
+            "unknown edit operation '{other}', expected 'info' or 'scale'"
+        ))),
+    }
+}
+
+fn cmd_watermark(args: &[String]) -> std::io::Result<()> {
+    let key: u64 = flag(args, "--key", 0xCAFE_BABE_DEAD_BEEF)?;
+    let gamma: f32 = flag(args, "--gamma", 0.5)?;
+    let delta: f32 = flag(args, "--delta", 2.0)?;
+
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--key" | "--gamma" | "--delta" => {
+                i += 2;
+                continue;
+            }
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            a if !a.starts_with('-') => positional.push(a.to_string()),
+            other => return Err(invalid_input(format!("unknown flag: {other}"))),
+        }
+        i += 1;
+    }
+
+    if positional.len() < 3 {
+        return Err(invalid_input(
+            "usage: ferrite watermark <detect|generate> <model> <text_or_prompt> [--key <u64>]",
+        ));
+    }
+
+    let mode = positional[0].as_str();
+    let path = lmstudio::resolve(&positional[1])?;
+    let text = positional[2..].join(" ");
+    let gguf = Gguf::open(&path)?;
+    let tokenizer = Tokenizer::from_gguf(&gguf)?;
+    let cfg = ferrite::watermark::WatermarkConfig::new(key, gamma, delta, 1);
+
+    match mode {
+        "detect" => {
+            let tokens = tokenizer.encode(&text, false);
+            let score = ferrite::watermark::WatermarkDetector::detect(&tokens, &cfg, 4.0);
+            println!(
+                "Watermark Analysis ({} evaluated tokens): green={}/{} ({:.1}%), z={:.3}, p={:.5} -> {}",
+                score.total_tokens,
+                score.green_tokens,
+                score.total_tokens,
+                score.green_fraction * 100.0,
+                score.z_score,
+                score.p_value,
+                if score.is_watermarked {
+                    "WATERMARKED"
+                } else {
+                    "UNWATERMARKED"
+                }
+            );
+            Ok(())
+        }
+        "generate" => {
+            let model = Model::load(&gguf)?;
+            let mut state = State::new(&model.config);
+            let mut tokens = tokenizer.encode(&text, true);
+            model.prefill(&mut state, &tokens, 0)?;
+            let mut sampler = Sampler::new(0.8, 40, 0.95, 1);
+            let start_pos = tokens.len();
+            let mut stdout = std::io::stdout();
+            for pos in (start_pos..).take(64) {
+                ferrite::watermark::WatermarkEngine::apply_watermark(
+                    &mut state.logits,
+                    &tokens,
+                    &cfg,
+                );
+                let next = sampler.sample(&mut state.logits);
+                if Some(next) == tokenizer.eos {
+                    break;
+                }
+                let piece = tokenizer.piece(next);
+                stdout.write_all(&piece)?;
+                stdout.flush()?;
+                tokens.push(next);
+                model.forward(&mut state, next, pos)?;
+            }
+            println!();
+            Ok(())
+        }
+        other => Err(invalid_input(format!(
+            "unknown watermark subcommand '{other}', expected 'detect' or 'generate'"
+        ))),
+    }
 }

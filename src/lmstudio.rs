@@ -1,18 +1,19 @@
-//! LM Studio interop.
+//! Universal local GGUF model discovery (LM Studio, Hugging Face Hub, Jan, GPT4All).
 //!
-//! LM Studio already downloaded your models; there is no reason for ferrite to
-//! download them again. It lays them out as
-//! `<models>/<publisher>/<repo>/<file>.gguf`, which becomes the model id
-//! `publisher/repo/file`.
+//! Local tools already downloaded your models; there is no reason for ferrite to
+//! download them again. Standard layouts like
+//! `<models>/<publisher>/<repo>/<file>.gguf` and Hugging Face Hub snapshots
+//! `models--<publisher>--<repo>/snapshots/<hash>/<file>.gguf` are normalized into
+//! clean `publisher/repo/file` model IDs.
 
 use std::env;
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 
-/// How deep to walk under a models directory. Real layout is 2 levels; a few
-/// more costs nothing and survives people who nest by quant level.
-const MAX_DEPTH: u32 = 5;
+/// How deep to walk under a models directory. Real layout is 2 to 4 levels; a few
+/// more costs nothing and survives Hugging Face snapshot subdirectories.
+const MAX_DEPTH: u32 = 6;
 
 #[derive(Clone, Debug)]
 pub struct Model {
@@ -29,7 +30,7 @@ fn home() -> Option<PathBuf> {
 }
 
 /// Every directory we look in, most specific first. `FERRITE_MODELS_DIR` wins
-/// so a custom store works without LM Studio installed at all.
+/// so a custom store works without any external app installed at all.
 pub fn model_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for var in ["FERRITE_MODELS_DIR", "LMSTUDIO_MODELS_DIR"] {
@@ -37,11 +38,34 @@ pub fn model_dirs() -> Vec<PathBuf> {
             dirs.push(PathBuf::from(dir));
         }
     }
+    if let Some(hf_home) = env::var_os("HF_HOME") {
+        dirs.push(PathBuf::from(hf_home).join("hub"));
+    }
     if let Some(home) = home() {
-        // 0.3 and later.
+        // Ferrite local store & user models folder.
+        dirs.push(
+            home.join(".local")
+                .join("share")
+                .join("ferrite")
+                .join("models"),
+        );
+        dirs.push(home.join("models"));
+        // LM Studio 0.3 and later.
         dirs.push(home.join(".lmstudio").join("models"));
-        // 0.2 and earlier.
+        // LM Studio 0.2 and earlier.
         dirs.push(home.join(".cache").join("lm-studio").join("models"));
+        // Hugging Face Hub cache.
+        dirs.push(home.join(".cache").join("huggingface").join("hub"));
+        // Jan.ai model stores.
+        dirs.push(home.join("jan").join("models"));
+        dirs.push(home.join(".config").join("Jan").join("data").join("models"));
+        // GPT4All model store.
+        dirs.push(
+            home.join(".local")
+                .join("share")
+                .join("nomic.ai")
+                .join("GPT4All"),
+        );
     }
     dirs.retain(|d| d.is_dir());
     dirs.dedup();
@@ -67,19 +91,21 @@ fn walk(root: &Path, dir: &Path, depth: u32, out: &mut Vec<Model>) {
         return;
     };
     for entry in entries.flatten() {
-        let Ok(ty) = entry.file_type() else { continue };
-        // Not following links keeps a symlinked models dir from looping.
-        if ty.is_symlink() {
-            continue;
-        }
         let path = entry.path();
-        if ty.is_dir() {
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            // Skip Hugging Face `blobs` directory to avoid duplicate hashes when `snapshots` has clean names.
+            if path.file_name().is_some_and(|n| n == "blobs") {
+                continue;
+            }
             walk(root, &path, depth + 1, out);
         } else if path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
         {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = meta.len();
             out.push(Model {
                 id: id_for(root, &path),
                 path,
@@ -92,14 +118,28 @@ fn walk(root: &Path, dir: &Path, depth: u32, out: &mut Vec<Model>) {
 fn id_for(root: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let rel = rel.with_extension("");
-    rel.components()
+    let parts: Vec<String> = rel
+        .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+        .collect();
+
+    // Normalize Hugging Face Hub layout: `models--<org>--<repo>/snapshots/<rev>/<file>`
+    if parts.len() >= 4 && parts[0].starts_with("models--") && parts[1] == "snapshots" {
+        let repo_parts: Vec<&str> = parts[0]
+            .strip_prefix("models--")
+            .unwrap()
+            .split("--")
+            .collect();
+        let prefix = repo_parts.join("/");
+        let tail = parts[3..].join("/");
+        return format!("{prefix}/{tail}");
+    }
+
+    parts.join("/")
 }
 
 /// A path, or a substring of a model id. Ambiguity is an error rather than a
-/// coin flip — loading the wrong 4 GB file wastes a minute of your life.
+/// coin flip: loading the wrong 4 GB file wastes a minute of your life.
 pub fn resolve(query: &str) -> Result<PathBuf> {
     let direct = Path::new(query);
     if direct.is_file() {
@@ -162,6 +202,18 @@ mod tests {
         assert_eq!(
             id_for(root, path),
             "lmstudio-community/Llama-3.2-1B/model-Q4_K_M"
+        );
+    }
+
+    #[test]
+    fn huggingface_hub_snapshot_normalizes_to_publisher_repo_file() {
+        let root = Path::new("/home/user/.cache/huggingface/hub");
+        let path = Path::new(
+            "/home/user/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct-GGUF/snapshots/a1b2c3d4/qwen2.5-7b-instruct-q4_k_m.gguf",
+        );
+        assert_eq!(
+            id_for(root, path),
+            "Qwen/Qwen2.5-7B-Instruct-GGUF/qwen2.5-7b-instruct-q4_k_m"
         );
     }
 }

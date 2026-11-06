@@ -5,6 +5,7 @@
 //! need a lookup table.
 
 /// IEEE 754 binary16 to f32. Exact: every f16 is representable in f32.
+#[inline(always)]
 pub fn f16(bits: u16) -> f32 {
     let sign = (bits as u32 & 0x8000) << 16;
     let exponent = (bits >> 10) & 0x1F;
@@ -25,6 +26,7 @@ pub fn f16(bits: u16) -> f32 {
 }
 
 /// bfloat16 to f32 — the top 16 bits of an f32, so this is a shift.
+#[inline(always)]
 pub fn bf16(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
 }
@@ -34,6 +36,7 @@ pub fn bf16(bits: u16) -> f32 {
 /// Returns 0.0 on a short slice rather than panicking: callers have already
 /// validated block extents, and a scale of zero yields a zero weight, which is
 /// the least destructive way to fail.
+#[inline(always)]
 pub fn read_f16(bytes: &[u8]) -> f32 {
     match bytes.first_chunk::<2>() {
         Some(pair) => f16(u16::from_le_bytes(*pair)),

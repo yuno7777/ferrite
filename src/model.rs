@@ -294,6 +294,10 @@ pub struct Workspace {
     scratch: Vec<f32>,
     /// The activation, quantized once per matvec and shared by every row.
     quantized: quant::activation::Quantized,
+    /// Batch activations quantized once per matmul (`batch` entries).
+    batch_quantized: Vec<quant::activation::Quantized>,
+    /// Persistent worker thread pool so matvec/matmul never spawns OS threads per call.
+    pool: Option<std::sync::Arc<crate::tp::ThreadPool>>,
     /// Set false to force the exact f32 path everywhere.
     ///
     /// The integer kernels are an approximation — small, bounded, and the same
@@ -308,8 +312,21 @@ impl Workspace {
         Self {
             scratch: vec![0.0; widest],
             quantized: quant::activation::Quantized::with_capacity(widest),
+            batch_quantized: Vec::new(),
+            pool: None,
             int8: true,
         }
+    }
+
+    fn ensure_pool(&mut self, threads: usize) -> &crate::tp::ThreadPool {
+        let need_new = match &self.pool {
+            Some(p) => p.num_threads() != threads,
+            None => true,
+        };
+        if need_new {
+            self.pool = Some(std::sync::Arc::new(crate::tp::ThreadPool::new(threads)));
+        }
+        self.pool.as_ref().unwrap()
     }
 }
 
@@ -317,6 +334,61 @@ impl Workspace {
 struct SyncMutPtr(*mut f32);
 unsafe impl Send for SyncMutPtr {}
 unsafe impl Sync for SyncMutPtr {}
+
+struct MatvecJobCtx<'a, 'w> {
+    weight: &'a Weight<'w>,
+    x: &'a [f32],
+    quantized: &'a quant::activation::Quantized,
+    int8: bool,
+    out_ptr: SyncMutPtr,
+}
+
+unsafe fn run_matvec_worker(ctx_ptr: *const (), start: usize, end: usize, _thread_id: usize) {
+    let ctx = &*(ctx_ptr as *const MatvecJobCtx<'_, '_>);
+    let count = end - start;
+    let out_slice = std::slice::from_raw_parts_mut(ctx.out_ptr.0.add(start), count);
+    let mut scratch = if ctx.int8 || quant::dot::supports(ctx.weight.ty) {
+        Vec::new()
+    } else {
+        vec![0.0f32; ctx.weight.cols]
+    };
+    let _ = ctx.weight.rows_into(
+        out_slice,
+        start,
+        ctx.x,
+        ctx.quantized,
+        ctx.int8,
+        &mut scratch,
+    );
+}
+
+struct MatmulJobCtx<'a, 'w> {
+    weight: &'a Weight<'w>,
+    x: &'a [f32],
+    batch_quantized: &'a [quant::activation::Quantized],
+    int8: bool,
+    batch: usize,
+    out_ptr: SyncMutPtr,
+}
+
+unsafe fn run_matmul_worker(ctx_ptr: *const (), start: usize, end: usize, _thread_id: usize) {
+    let ctx = &*(ctx_ptr as *const MatmulJobCtx<'_, '_>);
+    let mut scratch = if ctx.int8 || quant::dot::supports(ctx.weight.ty) {
+        Vec::new()
+    } else {
+        vec![0.0f32; ctx.weight.cols]
+    };
+    let _ = ctx.weight.matmul_row_range(
+        ctx.x,
+        ctx.batch_quantized,
+        ctx.int8,
+        ctx.out_ptr,
+        start,
+        end - start,
+        ctx.batch,
+        &mut scratch,
+    );
+}
 
 /// A weight matrix left in its stored, quantized form.
 ///
@@ -393,45 +465,25 @@ impl<'a> Weight<'a> {
         if int8 {
             workspace.quantized.fill(x);
         }
-        let Workspace {
-            scratch, quantized, ..
-        } = workspace;
 
-        // Below a few rows per worker the spawn costs more than the work.
+        // Below a few rows per worker the dispatch costs more than the work.
         if threads <= 1 || self.rows < threads * 4 {
+            let Workspace {
+                scratch, quantized, ..
+            } = workspace;
             return self.rows_into(out, 0, x, quantized, int8, scratch);
         }
 
-        let chunk = self.rows.div_ceil(threads);
-        let outcomes: Vec<Result<()>> = std::thread::scope(|scope| {
-            let quantized = &*quantized;
-            let workers: Vec<_> = out
-                .chunks_mut(chunk)
-                .enumerate()
-                .map(|(index, rows)| {
-                    scope.spawn(move || {
-                        // Only the slow path needs a scratch row, so a type
-                        // with a kernel allocates nothing per worker.
-                        let mut scratch = if int8 || quant::dot::supports(self.ty) {
-                            Vec::new()
-                        } else {
-                            vec![0.0; self.cols]
-                        };
-                        self.rows_into(rows, index * chunk, x, quantized, int8, &mut scratch)
-                    })
-                })
-                .collect();
-            workers
-                .into_iter()
-                .map(|worker| {
-                    worker
-                        .join()
-                        .unwrap_or_else(|_| Err(bad("worker panicked")))
-                })
-                .collect()
-        });
-
-        outcomes.into_iter().collect::<Result<Vec<()>>>()?;
+        workspace.ensure_pool(threads);
+        let pool = workspace.pool.as_ref().unwrap();
+        let ctx = MatvecJobCtx {
+            weight: self,
+            x,
+            quantized: &workspace.quantized,
+            int8,
+            out_ptr: SyncMutPtr(out.as_mut_ptr()),
+        };
+        pool.dispatch(self.rows, &ctx, run_matvec_worker);
         Ok(())
     }
 
@@ -510,10 +562,10 @@ impl<'a> Weight<'a> {
         debug_assert_eq!(x.len(), batch * self.cols);
         debug_assert_eq!(out.len(), batch * self.rows);
         let scratch = &mut scratch[..self.cols];
-        self.matmul_rows_into(x, out, 0, self.rows, batch, scratch)
+        self.matmul_rows_into(x, &[], false, out, 0, self.rows, batch, scratch)
     }
 
-    /// Parallel `matmul` distributing row ranges across `threads` worker threads.
+    /// Parallel `matmul` distributing row ranges across `threads` persistent worker threads.
     pub fn matmul_threaded(
         &self,
         x: &[f32],
@@ -528,42 +580,57 @@ impl<'a> Weight<'a> {
         debug_assert_eq!(x.len(), batch * self.cols);
         debug_assert_eq!(out.len(), batch * self.rows);
 
-        if threads <= 1 || self.rows < threads * 4 {
-            let scratch = &mut workspace.scratch[..self.cols];
-            return self.matmul_rows_into(x, out, 0, self.rows, batch, scratch);
+        let int8 = workspace.int8 && quant::idot::supports(self.ty);
+        if int8 {
+            if workspace.batch_quantized.len() < batch {
+                workspace.batch_quantized.resize_with(batch, || {
+                    quant::activation::Quantized::with_capacity(self.cols)
+                });
+            }
+            for b in 0..batch {
+                workspace.batch_quantized[b].fill(&x[b * self.cols..(b + 1) * self.cols]);
+            }
         }
 
-        let chunk = self.rows.div_ceil(threads);
-        let out_ptr = SyncMutPtr(out.as_mut_ptr());
-        let outcomes: Vec<Result<()>> = std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..self.rows)
-                .step_by(chunk)
-                .map(|first_row| {
-                    let num_rows = (self.rows - first_row).min(chunk);
-                    scope.spawn(move || {
-                        let mut scratch = if quant::dot::supports(self.ty) {
-                            Vec::new()
-                        } else {
-                            vec![0.0f32; self.cols]
-                        };
-                        self.matmul_row_range(x, out_ptr, first_row, num_rows, batch, &mut scratch)
-                    })
-                })
-                .collect();
+        if threads <= 1 || self.rows < threads * 4 {
+            let Workspace {
+                scratch,
+                batch_quantized,
+                ..
+            } = workspace;
+            let scratch = &mut scratch[..self.cols];
+            return self.matmul_rows_into(
+                x,
+                batch_quantized,
+                int8,
+                out,
+                0,
+                self.rows,
+                batch,
+                scratch,
+            );
+        }
 
-            workers
-                .into_iter()
-                .map(|w| w.join().unwrap_or_else(|_| Err(bad("worker panicked"))))
-                .collect()
-        });
-
-        outcomes.into_iter().collect::<Result<Vec<()>>>()?;
+        workspace.ensure_pool(threads);
+        let pool = workspace.pool.as_ref().unwrap();
+        let ctx = MatmulJobCtx {
+            weight: self,
+            x,
+            batch_quantized: &workspace.batch_quantized,
+            int8,
+            batch,
+            out_ptr: SyncMutPtr(out.as_mut_ptr()),
+        };
+        pool.dispatch(self.rows, &ctx, run_matmul_worker);
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn matmul_rows_into(
         &self,
         x: &[f32],
+        batch_quantized: &[quant::activation::Quantized],
+        int8: bool,
         out: &mut [f32],
         first_row: usize,
         num_rows: usize,
@@ -575,7 +642,12 @@ impl<'a> Weight<'a> {
         for r_offset in 0..num_rows {
             let row_idx = first_row + r_offset;
             let row = self.row_slice(row_idx);
-            if has_fused {
+            if int8 {
+                for (b, q_tok) in batch_quantized.iter().enumerate().take(batch) {
+                    out[b * self.rows + row_idx] =
+                        quant::idot::integer(self.ty, row, q_tok).expect("supported");
+                }
+            } else if has_fused {
                 for b in 0..batch {
                     let x_tok = &x[b * self.cols..(b + 1) * self.cols];
                     out[b * self.rows + row_idx] =
@@ -592,9 +664,12 @@ impl<'a> Weight<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn matmul_row_range(
         &self,
         x: &[f32],
+        batch_quantized: &[quant::activation::Quantized],
+        int8: bool,
         out: SyncMutPtr,
         first_row: usize,
         num_rows: usize,
@@ -606,7 +681,14 @@ impl<'a> Weight<'a> {
         for r_offset in 0..num_rows {
             let row_idx = first_row + r_offset;
             let row = self.row_slice(row_idx);
-            if has_fused {
+            if int8 {
+                for (b, q_tok) in batch_quantized.iter().enumerate().take(batch) {
+                    let val = quant::idot::integer(self.ty, row, q_tok).expect("supported");
+                    unsafe {
+                        *out.0.add(b * self.rows + row_idx) = val;
+                    }
+                }
+            } else if has_fused {
                 for b in 0..batch {
                     let x_tok = &x[b * self.cols..(b + 1) * self.cols];
                     let val = quant::dot::fused(self.ty, row, x_tok).expect("supported");

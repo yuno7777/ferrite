@@ -13,9 +13,12 @@ ferrite <command> [arguments] [options]
 When `<model>` is specified, Ferrite attempts to resolve it using the following rules:
 
 1. **Direct Path**: If `<model>` points to an existing file on disk (or starts with `./`, `/`, or `..\`), it is opened directly.
-2. **LM Studio Store**: Ferrite searches for matching `.gguf` files in LM Studio model directories:
-   - `~/.lmstudio/models` (LM Studio 0.3+)
-   - `~/.cache/lm-studio/models` (LM Studio 0.2 and earlier)
+2. **Universal Local Model Stores**: Ferrite searches for matching `.gguf` files across local model directories:
+   - `~/.lmstudio/models` and `~/.cache/lm-studio/models` (LM Studio)
+   - `~/.cache/huggingface/hub` and `$HF_HOME/hub` (Hugging Face Hub cache)
+   - `~/jan/models` and `~/.config/Jan/data/models` (Jan.ai)
+   - `~/.local/share/nomic.ai/GPT4All` (GPT4All)
+   - `~/.local/share/ferrite/models` and `~/models` (Local model stores)
 3. **Environment Override**: Setting `FERRITE_MODELS_DIR` overrides the search root for downloaded models.
 4. **Fuzzy Substring Match**: Any unique substring from `ferrite list` can be used. If more than one model matches, Ferrite rejects the query to prevent running the wrong model.
 
@@ -23,9 +26,39 @@ When `<model>` is specified, Ferrite attempts to resolve it using the following 
 
 ## Commands
 
+### `ferrite doctor [model]`
+
+Profiles host hardware (architecture, logical CPUs, total/available RAM, active SIMD extensions, single-core Q4_K streaming bandwidth), prints model tier readiness recommendations, and lists discovered local GGUF models.
+
+```bash
+ferrite doctor
+```
+
+---
+
+### `ferrite bench [--threads <n>] [--model <model>] [--json]`
+
+Runs 1-thread and multi-thread GEMV benchmarks across `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, and `Q4_0` alongside end-to-end batched prefill (`pp64`) and token decode (`tg32`).
+
+```bash
+ferrite bench --threads 4
+```
+
+---
+
+### `ferrite chat <model> [--system <prompt>]`
+
+Starts an interactive multi-turn terminal chat REPL with persistent KV cache across turns and slash commands (`/clear`, `/system <prompt>`, `/stats`, `/exit`).
+
+```bash
+ferrite chat llama-3.2 --system "You are a concise Rust expert."
+```
+
+---
+
 ### `ferrite list`
 
-Lists all `.gguf` models found in the LM Studio discovery directories or the directory specified by `FERRITE_MODELS_DIR`.
+Lists all `.gguf` models found across local model discovery directories or the directory specified by `FERRITE_MODELS_DIR`.
 
 ```bash
 ferrite list
