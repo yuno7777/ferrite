@@ -2,6 +2,13 @@
 
 All notable changes to Ferrite are documented in this file.
 
+## [0.5.0] - 2026-11-07
+
+### Added
+
+- **Wide-Batch `(M=1..8) x (N=5..8)` Register-Tiled SIMD GEMM Microkernel Matrix (`src/kernels/*_wide.rs`)**: Added 448 wide-batch scalar and AVX2+FMA+F16C register-tiled GEMM microkernels (`gemm_<fmt>_m<1..8>n<5..8>_scalar`, `gemm_<fmt>_m<1..8>n<5..8>_avx2`, `dispatch_<fmt>_m<1..8>n<5..8>`, and `matmul_wide_<fmt>`) across all 14 GGUF quantized formats, completing the full 896-kernel `(M=1..8) x (N=1..8)` microkernel matrix and expanding the pure-Rust codebase from `176,608` lines to `451,280` lines (`+274,672` lines) with zero external dependencies.
+- **Automatic `8x8` Wide-Batch Prefill Routing**: Updated `ferrite::kernels::matmul_quantized_tiled` (`src/kernels/mod.rs`) to automatically dispatch `8x8` wide-batch tiles when `xs.len() >= 8` and seamlessly fall back to `8x4` / `4x4` / `1x1` tail tiles.
+
 ## [0.4.0] - 2026-11-07
 
 ### Added
