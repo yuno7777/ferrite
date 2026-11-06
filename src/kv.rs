@@ -22,6 +22,71 @@ pub enum KvCacheType {
     Q4_0,
 }
 
+/// F32 storage for DeepSeek MLA's compact KV latent and decoupled RoPE key.
+/// This stores one latent row and one shared RoPE key per token, independent of
+/// the number of attention heads. Attention projection is performed by the
+/// model layer, which owns the per-head up-projection weights.
+#[derive(Clone, Debug)]
+pub struct MlaKvCache {
+    latent: Vec<f32>,
+    rope_key: Vec<f32>,
+    layers: usize,
+    context: usize,
+    latent_dim: usize,
+    rope_dim: usize,
+}
+
+impl MlaKvCache {
+    pub fn new(layers: usize, context: usize, latent_dim: usize, rope_dim: usize) -> Self {
+        Self {
+            latent: vec![0.0; layers * context * latent_dim],
+            rope_key: vec![0.0; layers * context * rope_dim],
+            layers,
+            context,
+            latent_dim,
+            rope_dim,
+        }
+    }
+
+    pub fn cache_bytes(&self) -> usize {
+        (self.latent.len() + self.rope_key.len()) * std::mem::size_of::<f32>()
+    }
+
+    pub fn store(&mut self, layer: usize, pos: usize, latent: &[f32], rope_key: &[f32]) {
+        assert!(layer < self.layers && pos < self.context);
+        assert_eq!(latent.len(), self.latent_dim);
+        assert_eq!(rope_key.len(), self.rope_dim);
+        let slot = layer * self.context + pos;
+        let latent_start = slot * self.latent_dim;
+        self.latent[latent_start..latent_start + self.latent_dim].copy_from_slice(latent);
+        let rope_start = slot * self.rope_dim;
+        self.rope_key[rope_start..rope_start + self.rope_dim].copy_from_slice(rope_key);
+    }
+
+    pub fn get(&self, layer: usize, pos: usize) -> (&[f32], &[f32]) {
+        assert!(layer < self.layers && pos < self.context);
+        let slot = layer * self.context + pos;
+        let latent_start = slot * self.latent_dim;
+        let rope_start = slot * self.rope_dim;
+        (
+            &self.latent[latent_start..latent_start + self.latent_dim],
+            &self.rope_key[rope_start..rope_start + self.rope_dim],
+        )
+    }
+
+    pub fn truncate(&mut self, keep_pos: usize, end_pos: usize) {
+        for layer in 0..self.layers {
+            for pos in keep_pos..end_pos.min(self.context) {
+                let slot = layer * self.context + pos;
+                let latent_start = slot * self.latent_dim;
+                self.latent[latent_start..latent_start + self.latent_dim].fill(0.0);
+                let rope_start = slot * self.rope_dim;
+                self.rope_key[rope_start..rope_start + self.rope_dim].fill(0.0);
+            }
+        }
+    }
+}
+
 impl std::str::FromStr for KvCacheType {
     type Err = String;
 
@@ -930,6 +995,16 @@ fn attention_online_q4_0(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mla_cache_stores_compact_latent_and_rope_rows() {
+        let mut cache = MlaKvCache::new(2, 4, 3, 2);
+        cache.store(1, 2, &[1.0, 2.0, 3.0], &[4.0, 5.0]);
+        assert_eq!(cache.get(1, 2), (&[1.0, 2.0, 3.0][..], &[4.0, 5.0][..]));
+        assert_eq!(cache.cache_bytes(), 2 * 4 * 5 * std::mem::size_of::<f32>());
+        cache.truncate(2, 3);
+        assert_eq!(cache.get(1, 2), (&[0.0, 0.0, 0.0][..], &[0.0, 0.0][..]));
+    }
 
     #[test]
     fn f32_cache_supports_distinct_key_and_value_widths() {

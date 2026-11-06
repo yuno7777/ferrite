@@ -1,6 +1,6 @@
-//! ferrite -- pure-Rust LLM inference.
+//! ferrite: pure-Rust LLM inference.
 //!
-//! No dependencies. Not "minimal dependencies" -- `cargo tree` prints one line.
+//! No dependencies. Not "minimal dependencies": `cargo tree` prints one line.
 //! Reads GGUF straight out of a memory mapping, including the models LM Studio
 //! already downloaded.
 //!
@@ -43,7 +43,7 @@ pub use embed::{cosine_similarity, l2_normalize, pool, EmbedEngine, Pooling};
 pub use eval::{cross_entropy_loss, ChunkPerplexity, PerplexityEvaluator, PerplexityReport};
 pub use gguf::{discover_shards, GgmlType, Gguf, TensorInfo, Value};
 pub use grammar::{ChoiceGrammar, Grammar, JsonGrammar, RegexMatcher};
-pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType};
+pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType, MlaKvCache};
 pub use lora::{LoraAdapter, LoraPair};
 pub use map::Mmap;
 pub use model::ChunkedPrefill;

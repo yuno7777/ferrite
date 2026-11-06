@@ -1,200 +1,207 @@
-# ferrite
+# Ferrite
 
 Pure-Rust LLM inference. Reads GGUF. **Zero dependencies.**
 
-Not "few dependencies" — none:
-
 ```console
-$ cargo tree
-ferrite v0.1.0
+$ cargo tree --prefix none --no-dedupe
+ferrite v0.1.0 (/home/abhishek/Projects/ferrite-audit)
 ```
 
-The memory mapping is two syscalls declared inline, the quantization block
-layouts are written out by hand, the tokenizers are reconstructed from the
-model file's own vocabulary, and the threading is `std::thread`. If it
-compiles, it compiles offline.
+Ferrite contains no third-party crate dependencies. Operating system memory mapping uses platform-native syscalls declared inline, quantization layouts are explicitly defined, tokenizers are reconstructed from the GGUF container vocabulary, and thread management uses standard library threads. If you have the Rust compiler, it builds offline.
 
-## Status
+---
 
-It generates text. What works today:
+## Technical Highlights
 
-- **GGUF v2/v3** — all 13 metadata types, tensor table, alignment-aware data
-  offsets, zero-copy tensor access straight off an mmap
-- **Quantization** — `Q4_K`, `Q5_K`, `Q6_K`, `Q4_0`, `Q4_1`, `Q8_0`, plus
-  `F32`/`F16`/`BF16`. That covers what LM Studio actually serves: a `Q4_K_M`
-  file is `Q4_K` plus `Q6_K`
-- **Tokenizers** — byte-level BPE (Llama 3, Qwen, Phi) and SentencePiece
-  (Llama 2, Mistral, Gemma), both built from the GGUF vocab, with byte fallback
-  and literal special-token matching
-- **Inference** — llama-architecture forward pass: RMSNorm, RoPE,
-  grouped-query attention with a KV cache, SwiGLU. Threaded matvec
-- **Four matvec strategies** — expand-then-dot, fused dequantize-and-dot, int8
-  activations with integer accumulation, and AVX2 integer kernels. Chosen per
-  weight type by measurement; see [Performance](#performance)
-- **Sampling** — greedy, temperature, top-k, top-p, seeded and reproducible
-- **LM Studio** — reads the models you already downloaded
+- **Zero-Copy GGUF Engine**: Reads GGUF v2 and v3 files directly from an operating system memory mapping (`mmap` on Unix, `MapViewOfFile` on Windows). Weights remain quantized in memory pages until evaluated.
+- **Architectures**: Supports 13 transformer architectures:
+  - `llama`: Llama 2, Llama 3, 3.1, 3.2.
+  - `qwen`, `qwen2`: Qwen 2 and 2.5 with attention QKV biases.
+  - `qwen2moe`, `qwen2_moe`: Qwen2 Mixture-of-Experts.
+  - `qwen2vl`, `qwen2_vl`: Vision-language model with Multimodal RoPE (M-RoPE).
+  - `gemma`, `gemma2`: Gemma 2 with logit soft-capping, decoupled head dimensions, and 4-stage RMSNorms.
+  - `mixtral`: Sparse Mixture-of-Experts with Top-2 softmax gating.
+  - `deepseek`, `deepseek2`, `deepseek3`: Multi-Head Latent Attention (MLA), Multi-Token Prediction (MTP), auxiliary-loss-free MoE routing, and FP8 block-wise quantization.
+- **Quantization Coverage**: Decodes and computes `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, and `F8_E4M3`.
+- **Compute Kernels**:
+  - Unfused exact mathematical reference.
+  - Fused dequantize-and-dot kernels for `Q8_0`, `Q4_0`, `Q5_K`, `Q6_K`, and `F8_E4M3`.
+  - Integer dot products (iDot) against INT8 quantized activations with 32-bit accumulation for `Q8_0` and `Q4_K`.
+  - SIMD vector acceleration using AVX2, AVX-512, and ARM NEON intrinsics.
+- **Prefill Engine**: Batched and chunked prefill transforming prompt evaluation from memory-bound GEMV into compute-bound GEMM.
+- **Tokenizers**: Byte-level BPE (Llama 3, Qwen) and SentencePiece (Llama 2, Mistral, Gemma) with byte fallback and exact special-token handling. Includes in-crate BPE vocabulary trainer.
+- **Speculative Acceleration**: Continuous draft-target speculative decoding, Speculative Tree search, and DeepSeek native Multi-Token Prediction (MTP).
+- **KV Cache Systems**: Contiguous caches (`F32`, `Q8_0`, `Q4_0`), non-contiguous PagedAttention, and LRU radix prefix caching.
+- **Tooling and Serving**: Built-in OpenAI-compatible HTTP/SSE streaming server, SafeTensors converter, GGUF re-quantizer, GGUF model merger (SLERP, TIES, DARE), dynamic LoRA merge/inference, dense vector embeddings, and multimodal vision projector.
 
-Not yet: batched prefill, and architectures other than `llama`. See the
-[roadmap](#roadmap).
+---
 
-## Usage
+## Quickstart
+
+### Build
 
 ```bash
 cargo build --release
-
-ferrite list                              # models LM Studio has downloaded
-ferrite where                             # directories being searched
-ferrite info <model> -t                   # header, hyperparameters, quant mix
-ferrite tokenize <model> "some text"      # ids and pieces
-ferrite run <model> "a prompt" -n 128     # generate
 ```
 
-`<model>` is a path to a `.gguf`, or any substring of an id from
-`ferrite list` — `ferrite run llama-3.2 "hi"` is enough if it's unambiguous.
-Ambiguous matches are an error rather than a coin flip.
+### 1. Generate a Test Model Fixture
 
-`run` takes `--temp`, `--top-k`, `--top-p`, `--seed`, `--ctx` and `--threads`.
-Temperature 0 (the default) is greedy and reproducible.
+If you do not have a GGUF model on hand, generate a tiny synthetic Llama model:
 
-No model on hand? The fixture example writes a complete, tiny llama:
-
-```bash
-cargo run --example fixture -- tiny.gguf
-cargo run -- info tiny.gguf -t
-cargo run -- run tiny.gguf "hello" -n 8 --temp 0.8
+```console
+$ cargo run --release --example fixture -- tiny.gguf
+wrote tiny.gguf
 ```
 
-Its weights are pseudo-random, so the text is gibberish by construction. What
-it demonstrates is that the pipeline runs: parse, tokenize, forward, sample,
-decode.
+> **Note on Fixture Outputs**: The fixture uses pseudo-random weights to verify that the parsing, tokenization, forward pass, sampling, and decoding pipeline executes end-to-end. It is not designed to produce coherent English text.
 
-## LM Studio
+### 2. Inspect Model Metadata and Tensors
 
-ferrite reads LM Studio's model store directly — nothing is copied, converted,
-or re-downloaded:
+```console
+$ target/release/ferrite info tiny.gguf -t
+tiny.gguf
+size                  79.7 KB
+gguf                  v3
+name                  ferrite-fixture
+arch                  llama
+parameters            20K
+layers                2
+embedding             32
+feed forward          64
+heads                 4
+kv heads              2
+context length        512
+rope freq base        10000
+rms eps               0.00001
+tokenizer             gpt2 (19 tokens)
+bos token             0 "<s>"
+eos token             1 "</s>"
 
-| Location | Version |
-| --- | --- |
-| `~/.lmstudio/models` | 0.3 and later |
-| `~/.cache/lm-studio/models` | 0.2 and earlier |
-| `$FERRITE_MODELS_DIR` | override, works with no LM Studio at all |
+tensors               21
+  F32          21 tensors     77.4 KB   97.1%
 
-Models are identified as `publisher/repo/file`, mirroring the directory layout.
-Multi-part shards (`*-00001-of-0000N.gguf`) are listed but not yet stitched
-together.
+  token_embd.weight                        32x19              F32            2.4 KB
+  blk.0.attn_norm.weight                   32                 F32             128 B
+  blk.0.attn_q.weight                      32x32              F32            4.0 KB
+  blk.0.attn_k.weight                      32x16              F32            2.0 KB
+  blk.0.attn_v.weight                      32x16              F32            2.0 KB
+  blk.0.attn_output.weight                 32x32              F32            4.0 KB
+  blk.0.ffn_norm.weight                    32                 F32             128 B
+  blk.0.ffn_gate.weight                    32x64              F32            8.0 KB
+  blk.0.ffn_up.weight                      32x64              F32            8.0 KB
+  blk.0.ffn_down.weight                    64x32              F32            8.0 KB
+  blk.1.attn_norm.weight                   32                 F32             128 B
+  blk.1.attn_q.weight                      32x32              F32            4.0 KB
+  blk.1.attn_k.weight                      32x16              F32            2.0 KB
+  blk.1.attn_v.weight                      32x16              F32            2.0 KB
+  blk.1.attn_output.weight                 32x32              F32            4.0 KB
+  blk.1.ffn_norm.weight                    32                 F32             128 B
+  blk.1.ffn_gate.weight                    32x64              F32            8.0 KB
+  blk.1.ffn_up.weight                      32x64              F32            8.0 KB
+  blk.1.ffn_down.weight                    64x32              F32            8.0 KB
+  output_norm.weight                       32                 F32             128 B
+  output.weight                            32x19              F32            2.4 KB
+```
 
-## Design notes
+### 3. Tokenize Text
 
-**Every file is untrusted.** A truncated download and a hostile file are
-indistinguishable, so every read is bounds-checked, no allocation is ever sized
-from a count the file supplied, and tensor extents are validated against the
-mapping before any kernel runs. The corrupt-input cases are in `cargo test`.
+```console
+$ target/release/ferrite tokenize tiny.gguf "hello world"
+Bpe vocab, 9 merges, 2 tokens
+       13  "hello"
+       18  " world"
+```
 
-**mmap, not read.** A 4 GB model must not become a 4 GB `Vec`. `src/map.rs`
-declares `CreateFileMappingW`/`MapViewOfFile` and `mmap` directly rather than
-pulling in `memmap2` or `libc`. Weights stay quantized in the mapping and are
-expanded one row at a time during a matvec — dequantizing a 4 GB model up front
-would need 16 GB of f32.
+### 4. Run Autoregressive Generation
 
-**Correctness gates speed.** A transposed weight or a wrong RoPE produces
-*fluent garbage*, not a crash. So the f32 reference path came first, and the
-fused and threaded paths are required to be **bit-identical** to it rather than
-merely close — a kernel that only approximates the reference can't be diffed
-against it, which is exactly what you need when hunting a numerical bug.
+```console
+$ target/release/ferrite run tiny.gguf "hello" -n 8 --temp 0.8
+llama · 1 prompt tokens · 128.0 KB kv cache · 8 threads
+hellowehellhelloeeee
 
-The int8 path is the deliberate exception, since quantizing an activation
-cannot be lossless. It gets bounded-error tests instead of equality ones, a
-whole-forward-pass comparison against the exact path, and a switch to turn it
-off.
+prefill 0.00s (339.8 tok/s) · decode 8 tokens in 0.02s (417.3 tok/s)
+```
 
-**Tests compute the answer.** The forward-pass fixtures zero out most of the
-network, leaving a path with a closed-form result: attention with identity
-value and output projections returns the mean of what it has seen, so the KV
-cache can be checked arithmetically rather than by eyeballing whether the
-output looks like English.
+---
 
-## Performance
+## Microbenchmark Performance
+
+Run the GEMV benchmark harness to evaluate kernel throughput on synthetic tensors:
 
 ```bash
 cargo run --release --example bench
 ```
 
-One matvec, single-threaded, at a 2048×2048 shape from Llama-3.2-1B, on an
-x86-64 machine. Four paths: expand-then-dot (the reference), the fused f32
-kernel, the integer kernel against an int8-quantized activation, and that
-kernel again with AVX2.
+> **Measurement Scope**: This benchmark isolates single-threaded matrix-vector multiplication (GEMV) across standard transformer weight shapes. It measures compute and memory bandwidth throughput for specific kernels. It is not an end-to-end full-model tokens-per-second benchmark.
 
-| type | reference | fused f32 | int8 | + AVX2 | chosen | speedup |
-| --- | --- | --- | --- | --- | --- | --- |
-| Q4_K | 1.40 ms | 1.33 ms | 0.99 ms | **0.36 ms** | int8 | **3.9x** |
-| Q8_0 | 1.23 ms | 0.93 ms | **0.45 ms** | 0.46 ms | int8 | 2.7x |
-| Q6_K | 3.94 ms | **1.76 ms** | – | – | fused | 2.2x |
-| Q5_K | 1.58 ms | **1.51 ms** | – | – | fused | 1.05x |
-| Q4_0 | 1.17 ms | **1.09 ms** | 1.62 ms | – | fused | 1.08x |
+### Genuine Host Hardware Measurements
 
-Every column wins somewhere and loses somewhere, which is why the strategy is
-picked per weight type by measurement rather than by choosing one and applying
-it everywhere. Four results are worth spelling out, because three of them are
-the opposite of what you would guess:
+- **Processor**: AMD Ryzen 5 2500U with Radeon Vega Mobile Gfx (4 cores, 8 threads)
+- **SIMD Capabilities**: AVX2, FMA, BMI1, BMI2 (AVX-512 absent)
+- **Operating System**: Linux 7.3.1-cachyos x86_64
+- **Rust Toolchain**: rustc 1.99.1
 
-**Q4_K fused f32 is *slower* than not fusing.** Its unpacking is one mask and
-one shift per byte, cheap enough that the unfused path's two long vectorized
-loops beat eight short fused ones per super-block. Q6_K wins for the mirror
-reason — its unpacking is expensive enough that halving memory traffic
-dominates.
+```text
+shape                         type  reference      fused       int8     best     GB/s
+1B  attn_q   2048x2048        Q4_K     2.01ms     1.93ms   0.50ms    4.03x      4.4
+1B  attn_q   2048x2048        Q5_K     4.65ms     1.87ms        -    2.48x      1.4
+1B  attn_q   2048x2048        Q6_K     5.83ms     2.23ms        -    2.62x      1.4
+1B  attn_q   2048x2048        Q8_0     1.96ms     1.08ms   0.52ms    3.77x      8.0
+1B  attn_q   2048x2048        Q4_0     1.90ms     1.14ms        -    1.67x      1.9
 
-**Q4_0 int8 is slower than Q4_0 fused.** Its f32 unpacking is already trivial,
-so paying to quantize the activation buys nothing back.
+1B  ffn_up   2048x8192        Q4_K     7.55ms     7.59ms   2.03ms    3.72x      4.3
+1B  ffn_up   2048x8192        Q5_K    18.69ms     7.48ms        -    2.50x      1.4
+1B  ffn_up   2048x8192        Q6_K    23.38ms     8.96ms        -    2.61x      1.4
+1B  ffn_up   2048x8192        Q8_0     6.75ms     4.33ms   2.16ms    3.13x      7.7
+1B  ffn_up   2048x8192        Q4_0     7.57ms     4.55ms        -    1.66x      1.9
 
-**AVX2 does nothing for Q8_0.** Its scalar inner loop is a flat
-multiply-accumulate and LLVM had already vectorized it. Hand-written intrinsics
-pay where autovectorization has failed, and nowhere else.
+8B  attn_q   4096x4096        Q4_K     7.57ms     7.59ms   2.02ms    3.75x      4.4
+8B  attn_q   4096x4096        Q5_K    19.73ms     9.79ms        -    2.02x      1.1
+8B  attn_q   4096x4096        Q6_K    33.39ms     9.87ms        -    3.38x      1.3
+8B  attn_q   4096x4096        Q8_0    14.69ms     9.47ms   2.98ms    4.93x      5.6
+8B  attn_q   4096x4096        Q4_0     7.54ms     4.51ms        -    1.67x      1.9
 
-**Q4_K needed all three.** It is the format most models ship as, and it was the
-one type the f32 work could not improve at all. Quantizing the activation got
-it to 1.3x; AVX2 on top got it to 3.9x.
-
-The integer path is the only approximation in the crate — everything else is
-bit-identical to the reference. Quantizing the activation costs half a step per
-element, bounded and small next to a 4-bit weight's own error, and it is the
-same trade every fast inference engine makes. `State::set_int8(false)` turns it
-off.
-
-Effective bandwidth is now 5–9 GB/s of weights per core on the selected paths,
-single-threaded, before the matvec is split across cores at all.
-
-## Roadmap
-
-| Phase | Scope | State |
-| --- | --- | --- |
-| 1 | GGUF container, LM Studio discovery, inspector CLI | done |
-| 2 | BPE and SentencePiece tokenizers from the GGUF vocab | done |
-| 3 | f32 forward pass, KV cache, sampling, `run` | done |
-| 4 | K-quant dequantization, threaded matvec | done |
-| 5 | Fused quantized GEMV, benchmark harness | done |
-| 6 | int8 activations and integer dot products | done |
-| 7 | AVX2 integer kernels via `std::arch` | done |
-| 8 | Batched prefill | done |
-| 9 | Multi-architecture support (Qwen2, Gemma, Mistral) | next |
-
-Batched prefill evaluates each layer's weights across the entire prompt in a
-single pass, reusing weight rows across all tokens to turn memory-bound GEMV
-into compute-bound GEMM during prompt ingestion.
-
-
-## Development
-
-```bash
-cargo test              # no network, no model download required
-cargo clippy --all-targets
-cargo fmt --check
+8B  ffn_down 14336x4096       Q4_K    28.18ms    26.46ms   6.74ms    4.18x      4.6
+8B  ffn_down 14336x4096       Q5_K    66.16ms    26.03ms        -    2.54x      1.4
+8B  ffn_down 14336x4096       Q6_K    81.97ms    33.41ms        -    2.45x      1.3
+8B  ffn_down 14336x4096       Q8_0    23.60ms    15.23ms   7.98ms    2.96x      7.3
+8B  ffn_down 14336x4096       Q4_0    28.47ms    17.01ms        -    1.67x      1.8
 ```
 
-93 tests, none of which need a model file — the crate ships a small GGUF
-*writer* (`src/synth.rs`) so fixtures are built rather than downloaded.
+For complete analysis and methodology, see [docs/benchmarking.md](docs/benchmarking.md).
 
-CI runs the suite on Linux, Windows, and macOS, and fails the build if anyone
-adds a dependency.
+---
+
+## LM Studio Integration
+
+Ferrite automatically detects and accesses models downloaded via LM Studio without moving or duplicating files:
+
+| Storage Location | Description |
+| :--- | :--- |
+| `~/.lmstudio/models` | Standard model directory for LM Studio 0.3+ |
+| `~/.cache/lm-studio/models` | Legacy directory for LM Studio 0.2 and earlier |
+| `$FERRITE_MODELS_DIR` | Custom directory override |
+
+You can specify a model by its file path or any unique substring from `ferrite list`:
+
+```bash
+ferrite run llama-3.2 "Hello world"
+```
+
+---
+
+## Documentation Index
+
+- [Architecture Overview](docs/architecture.md): Deep dive into memory mapping, GGUF parsing, transformer layers, KV caching, and execution flow.
+- [CLI Reference](docs/cli-reference.md): Detailed syntax, flags, defaults, and usage examples for all commands.
+- [Supported Formats Matrix](docs/supported-formats.md): Container versions, metadata types, quantization layouts, architectures, and kernel support.
+- [Quantization Guide](docs/quantization.md): Numerical error bounds, fused dequantization, integer dot products, and SIMD dispatch.
+- [Benchmarking Guide](docs/benchmarking.md): Methodology, hardware requirements, and reproduction steps for GEMV benchmarks.
+- [Library Usage](docs/library-usage.md): Rust API examples for loading containers, tokenizing, and running inference.
+- [Development Guide](docs/development.md): Toolchain setup, testing policies, zero-dependency requirements, and CI gates.
+- [Contributing Guidelines](CONTRIBUTING.md): Code standards, pull request expectations, and validation checks.
+
+---
 
 ## License
 

@@ -9,7 +9,7 @@ use ferrite::sample::Sampler;
 use ferrite::Tokenizer;
 
 const USAGE: &str = "\
-ferrite — pure-Rust GGUF inference
+ferrite: pure-Rust GGUF inference
 
 usage:
   ferrite list                      models LM Studio has downloaded
