@@ -306,10 +306,11 @@
 
 ### Phase 36: Model Merging Engine (SLERP, TIES, DARE) (`ferrite merge`)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Zero-dependency model merging combining multiple GGUF checkpoints using Spherical Linear Interpolation (SLERP) or Task Vector Merging (TIES / DARE) directly to GGUF output.
 - Files: `src/merge.rs`, `src/main.rs`, `tests/merge.rs`
 - Acceptance: CLI `ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare>`.
+- Completion evidence: Added `src/merge.rs` with checkpoint compatibility validation, F32 GGUF output, SLERP interpolation, magnitude-trimmed sign-consensus TIES, and deterministic seeded DARE. Added `ferrite merge` CLI with method and optional interpolation/task-vector weight. Regression tests verify method determinism and SLERP GGUF round-trip values. Required Cargo checks pass.
 
 ### Phase 37: Structured Function Calling / Tool Use Engine (`/v1/chat/completions` tools schema)
 - Priority: P2
@@ -343,6 +344,13 @@
 - Every listed task is `COMPLETED`; no task has status `QUEUED` or `IN_PROGRESS`.
 - No implementation task was selected.
 - Current HEAD validation: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` all pass.
+
+## Maintenance Run — 2026-11-06T06:04:09Z
+- Selected highest-priority open item Phase 36 (P2, QUEUED), implemented GGUF model merging for SLERP, TIES, and deterministic DARE, and marked it COMPLETED.
+- Added CLI `ferrite merge <model_a> <model_b> <out> --method <slerp|ties|dare> [--weight <0..1>]` and merge regression tests.
+- `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` pass.
+- Re-ran validation after concurrent `src/model.rs` edits appeared and completed the new `Config` field in the scheduler test fixture.
+- Preserved concurrent `.agent/maintenance.log` and `src/model.rs` changes; task-file/source diff checks pass, while whole-worktree `git diff --check` reports pre-existing trailing whitespace in `.agent/maintenance.log`.
 
 ## Maintenance Scan — 2026-11-06 (current worktree)
 - Verified HEAD: `65b2008` on `codex/audit-baseline`.

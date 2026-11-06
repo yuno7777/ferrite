@@ -394,6 +394,7 @@ mod tests {
             embedding_scale: None,
             expert_count: None,
             expert_used_count: None,
+            expert_shared_count: None,
         };
 
         let scheduler = BatchScheduler::new(&config, 32, SchedulerConfig::default());

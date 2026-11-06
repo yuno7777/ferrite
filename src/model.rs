@@ -14,7 +14,19 @@ fn bad(msg: impl Into<String>) -> Error {
 /// Architectures whose tensor names and layer shape this implements. Others
 /// are rejected by name rather than half-loaded — a model that runs with the
 /// wrong layer structure produces fluent nonsense, not an error.
-const SUPPORTED: [&str; 6] = ["llama", "qwen2", "gemma", "gemma2", "mixtral", "qwen2moe"];
+const SUPPORTED: [&str; 11] = [
+    "llama",
+    "qwen",
+    "qwen2",
+    "qwen2moe",
+    "qwen2_moe",
+    "gemma",
+    "gemma2",
+    "mixtral",
+    "deepseek",
+    "deepseek2",
+    "deepseek3",
+];
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -38,6 +50,7 @@ pub struct Config {
     pub embedding_scale: Option<f32>,
     pub expert_count: Option<usize>,
     pub expert_used_count: Option<usize>,
+    pub expert_shared_count: Option<usize>,
 }
 
 impl Config {
@@ -185,7 +198,7 @@ impl Config {
                 .arch_f32("attention.layer_norm_rms_epsilon")
                 .unwrap_or(1e-5),
             rope_base: model.arch_f32("rope.freq_base").unwrap_or_else(|| {
-                if arch == "qwen2" {
+                if arch.starts_with("qwen") {
                     1_000_000.0
                 } else {
                     10000.0
@@ -204,6 +217,10 @@ impl Config {
             expert_used_count: model
                 .arch_u64("expert_used_count")
                 .or_else(|| model.meta_u64("expert_used_count"))
+                .map(|v| v as usize),
+            expert_shared_count: model
+                .arch_u64("expert_shared_count")
+                .or_else(|| model.meta_u64("expert_shared_count"))
                 .map(|v| v as usize),
         })
     }
@@ -622,6 +639,9 @@ pub struct Layer<'a> {
     pub moe_gate: Option<Vec<Weight<'a>>>,
     pub moe_up: Option<Vec<Weight<'a>>>,
     pub moe_down: Option<Vec<Weight<'a>>>,
+    pub moe_gate_shexp: Option<Weight<'a>>,
+    pub moe_up_shexp: Option<Weight<'a>>,
+    pub moe_down_shexp: Option<Weight<'a>>,
 }
 
 impl<'a> Layer<'a> {
@@ -692,6 +712,25 @@ impl<'a> Layer<'a> {
 
                     for (slot, &val) in out_tok.iter_mut().zip(&expert_out) {
                         *slot += weight_scale * val;
+                    }
+                }
+
+                if let (Some(shexp_gate), Some(shexp_up), Some(shexp_down)) = (
+                    &self.moe_gate_shexp,
+                    &self.moe_up_shexp,
+                    &self.moe_down_shexp,
+                ) {
+                    let mut sh_hb = vec![0.0f32; shexp_gate.rows];
+                    let mut sh_hb2 = vec![0.0f32; shexp_up.rows];
+                    let mut sh_out = vec![0.0f32; c.embedding];
+                    shexp_gate.matvec_threaded(xb_tok, &mut sh_hb, threads, workspace)?;
+                    shexp_up.matvec_threaded(xb_tok, &mut sh_hb2, threads, workspace)?;
+                    for (gate, up) in sh_hb.iter_mut().zip(&sh_hb2) {
+                        *gate = ops::silu(*gate) * up;
+                    }
+                    shexp_down.matvec_threaded(&sh_hb, &mut sh_out, threads, workspace)?;
+                    for (slot, &val) in out_tok.iter_mut().zip(&sh_out) {
+                        *slot += val;
                     }
                 }
             }
@@ -866,6 +905,15 @@ impl<'a> Model<'a> {
                 } else {
                     None
                 },
+                moe_gate_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_shexp.weight"))
+                    .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_gate.shexp.weight")))
+                    .ok(),
+                moe_up_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_up_shexp.weight"))
+                    .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_up.shexp.weight")))
+                    .ok(),
+                moe_down_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_down_shexp.weight"))
+                    .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_down.shexp.weight")))
+                    .ok(),
             });
         }
 

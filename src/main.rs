@@ -20,6 +20,7 @@ usage:
   ferrite run <model> <prompt>      generate, streaming to stdout
   ferrite serve <model>             serve HTTP/SSE API daemon
   ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
+  ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare> [--weight <0..1>]
   ferrite perplexity <model> <file> evaluate text perplexity and loss
   ferrite convert <src> <dst.gguf>  convert SafeTensors to GGUF format
   ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>
@@ -63,6 +64,7 @@ fn main() -> ExitCode {
         Some("run") => cmd_run(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
         Some("quantize") => cmd_quantize(&args[1..]),
+        Some("merge") => cmd_merge(&args[1..]),
         Some("perplexity") => cmd_perplexity(&args[1..]),
         Some("convert") => cmd_convert(&args[1..]),
         Some("lora") => cmd_lora(&args[1..]),
@@ -258,6 +260,29 @@ fn cmd_quantize(args: &[String]) -> std::io::Result<()> {
         std::path::Path::new(&args[1]),
         target,
     )
+}
+
+fn cmd_merge(args: &[String]) -> std::io::Result<()> {
+    if args.len() < 5 || args[3] != "--method" {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+            "usage: ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare> [--weight <0..1>]"));
+    }
+    let method = ferrite::merge::MergeMethod::parse(&args[4])?;
+    let weight = if args.len() == 7 && args[5] == "--weight" {
+        args[6].parse().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid merge weight")
+        })?
+    } else if args.len() == 5 {
+        0.5
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected optional --weight <0..1>",
+        ));
+    };
+    let a = Gguf::open(&lmstudio::resolve(&args[0])?)?;
+    let b = Gguf::open(&lmstudio::resolve(&args[1])?)?;
+    ferrite::merge::merge_models(&a, &b, std::path::Path::new(&args[2]), method, weight)
 }
 
 fn cmd_perplexity(args: &[String]) -> std::io::Result<()> {

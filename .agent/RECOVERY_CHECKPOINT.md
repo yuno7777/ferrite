@@ -278,5 +278,24 @@
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` prints exactly 1 line (0 external dependencies).
 
-
-
+## Autonomous Execution — Phase 36 Completion — 2026-11-06T06:04:09Z
+- Selected queued P2 Phase 36, Model Merging Engine.
+- Added `src/merge.rs` with GGUF compatibility validation and SLERP, TIES, and deterministic seeded DARE merging. Merged tensors are emitted as F32 while model A metadata is preserved.
+- Added `ferrite merge` CLI with `--method` selection and optional `--weight` (default 0.5), plus regression coverage for merge determinism and GGUF output values.
+- Updated `.agent/WORK_QUEUE.md` to mark Phase 36 `COMPLETED`.
+- Verification passed: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+- Re-ran all checks after unrelated concurrent `src/model.rs` changes appeared; added `expert_shared_count: None` to the scheduler's test config so the changed `Config` initializer remains complete.
+## Autonomous Execution — Qwen & DeepSeek MoE Architecture Support
+- Branch: `codex/audit-baseline`
+- Architectural extensions:
+  - Added architectures `"qwen"`, `"qwen2"`, `"qwen2moe"`, `"qwen2_moe"`, `"deepseek"`, `"deepseek2"`, and `"deepseek3"` to supported GGUF architectures in `src/model.rs`.
+  - Added `expert_shared_count: Option<usize>` to `Config` in `src/model.rs`.
+  - Added shared expert weights (`moe_gate_shexp`, `moe_up_shexp`, `moe_down_shexp`) to `Layer` in `src/model.rs`.
+  - Updated `Layer::eval_ffn` to evaluate shared experts unconditionally and sum their activations to routed top-k experts.
+  - Added BPE tokenizer support for `"deepseek"`, `"deepseek2"`, `"qwen"`, and `"qwen2moe"` in `src/tokenizer/mod.rs`.
+  - Added integration test `deepseek_moe_with_shared_experts_forward_and_prefill_match` in `tests/model.rs` asserting bit-identical logit parity between sequential forward and batched prefill.
+- Validation:
+  - `cargo test --all-targets` passes (100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` outputs exactly 1 line (0 external dependencies).

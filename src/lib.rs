@@ -20,6 +20,7 @@ pub mod kv;
 pub mod lmstudio;
 pub mod lora;
 pub mod map;
+pub mod merge;
 pub mod model;
 pub mod ops;
 pub mod paged;

@@ -107,10 +107,10 @@ impl Tokenizer {
     pub fn from_gguf(model: &Gguf) -> Result<Self> {
         let kind = match model.meta_str("tokenizer.ggml.model") {
             Some("llama" | "gemma" | "gemma2") => Kind::Spm,
-            Some("gpt2" | "qwen2") => Kind::Bpe,
+            Some("gpt2" | "qwen" | "qwen2" | "qwen2moe" | "deepseek" | "deepseek2") => Kind::Bpe,
             Some(other) => {
                 return Err(bad(format!(
-                    "tokenizer model {other:?} is not supported (llama/gemma and gpt2/qwen2 vocabs only)"
+                    "tokenizer model {other:?} is not supported (llama/gemma and gpt2/qwen/deepseek vocabs only)"
                 )))
             }
             None => return Err(bad("file has no tokenizer.ggml.model")),
