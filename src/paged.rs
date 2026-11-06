@@ -319,6 +319,56 @@ impl PagedPool {
         }
         Ok(())
     }
+
+    /// Evaluates PagedAttention v2 over a hierarchical page table sequence.
+    pub fn attention_v2(
+        &self,
+        sequence: &PagedSequenceV2,
+        layer: usize,
+        query: &[f32],
+        out: &mut [f32],
+        params: AttentionParams,
+    ) -> Result<()> {
+        let seq_v1 = sequence.to_v1();
+        self.attention(&seq_v1, layer, query, out, params)
+    }
+
+    /// Stores key and value vectors into a PagedAttention v2 hierarchical sequence.
+    pub fn store_v2(
+        &mut self,
+        sequence: &mut PagedSequenceV2,
+        layer: usize,
+        position: usize,
+        key: &[f32],
+        value: &[f32],
+    ) -> Result<()> {
+        let b_tokens = self.tokens_per_block;
+        let v_block = position / b_tokens;
+        if sequence.page_table.lookup(v_block).is_none() {
+            let id = self.allocate_block();
+            sequence.page_table.map(v_block, id);
+        }
+        let phys_id = sequence.page_table.lookup(v_block).unwrap();
+        if self.ref_counts[phys_id] > 1 {
+            let old_key = self.blocks[phys_id].key.clone();
+            let old_val = self.blocks[phys_id].value.clone();
+            let new_id = self.allocate_block();
+            self.blocks[new_id].key = old_key;
+            self.blocks[new_id].value = old_val;
+            self.free_block(phys_id);
+            sequence.page_table.map(v_block, new_id);
+        }
+        let active_phys_id = sequence.page_table.lookup(v_block).unwrap();
+        let slot = position % b_tokens;
+        let offset = (layer * b_tokens + slot) * self.kv_dim;
+        let block = &mut self.blocks[active_phys_id];
+        block.key[offset..offset + key.len()].copy_from_slice(key);
+        block.value[offset..offset + value.len()].copy_from_slice(value);
+        if position + 1 > sequence.seq_len {
+            sequence.seq_len = position + 1;
+        }
+        Ok(())
+    }
 }
 
 /// A logical sequence mapping logical token positions to physical blocks in a [`PagedPool`].
@@ -369,6 +419,166 @@ impl PagedSequence {
             }
         }
         self.seq_len = keep_len;
+    }
+}
+
+/// Default number of blocks per level-2 page table in PagedAttention v2.
+pub const BLOCKS_PER_PAGE_TABLE: usize = 32;
+
+/// A Level-2 Page Table containing physical block indices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageTable {
+    pub blocks: Vec<Option<BlockId>>,
+}
+
+impl PageTable {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            blocks: vec![None; capacity],
+        }
+    }
+}
+
+/// Hierarchical two-level page table structure for PagedAttention v2.
+///
+/// Maps virtual block index `V` to physical block `BlockId`:
+/// `L1_index = V / BLOCKS_PER_PAGE_TABLE`
+/// `L2_index = V % BLOCKS_PER_PAGE_TABLE`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HierarchicalPageTable {
+    pub directory: Vec<Option<PageTable>>,
+    pub blocks_per_table: usize,
+    pub total_virtual_blocks: usize,
+}
+
+impl HierarchicalPageTable {
+    /// Creates a new empty hierarchical page table.
+    pub fn new(blocks_per_table: usize) -> Self {
+        assert!(blocks_per_table > 0);
+        Self {
+            directory: Vec::new(),
+            blocks_per_table,
+            total_virtual_blocks: 0,
+        }
+    }
+
+    /// Resolves a virtual block index to physical BlockId, if mapped.
+    pub fn lookup(&self, virtual_block: usize) -> Option<BlockId> {
+        let dir_idx = virtual_block / self.blocks_per_table;
+        let tbl_idx = virtual_block % self.blocks_per_table;
+        self.directory
+            .get(dir_idx)?
+            .as_ref()?
+            .blocks
+            .get(tbl_idx)
+            .copied()?
+    }
+
+    /// Maps a virtual block index to a physical BlockId, allocating L2 page tables as needed.
+    pub fn map(&mut self, virtual_block: usize, physical_block: BlockId) {
+        let dir_idx = virtual_block / self.blocks_per_table;
+        let tbl_idx = virtual_block % self.blocks_per_table;
+
+        if dir_idx >= self.directory.len() {
+            self.directory.resize_with(dir_idx + 1, || None);
+        }
+
+        if self.directory[dir_idx].is_none() {
+            self.directory[dir_idx] = Some(PageTable::new(self.blocks_per_table));
+        }
+
+        if let Some(table) = &mut self.directory[dir_idx] {
+            if tbl_idx >= table.blocks.len() {
+                table.blocks.resize(tbl_idx + 1, None);
+            }
+            table.blocks[tbl_idx] = Some(physical_block);
+        }
+
+        if virtual_block + 1 > self.total_virtual_blocks {
+            self.total_virtual_blocks = virtual_block + 1;
+        }
+    }
+
+    /// Flattens the active mapped physical blocks into a sequential slice.
+    pub fn to_flat_table(&self) -> Vec<BlockId> {
+        let mut out = Vec::with_capacity(self.total_virtual_blocks);
+        for v in 0..self.total_virtual_blocks {
+            if let Some(id) = self.lookup(v) {
+                out.push(id);
+            }
+        }
+        out
+    }
+}
+
+/// PagedAttention v2 sequence managing token slots through hierarchical page tables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagedSequenceV2 {
+    pub page_table: HierarchicalPageTable,
+    pub seq_len: usize,
+}
+
+impl PagedSequenceV2 {
+    pub fn new(blocks_per_table: usize) -> Self {
+        Self {
+            page_table: HierarchicalPageTable::new(blocks_per_table),
+            seq_len: 0,
+        }
+    }
+
+    /// Fork this sequence into a new child sequence with shared Copy-on-Write blocks.
+    pub fn fork(&self, pool: &mut PagedPool) -> Self {
+        for v in 0..self.page_table.total_virtual_blocks {
+            if let Some(id) = self.page_table.lookup(v) {
+                pool.inc_ref(id);
+            }
+        }
+        Self {
+            page_table: self.page_table.clone(),
+            seq_len: self.seq_len,
+        }
+    }
+
+    /// Free all physical blocks referenced by this sequence back to the pool.
+    pub fn free(&mut self, pool: &mut PagedPool) {
+        for v in 0..self.page_table.total_virtual_blocks {
+            if let Some(id) = self.page_table.lookup(v) {
+                pool.free_block(id);
+            }
+        }
+        self.seq_len = 0;
+        self.page_table = HierarchicalPageTable::new(self.page_table.blocks_per_table);
+    }
+
+    /// Truncate sequence back to `keep_len` tokens, freeing unneeded trailing blocks.
+    pub fn truncate(&mut self, pool: &mut PagedPool, keep_len: usize) {
+        if keep_len >= self.seq_len {
+            return;
+        }
+        let needed_blocks = keep_len.div_ceil(pool.tokens_per_block);
+        for v in needed_blocks..self.page_table.total_virtual_blocks {
+            if let Some(id) = self.page_table.lookup(v) {
+                pool.free_block(id);
+                // unmap block
+                let dir_idx = v / self.page_table.blocks_per_table;
+                let tbl_idx = v % self.page_table.blocks_per_table;
+                if let Some(Some(table)) = self.page_table.directory.get_mut(dir_idx) {
+                    if tbl_idx < table.blocks.len() {
+                        table.blocks[tbl_idx] = None;
+                    }
+                }
+            }
+        }
+        self.page_table.total_virtual_blocks = needed_blocks;
+        self.seq_len = keep_len;
+    }
+
+    /// Converts hierarchical mapping to flat PagedSequence v1.
+    pub fn to_v1(&self) -> PagedSequence {
+        PagedSequence {
+            block_table: self.page_table.to_flat_table(),
+            seq_len: self.seq_len,
+        }
     }
 }
 
@@ -846,6 +1056,44 @@ impl crate::model::Model<'_> {
                 *logit = cap * (*logit / cap).tanh();
             }
         }
+        Ok(())
+    }
+
+    /// Evaluate a single decode token using PagedAttention v2 hierarchical KV-cache storage.
+    pub fn forward_paged_v2(
+        &self,
+        pool: &mut PagedPool,
+        seq: &mut PagedSequenceV2,
+        state: &mut crate::model::State,
+        token: u32,
+        position: usize,
+    ) -> Result<()> {
+        let mut seq_v1 = seq.to_v1();
+        self.forward_paged(pool, &mut seq_v1, state, token, position)?;
+        seq.seq_len = seq_v1.seq_len;
+        for (v, &phys) in seq_v1.block_table.iter().enumerate() {
+            seq.page_table.map(v, phys);
+        }
+        seq.page_table.total_virtual_blocks = seq_v1.block_table.len();
+        Ok(())
+    }
+
+    /// Prefill prompt tokens into PagedAttention v2 hierarchical KV-cache storage.
+    pub fn prefill_paged_v2(
+        &self,
+        pool: &mut PagedPool,
+        seq: &mut PagedSequenceV2,
+        state: &mut crate::model::State,
+        tokens: &[u32],
+        start_pos: usize,
+    ) -> Result<()> {
+        let mut seq_v1 = seq.to_v1();
+        self.prefill_paged(pool, &mut seq_v1, state, tokens, start_pos)?;
+        seq.seq_len = seq_v1.seq_len;
+        for (v, &phys) in seq_v1.block_table.iter().enumerate() {
+            seq.page_table.map(v, phys);
+        }
+        seq.page_table.total_virtual_blocks = seq_v1.block_table.len();
         Ok(())
     }
 }

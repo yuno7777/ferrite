@@ -191,3 +191,84 @@ fn test_distributed_pipeline_parallel_forward_parity() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn test_dualpipe_layer_partitioning() {
+    use ferrite::dualpipe::LayerPartition;
+
+    // 1. Even split without remainder
+    let p1 = LayerPartition::even_split(16, 4);
+    assert_eq!(p1.len(), 4);
+    assert_eq!(p1[0].layer_range, 0..4);
+    assert_eq!(p1[1].layer_range, 4..8);
+    assert_eq!(p1[2].layer_range, 8..12);
+    assert_eq!(p1[3].layer_range, 12..16);
+
+    // 2. Even split with remainder
+    let p2 = LayerPartition::even_split(7, 3);
+    assert_eq!(p2.len(), 3);
+    assert_eq!(p2[0].layer_range, 0..3);
+    assert_eq!(p2[1].layer_range, 3..5);
+    assert_eq!(p2[2].layer_range, 5..7);
+
+    // 3. Custom split
+    let p3 = LayerPartition::custom_split(10, &[2, 6, 10]).expect("custom split");
+    assert_eq!(p3.len(), 3);
+    assert_eq!(p3[0].layer_range, 0..2);
+    assert_eq!(p3[1].layer_range, 2..6);
+    assert_eq!(p3[2].layer_range, 6..10);
+}
+
+#[test]
+fn test_dualpipe_schedule_synthesis() {
+    use ferrite::dualpipe::DualPipeSchedule;
+
+    let schedule = DualPipeSchedule::synthesize(4, 8);
+    assert_eq!(schedule.num_stages, 4);
+    assert_eq!(schedule.num_chunks, 8);
+    assert_eq!(schedule.steps.len(), 12); // num_chunks + num_stages
+    assert!(schedule.bubble_ratio >= 0.0 && schedule.bubble_ratio < 1.0);
+}
+
+#[test]
+fn test_dualpipe_execution_parity_with_reference() {
+    use ferrite::dualpipe::DualPipeEngine;
+
+    let path = write("dualpipe_parity", &fixture_2layers());
+    let gguf = Gguf::open(&path).expect("open fixture");
+    let model = Model::load(&gguf).expect("load model");
+
+    let engine = DualPipeEngine::new(&model, 2);
+    assert_eq!(engine.partitions().len(), 2);
+    assert_eq!(engine.partitions()[0].layer_range, 0..1);
+    assert_eq!(engine.partitions()[1].layer_range, 1..2);
+
+    let mut state_a = State::new(&model.config);
+    let mut state_b = State::new(&model.config);
+
+    // Run dual-chunk forward
+    let (logits_a, logits_b) = engine
+        .forward_dual_chunk(&mut state_a, 0, 0, &mut state_b, 1, 0)
+        .expect("forward_dual_chunk");
+
+    // Single-node reference forward passes
+    let mut ref_a = State::new(&model.config);
+    model.forward(&mut ref_a, 0, 0).expect("ref forward a");
+
+    let mut ref_b = State::new(&model.config);
+    model.forward(&mut ref_b, 1, 0).expect("ref forward b");
+
+    let bits = |s: &[f32]| s.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&logits_a),
+        bits(&ref_a.logits),
+        "DualPipe Chunk A must match single-node reference bit-identically"
+    );
+    assert_eq!(
+        bits(&logits_b),
+        bits(&ref_b.logits),
+        "DualPipe Chunk B must match single-node reference bit-identically"
+    );
+
+    fs::remove_file(path).ok();
+}

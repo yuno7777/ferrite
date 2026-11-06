@@ -9,7 +9,7 @@ use ferrite::sample::Sampler;
 use ferrite::Tokenizer;
 
 const USAGE: &str = "\
-ferrite — pure-Rust GGUF inference
+ferrite: pure-Rust GGUF inference
 
 usage:
   ferrite list                      models LM Studio has downloaded
@@ -1163,6 +1163,7 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
         threads,
         context,
         kv_cache,
+        tenant_registry: None,
     };
 
     let server = ferrite::server::Server::new(model, tokenizer, config);

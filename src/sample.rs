@@ -1,7 +1,7 @@
 //! Turning logits into a token.
 //!
 //! Temperature, top-k and top-p compose in that order, which is the order
-//! everyone else uses — swapping top-k and top-p changes the output, so it is
+//! everyone else uses: swapping top-k and top-p changes the output, so it is
 //! worth being deliberate about.
 
 use crate::ops;
@@ -49,6 +49,7 @@ pub struct Sampler {
     /// Tail free sampling parameter z in (0, 1]. 1.0 disables.
     pub tfs_z: f32,
     pub penalties: PenaltyConfig,
+    pub watermark: Option<crate::watermark::WatermarkConfig>,
     pub rng: Rng,
 }
 
@@ -138,6 +139,7 @@ impl Sampler {
             min_p: 0.0,
             tfs_z: 1.0,
             penalties: PenaltyConfig::default(),
+            watermark: None,
             rng: Rng::new(1),
         }
     }
@@ -150,6 +152,7 @@ impl Sampler {
             min_p: 0.0,
             tfs_z: 1.0,
             penalties: PenaltyConfig::default(),
+            watermark: None,
             rng: Rng::new(seed),
         }
     }
@@ -169,6 +172,7 @@ impl Sampler {
             min_p,
             tfs_z,
             penalties: PenaltyConfig::default(),
+            watermark: None,
             rng: Rng::new(seed),
         }
     }
@@ -203,13 +207,29 @@ impl Sampler {
         self
     }
 
-    /// Sample token after applying repetition/frequency/presence penalties from history.
+    pub fn with_watermark(mut self, config: crate::watermark::WatermarkConfig) -> Self {
+        self.watermark = Some(config);
+        self
+    }
+
+    /// Sample token after applying repetition/frequency/presence penalties and watermark from history.
     pub fn sample_with_history(&mut self, logits: &mut [f32], history: &[u32]) -> u32 {
         apply_penalties(logits, history, &self.penalties);
+        if let Some(ref wm) = self.watermark {
+            crate::watermark::WatermarkEngine::apply_watermark(logits, history, wm);
+        }
         self.sample(logits)
     }
 
-    /// Pick a token. `logits` is modified in place — it is scratch after this.
+    /// Sample token applying watermark bias based on preceding context.
+    pub fn sample_with_watermark(&mut self, logits: &mut [f32], context: &[u32]) -> u32 {
+        if let Some(ref wm) = self.watermark {
+            crate::watermark::WatermarkEngine::apply_watermark(logits, context, wm);
+        }
+        self.sample(logits)
+    }
+
+    /// Pick a token. `logits` is modified in place; it is scratch after this.
     pub fn sample(&mut self, logits: &mut [f32]) -> u32 {
         if logits.is_empty() {
             return 0;

@@ -764,3 +764,298 @@ fn mtp_rejection_recovery_matches_baseline_forward() {
 
     fs::remove_file(mtp_path).ok();
 }
+
+#[test]
+fn mtp_tree_speculative_decoding_matches_baseline_forward() {
+    let mtp_path = make_mtp_model_fixture("mtp_tree", false);
+    let gguf = Gguf::open(&mtp_path).expect("open mtp model");
+    let model = Model::load(&gguf).expect("load model");
+
+    let prompt = vec![0u32, 1u32];
+    let total_to_generate = 6;
+
+    // 1. Baseline forward
+    let mut baseline_state = State::new(&model.config);
+    model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. MTP Tree speculation
+    let mut tree_state = State::new(&model.config);
+    model
+        .prefill(&mut tree_state, &prompt, 0)
+        .expect("prefill tree");
+
+    let mut tree_engine = ferrite::speculative::MtpTreeEngine::new(&model, 2);
+    let mut tree_tokens = Vec::new();
+    let mut tree_sampler = Sampler::greedy();
+    let mut tree_pos = prompt.len();
+
+    while tree_tokens.len() < total_to_generate {
+        let emitted = tree_engine
+            .step(&mut tree_state, tree_pos, &mut tree_sampler)
+            .expect("tree step");
+        tree_pos += emitted.len();
+        tree_tokens.extend(emitted);
+    }
+    tree_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        tree_tokens, baseline_tokens,
+        "MTP tree speculation must match baseline forward decode bit-identically"
+    );
+    assert!(tree_engine.stats.proposed > 0);
+    assert!(tree_engine.stats.accepted > 0);
+
+    fs::remove_file(mtp_path).ok();
+}
+
+#[test]
+fn test_medusa_speculative_decoding_matches_baseline_forward() {
+    let path = make_model_fixture("medusa", 0.0);
+    let gguf = Gguf::open(&path).expect("open fixture");
+    let model = Model::load(&gguf).expect("load model");
+
+    let prompt = vec![0u32, 1u32];
+    let total_to_generate = 8;
+
+    // 1. Sequential baseline decode
+    let mut baseline_state = State::new(&model.config);
+    model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. Medusa speculation with 2 draft heads
+    let mut medusa_state = State::new(&model.config);
+    model
+        .prefill(&mut medusa_state, &prompt, 0)
+        .expect("prefill medusa");
+
+    // Head 0 and Head 1 with arbitrary weights
+    let head0_weight = vec![0.1f32; DIM * VOCAB];
+    let head1_weight = vec![0.2f32; DIM * VOCAB];
+    let head0 = ferrite::speculative::MedusaHead::new(DIM, VOCAB, head0_weight, None);
+    let head1 = ferrite::speculative::MedusaHead::new(DIM, VOCAB, head1_weight, None);
+
+    let mut medusa_engine = ferrite::speculative::MedusaEngine::new(&model, vec![head0, head1]);
+    let mut medusa_tokens = Vec::new();
+    let mut medusa_sampler = Sampler::greedy();
+    let mut medusa_pos = prompt.len();
+
+    while medusa_tokens.len() < total_to_generate {
+        let emitted = medusa_engine
+            .step(&mut medusa_state, medusa_pos, &mut medusa_sampler)
+            .expect("medusa step");
+        medusa_pos += emitted.len();
+        medusa_tokens.extend(emitted);
+    }
+    medusa_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        medusa_tokens, baseline_tokens,
+        "Medusa speculative decoding must match baseline forward decode exactly"
+    );
+    assert!(medusa_engine.stats.proposed > 0);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_draft_kv_cache_recycling_matches_baseline_forward() {
+    let target_path = make_model_fixture("recycle_target", 0.0);
+    let draft_path = make_model_fixture("recycle_draft", 0.0);
+
+    let target_gguf = Gguf::open(&target_path).expect("open target");
+    let target_model = Model::load(&target_gguf).expect("load target");
+
+    let draft_gguf = Gguf::open(&draft_path).expect("open draft");
+    let draft_model = Model::load(&draft_gguf).expect("load draft");
+
+    let prompt = vec![0u32, 1, 2];
+    let total_to_generate = 10;
+
+    // 1. Target model baseline decode
+    let mut base_state = State::new(&target_model.config);
+    target_model
+        .prefill(&mut base_state, &prompt, 0)
+        .expect("prefill base");
+    let mut baseline_tokens = Vec::new();
+    let mut sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = sampler.sample(&mut base_state.logits);
+        baseline_tokens.push(tok);
+        target_model
+            .forward(&mut base_state, tok, pos)
+            .expect("forward base");
+        pos += 1;
+    }
+
+    // 2. SpeculativeRecycleEngine decode
+    let mut target_state = State::new(&target_model.config);
+    let mut draft_state = State::new(&draft_model.config);
+    target_model
+        .prefill(&mut target_state, &prompt, 0)
+        .expect("prefill target");
+    draft_model
+        .prefill(&mut draft_state, &prompt, 0)
+        .expect("prefill draft");
+
+    let mut recycle_engine = ferrite::SpeculativeRecycleEngine::new(&target_model, &draft_model, 2);
+    let mut recycle_tokens = Vec::new();
+    let mut recycle_pos = prompt.len();
+
+    while recycle_tokens.len() < total_to_generate {
+        let emitted = recycle_engine
+            .step(
+                &mut target_state,
+                &mut draft_state,
+                recycle_pos,
+                &mut sampler,
+            )
+            .expect("recycle step");
+        recycle_pos += emitted.len();
+        recycle_tokens.extend(emitted);
+    }
+    recycle_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        recycle_tokens, baseline_tokens,
+        "SpeculativeRecycleEngine tokens must be identical to baseline target"
+    );
+    assert!(recycle_engine.recycler.recycled_bytes > 0);
+
+    // Test DraftKvRecycler primitives
+    let mut recycler = ferrite::DraftKvRecycler::new();
+    recycler.record_token(0, 10, 64);
+    recycler.record_token(1, 20, 64);
+    recycler.record_token(2, 30, 64);
+    assert!(recycler.is_token_valid(0, 10));
+    assert!(recycler.is_token_valid(1, 20));
+    assert!(!recycler.is_token_valid(1, 99));
+    assert_eq!(recycler.matching_prefix(0, &[10, 20, 30]), 3);
+    assert_eq!(recycler.matching_prefix(0, &[10, 20, 99]), 2);
+
+    let cp = recycler.checkpoint();
+    recycler.invalidate_from(1);
+    assert!(!recycler.is_token_valid(1, 20));
+    recycler.restore_checkpoint(cp);
+    assert!(recycler.is_token_valid(1, 20));
+
+    // Test copy_cache_slot
+    let mut state = State::new(&target_model.config);
+    state.copy_cache_slot(0, 1);
+
+    fs::remove_file(target_path).ok();
+    fs::remove_file(draft_path).ok();
+}
+
+#[test]
+fn test_speculative_temperature_calibration() {
+    use ferrite::speculative::calibrate_draft_temperature;
+
+    // 1. Identical distributions -> optimal scale is 1.0
+    let target = vec![2.0, 1.0, 0.5, -1.0];
+    let draft_identical = target.clone();
+    let scale = calibrate_draft_temperature(&draft_identical, &target, 1.0);
+    assert!((scale - 1.0).abs() <= 0.05, "expected ~1.0, got {scale}");
+
+    // 2. Draft is 2x sharper/overconfident -> scale should be ~2.0 to soften it
+    let draft_sharp: Vec<f32> = target.iter().map(|&x| x * 2.0).collect();
+    let scale_sharp = calibrate_draft_temperature(&draft_sharp, &target, 1.0);
+    assert!(scale_sharp > 1.5, "expected scale > 1.5, got {scale_sharp}");
+}
+
+#[test]
+fn test_adaptive_acceptance_threshold_tracking() {
+    use ferrite::speculative::{
+        eval_adaptive_acceptance, AdaptiveThresholdTracker, SpeculativeAdaptiveConfig,
+    };
+
+    assert!(eval_adaptive_acceptance(0.8, 1.0, 0.7));
+    assert!(!eval_adaptive_acceptance(0.5, 1.0, 0.7));
+
+    let config = SpeculativeAdaptiveConfig {
+        base_threshold: 0.5,
+        min_threshold: 0.2,
+        max_threshold: 0.8,
+        adaptation_rate: 0.1,
+        target_acceptance_rate: 0.7,
+        temperature_scale: 1.0,
+    };
+    let mut tracker = AdaptiveThresholdTracker::new(config);
+    assert_eq!(tracker.current_threshold, 0.5);
+
+    // Consecutive accepted decisions (> 70% rate) should relax the threshold
+    for _ in 0..5 {
+        tracker.record_decision(true);
+    }
+    assert!(tracker.current_threshold < 0.5);
+
+    // Consecutive rejected decisions should tighten the threshold
+    for _ in 0..10 {
+        tracker.record_decision(false);
+    }
+    assert!(tracker.current_threshold > 0.5);
+}
+
+#[test]
+fn test_adaptive_speculative_engine_parity() {
+    use ferrite::model::State;
+    use ferrite::sample::Sampler;
+    use ferrite::speculative::{AdaptiveSpeculativeEngine, SpeculativeAdaptiveConfig};
+
+    let target_path = make_model_fixture("adapt_target", 0.0);
+    let target_gguf = Gguf::open(&target_path).expect("open target");
+    let target_model = Model::load(&target_gguf).expect("load target");
+
+    let draft_path = make_model_fixture("adapt_draft", 0.0);
+    let draft_gguf = Gguf::open(&draft_path).expect("open draft");
+    let draft_model = Model::load(&draft_gguf).expect("load draft");
+
+    let config = SpeculativeAdaptiveConfig::default();
+    let mut engine = AdaptiveSpeculativeEngine::new(&target_model, &draft_model, config);
+
+    let mut target_state = State::new(&target_model.config);
+    let mut draft_state = State::new(&draft_model.config);
+    let mut sampler = Sampler::greedy();
+
+    // Step with 2 speculative draft candidates
+    let emitted = engine
+        .step(&mut target_state, &mut draft_state, &mut sampler, 2, 0)
+        .expect("step");
+
+    assert!(!emitted.is_empty());
+    assert_eq!(engine.stats.total_emitted, emitted.len());
+    assert!(engine.stats.accepted <= 2);
+
+    fs::remove_file(target_path).ok();
+    fs::remove_file(draft_path).ok();
+}

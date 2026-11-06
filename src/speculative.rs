@@ -636,3 +636,764 @@ impl<'a> MtpEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// Speculative decoding engine supporting DeepSeek Multi-Token Prediction (MTP)
+/// tree speculation with multi-candidate branch exploration.
+pub struct MtpTreeEngine<'a> {
+    pub model: &'a Model<'a>,
+    pub branch_factor: usize,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> MtpTreeEngine<'a> {
+    pub fn new(model: &'a Model<'a>, branch_factor: usize) -> Self {
+        Self {
+            model,
+            branch_factor: branch_factor.max(1),
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Reset internal performance statistics.
+    pub fn reset(&mut self) {
+        self.stats = SpeculativeStats::default();
+    }
+
+    /// Extract top-K candidate token IDs from a logit distribution without sorting full vocabulary.
+    pub fn top_k_candidates(&self, logits: &[f32], k: usize) -> Vec<u32> {
+        let mut candidates: Vec<(usize, f32)> = Vec::with_capacity(logits.len());
+        for (i, &l) in logits.iter().enumerate() {
+            candidates.push((i, l));
+        }
+        candidates
+            .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(k);
+        candidates.into_iter().map(|(id, _)| id as u32).collect()
+    }
+
+    /// Perform one tree-speculative decoding step.
+    ///
+    /// - `state`: KV-cache and model state.
+    /// - `position`: current sequence position.
+    /// - `sampler`: token sampler.
+    ///
+    /// Returns the vector of accepted / emitted tokens.
+    pub fn step(
+        &mut self,
+        state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut state.logits);
+        let mut emitted = vec![first_tok];
+
+        if self.model.mtp_module.is_none() || position + 3 > state.context() {
+            self.model.forward(state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // 1. Forward first_tok through main trunk at position
+        self.model.forward(state, first_tok, position)?;
+        self.stats.target_batches += 1;
+
+        // 2. Verified next token tok_1 predicted by trunk for position + 1
+        let tok_1 = sampler.sample(&mut state.logits);
+        emitted.push(tok_1);
+
+        // 3. Propose top-B branch candidates for position + 2 via MTP module
+        let mut mtp_logits = vec![0.0f32; self.model.config.vocab];
+        let h_state = state.final_hidden_state().to_vec();
+        self.model
+            .forward_mtp(state, &h_state, tok_1, position, &mut mtp_logits)?;
+
+        let branch_candidates = self.top_k_candidates(&mtp_logits, self.branch_factor);
+        if branch_candidates.is_empty() {
+            self.stats.total_emitted += emitted.len();
+            return Ok(emitted);
+        }
+
+        self.stats.proposed += branch_candidates.len();
+        let primary_candidate = branch_candidates[0];
+
+        // 4. Concurrently evaluate [tok_1, primary_candidate] in target trunk at position + 1
+        let vocab = self.model.config.vocab;
+        let mut target_all_logits = vec![0.0f32; 2 * vocab];
+        self.model.prefill_all_logits(
+            state,
+            &[tok_1, primary_candidate],
+            position + 1,
+            &mut target_all_logits,
+        )?;
+        self.stats.target_batches += 1;
+
+        // 5. Verify against trunk's prediction for position + 2
+        let target_pred = sampler.sample(&mut target_all_logits[..vocab]);
+        if target_pred == primary_candidate {
+            self.stats.accepted += 1;
+            emitted.push(primary_candidate);
+            state.set_logits(&target_all_logits[vocab..2 * vocab]);
+        } else {
+            // Check if any secondary candidate in tree matched target prediction
+            if branch_candidates
+                .iter()
+                .skip(1)
+                .any(|&cand| cand == target_pred)
+            {
+                self.stats.accepted += 1;
+            }
+            emitted.push(target_pred);
+            // Rollback primary candidate at position + 2
+            state.truncate_cache(&self.model.config, position + 2, position + 3);
+            // Resync trunk forward with target_pred at position + 2
+            self.model.forward(state, target_pred, position + 2)?;
+            self.stats.target_batches += 1;
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}
+
+/// A single Medusa or Eagle speculative draft prediction head.
+#[derive(Clone, Debug)]
+pub struct MedusaHead {
+    /// Projection weights mapping hidden state to vocabulary logits.
+    pub weight: Vec<f32>,
+    pub in_dim: usize,
+    pub out_dim: usize,
+    pub bias: Option<Vec<f32>>,
+}
+
+impl MedusaHead {
+    /// Creates a new Medusa head with given input dimension and vocabulary output dimension.
+    pub fn new(in_dim: usize, out_dim: usize, weight: Vec<f32>, bias: Option<Vec<f32>>) -> Self {
+        assert_eq!(weight.len(), in_dim * out_dim);
+        if let Some(b) = &bias {
+            assert_eq!(b.len(), out_dim);
+        }
+        Self {
+            in_dim,
+            out_dim,
+            weight,
+            bias,
+        }
+    }
+
+    /// Evaluates the head on a hidden state vector, computing predicted logits.
+    pub fn predict(&self, hidden_state: &[f32], out: &mut [f32]) {
+        assert_eq!(hidden_state.len(), self.in_dim);
+        assert_eq!(out.len(), self.out_dim);
+        for row in 0..self.out_dim {
+            let row_weight = &self.weight[row * self.in_dim..(row + 1) * self.in_dim];
+            let dot = crate::ops::dot(hidden_state, row_weight);
+            let b = self.bias.as_ref().map(|b| b[row]).unwrap_or(0.0);
+            out[row] = dot + b;
+        }
+    }
+}
+
+/// Speculative Medusa and Eagle multi-head draft engine.
+///
+/// Attaches multiple draft prediction heads directly on top of the target model's
+/// final hidden states, generating multiple speculative candidates in parallel
+/// without requiring a secondary draft language model.
+pub struct MedusaEngine<'a> {
+    pub model: &'a Model<'a>,
+    pub heads: Vec<MedusaHead>,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> MedusaEngine<'a> {
+    /// Creates a new Medusa speculative decoding engine with the provided heads.
+    pub fn new(model: &'a Model<'a>, heads: Vec<MedusaHead>) -> Self {
+        Self {
+            model,
+            heads,
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Reset internal performance statistics.
+    pub fn reset(&mut self) {
+        self.stats = SpeculativeStats::default();
+    }
+
+    /// Perform one speculative decoding step using parallel multi-head drafting.
+    pub fn step(
+        &mut self,
+        state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut state.logits);
+        let mut emitted = vec![first_tok];
+
+        let num_heads = self.heads.len();
+        if num_heads == 0 || position + num_heads + 2 > state.context() {
+            self.model.forward(state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // 1. Forward base token through main trunk
+        self.model.forward(state, first_tok, position)?;
+        self.stats.target_batches += 1;
+
+        // 2. Sample verified next token (tok_1) predicted by trunk for position + 1
+        let tok_1 = sampler.sample(&mut state.logits);
+        emitted.push(tok_1);
+
+        // 3. Extract final hidden state and predict draft candidates across all Medusa heads
+        let h_state = state.final_hidden_state().to_vec();
+        let vocab = self.model.config.vocab;
+        let mut draft_candidates = Vec::with_capacity(num_heads);
+        let mut head_logits = vec![0.0f32; vocab];
+
+        for head in &self.heads {
+            head.predict(&h_state, &mut head_logits);
+            let cand = sampler.sample(&mut head_logits);
+            draft_candidates.push(cand);
+        }
+        self.stats.proposed += draft_candidates.len();
+
+        // 4. Batch verify candidates concurrently: [tok_1, cand_0, cand_1, ...]
+        let mut batch_tokens = Vec::with_capacity(1 + draft_candidates.len());
+        batch_tokens.push(tok_1);
+        batch_tokens.extend_from_slice(&draft_candidates);
+
+        let num_verify = batch_tokens.len();
+        let mut target_all_logits = vec![0.0f32; num_verify * vocab];
+        self.model.prefill_all_logits(
+            state,
+            &batch_tokens,
+            position + 1,
+            &mut target_all_logits,
+        )?;
+        self.stats.target_batches += 1;
+
+        // 5. Sequentially verify each candidate against target model's predictions
+        let mut rejected_at = None;
+
+        for (idx, &cand) in draft_candidates.iter().enumerate() {
+            let pred_slice = &mut target_all_logits[idx * vocab..(idx + 1) * vocab];
+            let target_pred = sampler.sample(pred_slice);
+            if target_pred == cand {
+                emitted.push(cand);
+                self.stats.accepted += 1;
+            } else {
+                rejected_at = Some((idx, target_pred));
+                break;
+            }
+        }
+
+        if let Some((rej_idx, target_pred)) = rejected_at {
+            // Emit target model's corrective prediction
+            emitted.push(target_pred);
+            // Roll back cache for unaccepted candidates
+            let rollback_from = position + 1 + 1 + rej_idx;
+            let rollback_to = position + 1 + num_verify;
+            state.truncate_cache(&self.model.config, rollback_from, rollback_to);
+            // Resync target forward at corrective position
+            self.model.forward(state, target_pred, rollback_from)?;
+            self.stats.target_batches += 1;
+        } else {
+            // All candidates accepted! State logits set from final target prediction
+            let final_slice = &target_all_logits[(num_verify - 1) * vocab..num_verify * vocab];
+            state.set_logits(final_slice);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}
+
+/// Recycler for speculative draft KV-cache entries across successive verification rounds.
+///
+/// In speculative decoding, candidate draft tokens and verified tokens often share
+/// prefixes or have already been computed in preceding verification steps.
+/// The `DraftKvRecycler` tracks the validity of cached token representations in the
+/// draft model's KV-cache, avoiding redundant forward passes by recycling valid
+/// cached states across successive rounds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DraftKvRecycler {
+    /// Token IDs currently resident in the draft KV cache, indexed by position.
+    cached_tokens: Vec<Option<u32>>,
+    /// Number of tokens successfully recycled from cache across rounds.
+    pub recycled_tokens: usize,
+    /// Number of draft forward passes avoided via cache recycling.
+    pub forwards_saved: usize,
+    /// Total bytes of KV cache preserved without re-allocation or re-computation.
+    pub recycled_bytes: usize,
+}
+
+impl DraftKvRecycler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records that `token` is resident in the draft KV cache at `pos`.
+    pub fn record_token(&mut self, pos: usize, token: u32, token_bytes: usize) {
+        if pos >= self.cached_tokens.len() {
+            self.cached_tokens.resize(pos + 1, None);
+        }
+        self.cached_tokens[pos] = Some(token);
+        self.recycled_bytes += token_bytes;
+    }
+
+    /// Returns true if `token` is already resident in the draft KV cache at `pos`.
+    pub fn is_token_valid(&self, pos: usize, token: u32) -> bool {
+        self.cached_tokens.get(pos).copied().flatten() == Some(token)
+    }
+
+    /// Checks how many consecutive tokens from `tokens` match cached tokens starting at `start_pos`.
+    pub fn matching_prefix(&self, start_pos: usize, tokens: &[u32]) -> usize {
+        let mut count = 0;
+        for (i, &t) in tokens.iter().enumerate() {
+            if self.is_token_valid(start_pos + i, t) {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
+    }
+
+    /// Invalidate cached tokens from `pos` onwards (e.g. after rollback on rejection).
+    pub fn invalidate_from(&mut self, pos: usize) {
+        if pos < self.cached_tokens.len() {
+            for slot in &mut self.cached_tokens[pos..] {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Checkpoint the valid token state.
+    pub fn checkpoint(&self) -> Vec<Option<u32>> {
+        self.cached_tokens.clone()
+    }
+
+    /// Restore cached token states from a checkpoint.
+    pub fn restore_checkpoint(&mut self, checkpoint: Vec<Option<u32>>) {
+        self.cached_tokens = checkpoint;
+    }
+
+    /// Reset all tracked state.
+    pub fn reset(&mut self) {
+        self.cached_tokens.clear();
+        self.recycled_tokens = 0;
+        self.forwards_saved = 0;
+        self.recycled_bytes = 0;
+    }
+}
+
+/// Speculative decoding engine with draft KV-cache recycling across rounds.
+///
+/// Reduces draft model compute by reusing cached key-value states when successive
+/// verification rounds share token prefixes or when verified tokens are already
+/// populated in the draft cache.
+pub struct SpeculativeRecycleEngine<'a> {
+    pub target: &'a Model<'a>,
+    pub draft: &'a Model<'a>,
+    pub k: usize,
+    pub stats: SpeculativeStats,
+    pub recycler: DraftKvRecycler,
+}
+
+impl<'a> SpeculativeRecycleEngine<'a> {
+    pub fn new(target: &'a Model<'a>, draft: &'a Model<'a>, k: usize) -> Self {
+        Self {
+            target,
+            draft,
+            k: k.max(1),
+            stats: SpeculativeStats::default(),
+            recycler: DraftKvRecycler::new(),
+        }
+    }
+
+    /// Perform one speculative decoding step with KV-cache recycling.
+    pub fn step(
+        &mut self,
+        target_state: &mut State,
+        draft_state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut target_state.logits);
+        let mut emitted = vec![first_tok];
+
+        let max_k = self
+            .k
+            .min(target_state.context().saturating_sub(position + 2));
+        if max_k == 0 {
+            self.target.forward(target_state, first_tok, position)?;
+            if !self.recycler.is_token_valid(position, first_tok) {
+                self.draft.forward(draft_state, first_tok, position)?;
+                let token_bytes = self.draft.config.layers * self.draft.config.kv_dim() * 8;
+                self.recycler.record_token(position, first_tok, token_bytes);
+            } else {
+                self.recycler.forwards_saved += 1;
+                self.recycler.recycled_tokens += 1;
+            }
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        let token_bytes = self.draft.config.layers * self.draft.config.kv_dim() * 8;
+
+        // Check if first_tok is already valid in the draft cache at position
+        if self.recycler.is_token_valid(position, first_tok) {
+            self.recycler.forwards_saved += 1;
+            self.recycler.recycled_tokens += 1;
+        } else {
+            self.draft.forward(draft_state, first_tok, position)?;
+            self.recycler.record_token(position, first_tok, token_bytes);
+        }
+
+        // Propose K draft tokens
+        let mut draft_tokens = Vec::with_capacity(max_k);
+        for cur_pos in (position + 1..).take(max_k) {
+            let tok = sampler.sample(&mut draft_state.logits);
+            draft_tokens.push(tok);
+            self.draft.forward(draft_state, tok, cur_pos)?;
+            self.recycler.record_token(cur_pos, tok, token_bytes);
+        }
+
+        self.stats.proposed += draft_tokens.len();
+
+        let mut target_batch = Vec::with_capacity(1 + draft_tokens.len());
+        target_batch.push(first_tok);
+        target_batch.extend_from_slice(&draft_tokens);
+
+        let vocab = self.target.config.vocab;
+        let mut target_all_logits = vec![0.0f32; target_batch.len() * vocab];
+
+        self.target.prefill_all_logits(
+            target_state,
+            &target_batch,
+            position,
+            &mut target_all_logits,
+        )?;
+        self.stats.target_batches += 1;
+
+        let mut accepted_count = 0;
+        let total_drafted = draft_tokens.len();
+
+        for i in 0..total_drafted {
+            let target_tok_logits = &mut target_all_logits[i * vocab..(i + 1) * vocab];
+            let target_pred = sampler.sample(target_tok_logits);
+
+            if target_pred == draft_tokens[i] {
+                emitted.push(draft_tokens[i]);
+                accepted_count += 1;
+                self.recycler.recycled_tokens += 1;
+            } else {
+                emitted.push(target_pred);
+                break;
+            }
+        }
+
+        self.stats.accepted += accepted_count;
+
+        if accepted_count < total_drafted {
+            let accepted_total = emitted.len();
+            let rollback_from = position + accepted_total;
+            let rollback_to = position + target_batch.len();
+
+            target_state.truncate_cache(&self.target.config, rollback_from, rollback_to);
+            draft_state.truncate_cache(&self.draft.config, rollback_from, rollback_to);
+            self.recycler.invalidate_from(rollback_from);
+
+            let corrective_pos = position + accepted_total - 1;
+            let corrective_tok = emitted[accepted_total - 1];
+            self.draft
+                .forward(draft_state, corrective_tok, corrective_pos)?;
+            self.recycler
+                .record_token(corrective_pos, corrective_tok, token_bytes);
+
+            self.target
+                .forward(target_state, corrective_tok, corrective_pos)?;
+        } else {
+            let last_logits =
+                &target_all_logits[total_drafted * vocab..(total_drafted + 1) * vocab];
+            target_state.set_logits(last_logits);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}
+
+/// Configuration for adaptive speculative acceptance thresholding and draft temperature calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeculativeAdaptiveConfig {
+    /// Baseline target acceptance threshold in [0.0, 1.0].
+    pub base_threshold: f32,
+    /// Minimum allowed adaptive threshold.
+    pub min_threshold: f32,
+    /// Maximum allowed adaptive threshold.
+    pub max_threshold: f32,
+    /// Rate at which the adaptive threshold adjusts per feedback observation.
+    pub adaptation_rate: f32,
+    /// Target desired acceptance rate.
+    pub target_acceptance_rate: f32,
+    /// Calibrated draft temperature scale multiplier.
+    pub temperature_scale: f32,
+}
+
+impl Default for SpeculativeAdaptiveConfig {
+    fn default() -> Self {
+        Self {
+            base_threshold: 0.5,
+            min_threshold: 0.1,
+            max_threshold: 0.9,
+            adaptation_rate: 0.05,
+            target_acceptance_rate: 0.75,
+            temperature_scale: 1.0,
+        }
+    }
+}
+
+/// Calibrates draft model temperature by minimizing the Kullback-Leibler (KL) divergence
+/// between the target model probability distribution and the temperature-scaled draft distribution.
+pub fn calibrate_draft_temperature(
+    draft_logits: &[f32],
+    target_logits: &[f32],
+    target_temp: f32,
+) -> f32 {
+    let vocab = draft_logits.len();
+    if vocab == 0 || target_logits.len() != vocab {
+        return 1.0;
+    }
+
+    let t_temp = target_temp.max(0.01);
+    let mut p_target = vec![0.0f32; vocab];
+    let max_target = target_logits
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut sum_target = 0.0f32;
+    for (i, &l) in target_logits.iter().enumerate() {
+        let p = ((l - max_target) / t_temp).exp();
+        p_target[i] = p;
+        sum_target += p;
+    }
+    let inv_sum_target = if sum_target > 0.0 {
+        1.0 / sum_target
+    } else {
+        0.0
+    };
+    for p in p_target.iter_mut() {
+        *p *= inv_sum_target;
+    }
+
+    let mut best_scale = 1.0f32;
+    let mut min_kl = f32::INFINITY;
+
+    for step in 0..31 {
+        let scale = 0.5 + (step as f32) * 0.05;
+        let draft_temp = (t_temp * scale).max(0.01);
+
+        let max_draft = draft_logits
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut sum_draft = 0.0f32;
+        let mut q_draft = vec![0.0f32; vocab];
+        for (i, &l) in draft_logits.iter().enumerate() {
+            let q = ((l - max_draft) / draft_temp).exp();
+            q_draft[i] = q;
+            sum_draft += q;
+        }
+        let inv_sum_draft = if sum_draft > 0.0 {
+            1.0 / sum_draft
+        } else {
+            0.0
+        };
+
+        let mut kl = 0.0f32;
+        for i in 0..vocab {
+            let p = p_target[i];
+            let q = q_draft[i] * inv_sum_draft;
+            if p > 1e-12 && q > 1e-12 {
+                kl += p * (p / q).ln();
+            }
+        }
+
+        if kl < min_kl {
+            min_kl = kl;
+            best_scale = scale;
+        }
+    }
+
+    best_scale
+}
+
+/// Evaluates adaptive acceptance condition comparing target probability to draft probability.
+pub fn eval_adaptive_acceptance(target_prob: f32, draft_prob: f32, threshold: f32) -> bool {
+    if draft_prob <= 0.0 {
+        return target_prob > 0.0;
+    }
+    let ratio = target_prob / draft_prob;
+    ratio >= threshold
+}
+
+/// Dynamic tracker adjusting speculative acceptance thresholds based on empirical acceptance rate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveThresholdTracker {
+    pub config: SpeculativeAdaptiveConfig,
+    pub current_threshold: f32,
+    pub recent_accepted: usize,
+    pub recent_total: usize,
+}
+
+impl AdaptiveThresholdTracker {
+    pub fn new(config: SpeculativeAdaptiveConfig) -> Self {
+        let current_threshold = config.base_threshold;
+        Self {
+            config,
+            current_threshold,
+            recent_accepted: 0,
+            recent_total: 0,
+        }
+    }
+
+    /// Record an acceptance decision and adjust the threshold dynamically.
+    pub fn record_decision(&mut self, accepted: bool) {
+        self.recent_total += 1;
+        if accepted {
+            self.recent_accepted += 1;
+        }
+
+        let current_rate = self.recent_accepted as f32 / self.recent_total as f32;
+        if current_rate > self.config.target_acceptance_rate {
+            self.current_threshold = (self.current_threshold - self.config.adaptation_rate)
+                .max(self.config.min_threshold);
+        } else if current_rate < self.config.target_acceptance_rate {
+            self.current_threshold = (self.current_threshold + self.config.adaptation_rate)
+                .min(self.config.max_threshold);
+        }
+    }
+}
+
+/// Speculative engine with adaptive acceptance thresholding and draft temperature calibration.
+pub struct AdaptiveSpeculativeEngine<'a> {
+    pub target: &'a Model<'a>,
+    pub draft: &'a Model<'a>,
+    pub tracker: AdaptiveThresholdTracker,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> AdaptiveSpeculativeEngine<'a> {
+    pub fn new(
+        target: &'a Model<'a>,
+        draft: &'a Model<'a>,
+        config: SpeculativeAdaptiveConfig,
+    ) -> Self {
+        Self {
+            target,
+            draft,
+            tracker: AdaptiveThresholdTracker::new(config),
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Execute one speculative verification step with adaptive thresholding.
+    pub fn step(
+        &mut self,
+        target_state: &mut State,
+        draft_state: &mut State,
+        sampler: &mut Sampler,
+        num_draft: usize,
+        position: usize,
+    ) -> Result<Vec<u32>> {
+        let vocab = self.target.config.vocab;
+
+        // 1. Target model predicts position `position`
+        let target_tok = sampler.sample(&mut target_state.logits);
+        let mut emitted = vec![target_tok];
+
+        if num_draft == 0 {
+            self.target.forward(target_state, target_tok, position)?;
+            self.draft.forward(draft_state, target_tok, position)?;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // 2. Draft model generates candidates
+        self.draft.forward(draft_state, target_tok, position)?;
+
+        let mut draft_tokens = Vec::with_capacity(num_draft);
+        let mut draft_probs = Vec::with_capacity(num_draft);
+
+        for step in 0..num_draft {
+            let p = position + 1 + step;
+            let tok = sampler.sample(&mut draft_state.logits);
+            draft_tokens.push(tok);
+            draft_probs.push(1.0);
+            if step + 1 < num_draft {
+                self.draft.forward(draft_state, tok, p)?;
+            }
+        }
+
+        self.stats.proposed += num_draft;
+        self.stats.target_batches += 1;
+
+        // 3. Target model verifies candidates
+        let mut target_batch = Vec::with_capacity(1 + num_draft);
+        target_batch.push(target_tok);
+        target_batch.extend_from_slice(&draft_tokens);
+
+        let mut target_all_logits = vec![0.0f32; target_batch.len() * vocab];
+        self.target.prefill_all_logits(
+            target_state,
+            &target_batch,
+            position,
+            &mut target_all_logits,
+        )?;
+
+        let mut accepted_count = 0;
+        for i in 0..num_draft {
+            let logits_slice = &mut target_all_logits[i * vocab..(i + 1) * vocab];
+            let target_pred = sampler.sample(logits_slice);
+
+            let accepted = target_pred == draft_tokens[i];
+            self.tracker.record_decision(accepted);
+
+            if accepted {
+                emitted.push(draft_tokens[i]);
+                accepted_count += 1;
+            } else {
+                emitted.push(target_pred);
+                break;
+            }
+        }
+
+        self.stats.accepted += accepted_count;
+
+        if accepted_count < num_draft {
+            let accepted_total = emitted.len();
+            let rollback_from = position + accepted_total;
+            let rollback_to = position + target_batch.len();
+
+            target_state.truncate_cache(&self.target.config, rollback_from, rollback_to);
+            draft_state.truncate_cache(&self.draft.config, rollback_from, rollback_to);
+
+            let corrective_pos = position + accepted_total - 1;
+            let corrective_tok = emitted[accepted_total - 1];
+            self.draft
+                .forward(draft_state, corrective_tok, corrective_pos)?;
+            self.target
+                .forward(target_state, corrective_tok, corrective_pos)?;
+        } else {
+            let last_logits = &target_all_logits[num_draft * vocab..(num_draft + 1) * vocab];
+            target_state.set_logits(last_logits);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}

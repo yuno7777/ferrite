@@ -1161,6 +1161,94 @@ fn chunked_prefill_runner_stateful_step_and_progress() {
 }
 
 #[test]
+fn async_chunked_prefill_background_compute_and_streaming() {
+    let path = write("async_chunked", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = vec![1u32, 2, 3, 0, 2, 1, 3];
+
+    // Reference sequential forward
+    let mut state_ref = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_ref, tok, pos).expect("forward");
+    }
+
+    // Spawn async background chunked prefill with chunk size 2
+    let state_init = State::new(&model.config);
+    let mut async_prefill =
+        ferrite::AsyncChunkedPrefill::spawn(&model, state_init, prompt.clone(), 0, 2)
+            .expect("spawn async prefill");
+
+    assert_eq!(async_prefill.total_tokens(), 7);
+
+    let mut events = Vec::new();
+    while let Some(event) = async_prefill.wait_next_event() {
+        events.push(event);
+        if async_prefill.is_finished() {
+            break;
+        }
+    }
+
+    // Expect: chunks 0..2, 2..4, 4..6, 6..7 -> 4 ChunkProcessed events + 1 Completed event
+    assert_eq!(events.len(), 5);
+    match events[0] {
+        ferrite::PrefillChunkEvent::ChunkProcessed {
+            chunk_index,
+            chunk_tokens,
+            total_processed,
+            ..
+        } => {
+            assert_eq!(chunk_index, 1);
+            assert_eq!(chunk_tokens, 2);
+            assert_eq!(total_processed, 2);
+        }
+        _ => panic!("unexpected event 0"),
+    }
+
+    match events[3] {
+        ferrite::PrefillChunkEvent::ChunkProcessed {
+            chunk_index,
+            chunk_tokens,
+            total_processed,
+            ..
+        } => {
+            assert_eq!(chunk_index, 4);
+            assert_eq!(chunk_tokens, 1);
+            assert_eq!(total_processed, 7);
+        }
+        _ => panic!("unexpected event 3"),
+    }
+
+    match events[4] {
+        ferrite::PrefillChunkEvent::Completed { total_tokens } => {
+            assert_eq!(total_tokens, 7);
+        }
+        _ => panic!("unexpected event 4"),
+    }
+
+    let final_state = async_prefill.join().expect("join");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&final_state.logits),
+        bits(&state_ref.logits),
+        "async background prefill logits must match reference sequential forward exactly"
+    );
+
+    // Test cooperative cancellation
+    let long_prompt = vec![1u32; 32];
+    let cancel_prefill =
+        ferrite::AsyncChunkedPrefill::spawn(&model, State::new(&model.config), long_prompt, 0, 1)
+            .expect("spawn cancel prefill");
+    cancel_prefill.cancel();
+    let final_cancel_state = cancel_prefill.join().expect("join cancel");
+    assert!(final_cancel_state.logits.len() == model.config.vocab);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn quantized_kv_cache_q8_0_forward_and_prefill_match() {
     let path = write("quantized_kv_q8_0", &fixture(2, true));
     let gguf = Gguf::open(&path).expect("open");
@@ -2003,6 +2091,130 @@ fn deepseek_mla_forward_and_prefill_match() {
     );
 
     fs::remove_file(path).ok();
+}
+
+#[test]
+fn mla_direct_latent_attention_mathematical_parity_against_expanded_heads() {
+    // Verify that direct latent attention produces identical results to expanding
+    // all historical per-head keys and values.
+    let _heads = 2;
+    let latent_dim = 4;
+    let rope_dim = 2;
+    let nope_dim = 2;
+    let v_hdim = 2;
+    let seq_len = 3;
+
+    // Up-projection matrices:
+    // W_UK: [heads * nope_dim, latent_dim] = [4, 4]
+    let w_uk = [
+        0.5, -0.2, 0.1, 0.4, 0.3, 0.7, -0.5, 0.2, -0.1, 0.4, 0.6, -0.3, 0.8, -0.1, 0.2, 0.5,
+    ];
+    // W_UV: [heads * v_hdim, latent_dim] = [4, 4]
+    let w_uv = [
+        0.4, 0.1, -0.3, 0.6, -0.2, 0.5, 0.4, 0.1, 0.3, -0.4, 0.2, 0.7, 0.1, 0.6, -0.1, 0.3,
+    ];
+
+    // Cached compressed latents (c_KV) and decoupled RoPE keys (k_R) for 3 tokens
+    let latents = [
+        1.0, 0.5, -0.2, 0.8, 0.2, 1.2, 0.4, -0.6, -0.5, 0.3, 1.5, 0.1,
+    ];
+    let rope_keys = [0.3, 0.9, 0.7, -0.4, -0.1, 0.8];
+
+    let mut cache = ferrite::MlaKvCache::new(1, seq_len, latent_dim, rope_dim);
+    for t in 0..seq_len {
+        cache.store(
+            0,
+            t,
+            &latents[t * latent_dim..(t + 1) * latent_dim],
+            &rope_keys[t * rope_dim..(t + 1) * rope_dim],
+        );
+    }
+
+    // Query for head 0
+    let q_nope = [0.6, -0.4];
+    let q_rope = [0.8, 0.2];
+    let scale = 1.0 / ((nope_dim + rope_dim) as f32).sqrt();
+
+    // 1. Direct Latent Attention Path:
+    // Project q_nope into latent space: q_tilde = q_nope * W_UK_0
+    let mut q_tilde = [0.0f32; 4];
+    for col in 0..latent_dim {
+        q_tilde[col] = q_nope[0] * w_uk[col] + q_nope[1] * w_uk[latent_dim + col];
+    }
+
+    let mut latent_sum = vec![0.0f32; latent_dim];
+    cache.attention(
+        0,
+        &q_tilde,
+        &q_rope,
+        ferrite::ops::MlaAttentionParams {
+            latent_dim,
+            rope_dim,
+            len: seq_len,
+            scale,
+            logit_cap: None,
+        },
+        &mut latent_sum,
+    );
+
+    // Project final latent sum by W_UV_0 to get output head values
+    let mut out_direct = [0.0f32; 2];
+    for row in 0..v_hdim {
+        let mut s = 0.0f32;
+        for col in 0..latent_dim {
+            s += w_uv[row * latent_dim + col] * latent_sum[col];
+        }
+        out_direct[row] = s;
+    }
+
+    // 2. Expanded Reference Attention Path:
+    // Expand K and V for head 0 for all tokens
+    let mut exp_keys = Vec::new();
+    let mut exp_values = Vec::new();
+    for t in 0..seq_len {
+        let lat = &latents[t * latent_dim..(t + 1) * latent_dim];
+        let k_nope0 = [
+            lat[0] * w_uk[0] + lat[1] * w_uk[1] + lat[2] * w_uk[2] + lat[3] * w_uk[3],
+            lat[0] * w_uk[4] + lat[1] * w_uk[5] + lat[2] * w_uk[6] + lat[3] * w_uk[7],
+        ];
+        let rk = &rope_keys[t * rope_dim..(t + 1) * rope_dim];
+        exp_keys.extend_from_slice(&[k_nope0[0], k_nope0[1], rk[0], rk[1]]);
+
+        let v0 = [
+            lat[0] * w_uv[0] + lat[1] * w_uv[1] + lat[2] * w_uv[2] + lat[3] * w_uv[3],
+            lat[0] * w_uv[4] + lat[1] * w_uv[5] + lat[2] * w_uv[6] + lat[3] * w_uv[7],
+        ];
+        exp_values.extend_from_slice(&v0);
+    }
+
+    let q_full = [q_nope[0], q_nope[1], q_rope[0], q_rope[1]];
+    let mut out_expanded = [0.0f32; 2];
+    ferrite::ops::attention_online(
+        &q_full,
+        &exp_keys,
+        &exp_values,
+        ferrite::ops::AttentionParams {
+            row_width: 4,
+            offset: 0,
+            len: seq_len,
+            scale,
+            logit_cap: None,
+            window: None,
+            position: seq_len - 1,
+            tile_size: 4,
+            v_row_width: Some(2),
+            v_offset: Some(0),
+        },
+        &mut out_expanded,
+    );
+
+    // Assert exact numerical agreement within floating-point epsilon
+    for (d, e) in out_direct.iter().zip(&out_expanded) {
+        assert!(
+            (d - e).abs() < 1e-6,
+            "Direct MLA attention {out_direct:?} does not match expanded reference {out_expanded:?}"
+        );
+    }
 }
 
 #[test]

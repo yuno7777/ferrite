@@ -756,12 +756,499 @@ impl ChoiceGrammar {
     }
 }
 
+/// AST representation of a compiled JSON schema.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SchemaNode {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    Enum(Vec<String>),
+    Array(Box<SchemaNode>),
+    Object {
+        properties: Vec<(String, SchemaNode)>,
+        required: Vec<String>,
+    },
+    Any,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchResult {
+    Complete(usize),
+    Partial,
+    Mismatch,
+}
+
+fn skip_ascii_ws(bytes: &[u8]) -> &[u8] {
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    &bytes[i..]
+}
+
+fn check_schema_node(node: &SchemaNode, input: &[u8]) -> MatchResult {
+    let bytes = skip_ascii_ws(input);
+    if bytes.is_empty() {
+        return MatchResult::Partial;
+    }
+    let lead_ws = input.len() - bytes.len();
+
+    match node {
+        SchemaNode::String => {
+            if bytes[0] != b'"' {
+                return MatchResult::Mismatch;
+            }
+            let mut i = 1;
+            let mut escape = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if escape {
+                    escape = false;
+                } else if b == b'\\' {
+                    escape = true;
+                } else if b == b'"' {
+                    return MatchResult::Complete(lead_ws + i + 1);
+                }
+                i += 1;
+            }
+            MatchResult::Partial
+        }
+        SchemaNode::Enum(choices) => {
+            if bytes[0] != b'"' {
+                return MatchResult::Mismatch;
+            }
+            let mut i = 1;
+            let mut escape = false;
+            let mut closed = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if escape {
+                    escape = false;
+                } else if b == b'\\' {
+                    escape = true;
+                } else if b == b'"' {
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            let text = &bytes[1..i];
+            if closed {
+                if let Ok(s) = std::str::from_utf8(text) {
+                    if choices.iter().any(|c| c == s) {
+                        return MatchResult::Complete(lead_ws + i + 1);
+                    }
+                }
+                MatchResult::Mismatch
+            } else if let Ok(s) = std::str::from_utf8(text) {
+                if choices.iter().any(|c| c.starts_with(s)) {
+                    MatchResult::Partial
+                } else {
+                    MatchResult::Mismatch
+                }
+            } else {
+                MatchResult::Partial
+            }
+        }
+        SchemaNode::Integer => {
+            let mut i = 0;
+            if bytes[0] == b'-' {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return MatchResult::Partial;
+            }
+            if !bytes[i].is_ascii_digit() {
+                return MatchResult::Mismatch;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            MatchResult::Complete(lead_ws + i)
+        }
+        SchemaNode::Number => {
+            let mut i = 0;
+            if bytes[0] == b'-' {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return MatchResult::Partial;
+            }
+            if !bytes[i].is_ascii_digit() {
+                return MatchResult::Mismatch;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'.' {
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            MatchResult::Complete(lead_ws + i)
+        }
+        SchemaNode::Boolean => {
+            for &expected in &[&b"true"[..], &b"false"[..]] {
+                if bytes.starts_with(expected) {
+                    return MatchResult::Complete(lead_ws + expected.len());
+                } else if expected.starts_with(bytes) {
+                    return MatchResult::Partial;
+                }
+            }
+            MatchResult::Mismatch
+        }
+        SchemaNode::Array(elem_node) => {
+            if bytes[0] != b'[' {
+                return MatchResult::Mismatch;
+            }
+            let mut cur = &bytes[1..];
+            let mut total_consumed = 1;
+            loop {
+                let rest = skip_ascii_ws(cur);
+                total_consumed += cur.len() - rest.len();
+                cur = rest;
+                if cur.is_empty() {
+                    return MatchResult::Partial;
+                }
+                if cur[0] == b']' {
+                    return MatchResult::Complete(lead_ws + total_consumed + 1);
+                }
+                match check_schema_node(elem_node, cur) {
+                    MatchResult::Complete(consumed) => {
+                        total_consumed += consumed;
+                        cur = &cur[consumed..];
+                        let after = skip_ascii_ws(cur);
+                        total_consumed += cur.len() - after.len();
+                        cur = after;
+                        if cur.is_empty() {
+                            return MatchResult::Partial;
+                        }
+                        if cur[0] == b',' {
+                            total_consumed += 1;
+                            cur = &cur[1..];
+                        } else if cur[0] == b']' {
+                            return MatchResult::Complete(lead_ws + total_consumed + 1);
+                        } else {
+                            return MatchResult::Mismatch;
+                        }
+                    }
+                    MatchResult::Partial => return MatchResult::Partial,
+                    MatchResult::Mismatch => return MatchResult::Mismatch,
+                }
+            }
+        }
+        SchemaNode::Object {
+            properties,
+            required,
+        } => {
+            if bytes[0] != b'{' {
+                return MatchResult::Mismatch;
+            }
+            let mut cur = &bytes[1..];
+            let mut total_consumed = 1;
+            let mut seen_keys = std::collections::HashSet::new();
+
+            loop {
+                let rest = skip_ascii_ws(cur);
+                total_consumed += cur.len() - rest.len();
+                cur = rest;
+                if cur.is_empty() {
+                    return MatchResult::Partial;
+                }
+                if cur[0] == b'}' {
+                    let all_req = required.iter().all(|k| seen_keys.contains(k));
+                    return if all_req {
+                        MatchResult::Complete(lead_ws + total_consumed + 1)
+                    } else {
+                        MatchResult::Mismatch
+                    };
+                }
+
+                if cur[0] != b'"' {
+                    return MatchResult::Mismatch;
+                }
+                let mut k_end = 1;
+                let mut closed_key = false;
+                while k_end < cur.len() {
+                    if cur[k_end] == b'"' && cur[k_end - 1] != b'\\' {
+                        closed_key = true;
+                        break;
+                    }
+                    k_end += 1;
+                }
+                if !closed_key {
+                    return MatchResult::Partial;
+                }
+                let key_str = match std::str::from_utf8(&cur[1..k_end]) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => return MatchResult::Mismatch,
+                };
+                seen_keys.insert(key_str.clone());
+                total_consumed += k_end + 1;
+                cur = &cur[k_end + 1..];
+
+                let rest = skip_ascii_ws(cur);
+                total_consumed += cur.len() - rest.len();
+                cur = rest;
+                if cur.is_empty() {
+                    return MatchResult::Partial;
+                }
+                if cur[0] != b':' {
+                    return MatchResult::Mismatch;
+                }
+                total_consumed += 1;
+                cur = &cur[1..];
+
+                let prop_schema = properties
+                    .iter()
+                    .find(|(k, _)| k == &key_str)
+                    .map(|(_, node)| node)
+                    .unwrap_or(&SchemaNode::Any);
+
+                match check_schema_node(prop_schema, cur) {
+                    MatchResult::Complete(consumed) => {
+                        total_consumed += consumed;
+                        cur = &cur[consumed..];
+                        let after = skip_ascii_ws(cur);
+                        total_consumed += cur.len() - after.len();
+                        cur = after;
+                        if cur.is_empty() {
+                            return MatchResult::Partial;
+                        }
+                        if cur[0] == b',' {
+                            total_consumed += 1;
+                            cur = &cur[1..];
+                        } else if cur[0] == b'}' {
+                            let all_req = required.iter().all(|k| seen_keys.contains(k));
+                            return if all_req {
+                                MatchResult::Complete(lead_ws + total_consumed + 1)
+                            } else {
+                                MatchResult::Mismatch
+                            };
+                        } else {
+                            return MatchResult::Mismatch;
+                        }
+                    }
+                    MatchResult::Partial => return MatchResult::Partial,
+                    MatchResult::Mismatch => return MatchResult::Mismatch,
+                }
+            }
+        }
+        SchemaNode::Any => {
+            if bytes[0] == b'"' {
+                return check_schema_node(&SchemaNode::String, input);
+            }
+            if bytes[0] == b'{' {
+                return check_schema_node(
+                    &SchemaNode::Object {
+                        properties: Vec::new(),
+                        required: Vec::new(),
+                    },
+                    input,
+                );
+            }
+            if bytes[0] == b'[' {
+                return check_schema_node(&SchemaNode::Array(Box::new(SchemaNode::Any)), input);
+            }
+            if bytes[0] == b't' || bytes[0] == b'f' {
+                return check_schema_node(&SchemaNode::Boolean, input);
+            }
+            if bytes[0] == b'-' || bytes[0].is_ascii_digit() {
+                return check_schema_node(&SchemaNode::Number, input);
+            }
+            MatchResult::Partial
+        }
+    }
+}
+
+fn parse_json_schema(src: &str) -> std::result::Result<SchemaNode, String> {
+    let trimmed = src.trim();
+    if !trimmed.starts_with('{') {
+        return Ok(SchemaNode::Any);
+    }
+
+    let ty = if let Some(type_idx) = trimmed.find("\"type\"") {
+        let rest = &trimmed[type_idx + 6..];
+        let after_colon = rest.trim_start().trim_start_matches(':').trim_start();
+        if let Some(val_end) = after_colon.find(|c: char| c == ',' || c == '}' || c.is_whitespace())
+        {
+            after_colon[..val_end].trim_matches('"').to_string()
+        } else {
+            after_colon.trim_matches('"').to_string()
+        }
+    } else if trimmed.contains("\"properties\"") {
+        "object".to_string()
+    } else if trimmed.contains("\"enum\"") {
+        "string".to_string()
+    } else {
+        "object".to_string()
+    };
+
+    match ty.as_str() {
+        "string" => {
+            if let Some(enum_idx) = trimmed.find("\"enum\"") {
+                if let Some(arr_start) = trimmed[enum_idx..].find('[') {
+                    let start = enum_idx + arr_start + 1;
+                    if let Some(arr_end) = trimmed[start..].find(']') {
+                        let items_str = &trimmed[start..start + arr_end];
+                        let mut choices = Vec::new();
+                        for part in items_str.split(',') {
+                            let p = part.trim().trim_matches('"');
+                            if !p.is_empty() {
+                                choices.push(p.to_string());
+                            }
+                        }
+                        return Ok(SchemaNode::Enum(choices));
+                    }
+                }
+            }
+            Ok(SchemaNode::String)
+        }
+        "integer" => Ok(SchemaNode::Integer),
+        "number" => Ok(SchemaNode::Number),
+        "boolean" => Ok(SchemaNode::Boolean),
+        "array" => {
+            let item_node = if let Some(items_idx) = trimmed.find("\"items\"") {
+                let rest = &trimmed[items_idx + 7..];
+                let after_colon = rest.trim_start().trim_start_matches(':').trim_start();
+                parse_json_schema(after_colon)?
+            } else {
+                SchemaNode::Any
+            };
+            Ok(SchemaNode::Array(Box::new(item_node)))
+        }
+        "object" => {
+            let mut required = Vec::new();
+            if let Some(req_idx) = trimmed.find("\"required\"") {
+                if let Some(arr_start) = trimmed[req_idx..].find('[') {
+                    let start = req_idx + arr_start + 1;
+                    if let Some(arr_end) = trimmed[start..].find(']') {
+                        let items_str = &trimmed[start..start + arr_end];
+                        for part in items_str.split(',') {
+                            let p = part.trim().trim_matches('"');
+                            if !p.is_empty() {
+                                required.push(p.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut properties = Vec::new();
+            if let Some(prop_idx) = trimmed.find("\"properties\"") {
+                let rest = &trimmed[prop_idx + 12..];
+                if let Some(obj_start) = rest.find('{') {
+                    let props_slice = &rest[obj_start + 1..];
+                    let mut i = 0;
+                    let bytes = props_slice.as_bytes();
+                    while i < bytes.len() {
+                        if bytes[i] == b'}' {
+                            break;
+                        }
+                        if bytes[i] == b'"' {
+                            let k_start = i + 1;
+                            let mut k_end = k_start;
+                            while k_end < bytes.len() && bytes[k_end] != b'"' {
+                                k_end += 1;
+                            }
+                            let key = std::str::from_utf8(&bytes[k_start..k_end])
+                                .unwrap_or("")
+                                .to_string();
+                            if let Some(sub_start) = props_slice[k_end..].find('{') {
+                                let abs_sub = k_end + sub_start;
+                                let mut depth = 0;
+                                let mut sub_end = abs_sub;
+                                for (idx, &b) in bytes[abs_sub..].iter().enumerate() {
+                                    if b == b'{' {
+                                        depth += 1;
+                                    } else if b == b'}' {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            sub_end = abs_sub + idx + 1;
+                                            break;
+                                        }
+                                    }
+                                }
+                                let child_schema =
+                                    parse_json_schema(&props_slice[abs_sub..sub_end])?;
+                                properties.push((key, child_schema));
+                                i = sub_end;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            Ok(SchemaNode::Object {
+                properties,
+                required,
+            })
+        }
+        _ => Ok(SchemaNode::Any),
+    }
+}
+
+/// Context-Free Grammar byte-state automaton enforcing JSON schema structure.
+#[derive(Clone, Debug)]
+pub struct SchemaGrammar {
+    pub root: SchemaNode,
+    pub current_prefix: Vec<u8>,
+}
+
+impl SchemaGrammar {
+    pub fn new(root: SchemaNode) -> Self {
+        Self {
+            root,
+            current_prefix: Vec::new(),
+        }
+    }
+
+    /// Compiles a JSON Schema string into a schema grammar automaton.
+    pub fn compile(schema_json: &str) -> std::result::Result<Self, String> {
+        let node = parse_json_schema(schema_json)?;
+        Ok(Self::new(node))
+    }
+
+    pub fn is_accepting(&self) -> bool {
+        match check_schema_node(&self.root, &self.current_prefix) {
+            MatchResult::Complete(len) => {
+                let rest = skip_ascii_ws(&self.current_prefix[len..]);
+                rest.is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    pub fn accepts_prefix(&self, bytes: &[u8]) -> bool {
+        let mut test = self.current_prefix.clone();
+        test.extend_from_slice(bytes);
+        matches!(
+            check_schema_node(&self.root, &test),
+            MatchResult::Complete(_) | MatchResult::Partial
+        )
+    }
+
+    pub fn advance(&mut self, bytes: &[u8]) -> bool {
+        if self.accepts_prefix(bytes) {
+            self.current_prefix.extend_from_slice(bytes);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Unified grammar constraint for logit masking.
 #[derive(Clone, Debug)]
 pub enum Grammar {
     Json(JsonGrammar),
     Regex(RegexMatcher),
     Choice(ChoiceGrammar),
+    Schema(SchemaGrammar),
 }
 
 impl Grammar {
@@ -780,12 +1267,18 @@ impl Grammar {
         Self::Choice(ChoiceGrammar::new(options))
     }
 
+    /// Create a grammar enforcing a JSON Schema specification.
+    pub fn schema(schema_json: &str) -> std::result::Result<Self, String> {
+        Ok(Self::Schema(SchemaGrammar::compile(schema_json)?))
+    }
+
     /// Check if current state is in an accepting / completed configuration.
     pub fn is_accepting(&self) -> bool {
         match self {
             Self::Json(g) => g.is_accepting(),
             Self::Regex(g) => g.is_accepting(),
             Self::Choice(g) => g.is_accepting(),
+            Self::Schema(g) => g.is_accepting(),
         }
     }
 
@@ -795,6 +1288,7 @@ impl Grammar {
             Self::Json(g) => g.accepts_prefix(bytes),
             Self::Regex(g) => g.accepts_prefix(bytes),
             Self::Choice(g) => g.accepts_prefix(bytes),
+            Self::Schema(g) => g.accepts_prefix(bytes),
         }
     }
 
@@ -804,6 +1298,7 @@ impl Grammar {
             Self::Json(g) => g.advance(bytes),
             Self::Regex(g) => g.advance(bytes),
             Self::Choice(g) => g.advance(bytes),
+            Self::Schema(g) => g.advance(bytes),
         }
     }
 
@@ -901,5 +1396,46 @@ mod tests {
 
         assert!(choice.advance(b"apple"));
         assert!(choice.is_accepting());
+    }
+
+    #[test]
+    fn test_schema_grammar_object_validation() {
+        let schema_json = r#"{
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "age": { "type": "integer" }
+            },
+            "required": ["name"]
+        }"#;
+
+        let mut grammar = SchemaGrammar::compile(schema_json).expect("compile schema");
+        assert!(!grammar.is_accepting());
+
+        assert!(grammar.accepts_prefix(b"{\"name\": \"Alice\""));
+        assert!(grammar.advance(b"{\"name\": \"Alice\""));
+        assert!(!grammar.is_accepting());
+
+        assert!(grammar.advance(b"}"));
+        assert!(grammar.is_accepting());
+    }
+
+    #[test]
+    fn test_schema_grammar_enum_and_array() {
+        let schema_json = r#"{
+            "type": "object",
+            "properties": {
+                "status": { "type": "string", "enum": ["active", "pending", "closed"] }
+            },
+            "required": ["status"]
+        }"#;
+
+        let mut grammar = SchemaGrammar::compile(schema_json).expect("compile");
+        assert!(grammar.accepts_prefix(b"{\"status\": \"act"));
+        assert!(grammar.accepts_prefix(b"{\"status\": \"active\"}"));
+        assert!(!grammar.accepts_prefix(b"{\"status\": \"deleted\"}"));
+
+        assert!(grammar.advance(b"{\"status\": \"active\"}"));
+        assert!(grammar.is_accepting());
     }
 }

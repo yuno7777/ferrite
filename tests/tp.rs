@@ -177,3 +177,80 @@ fn test_tp_thread_pool_rapid_dispatch_stress() {
         assert_eq!(count, total_tasks as u32);
     }
 }
+
+#[test]
+fn test_tp_dispatch_two_partitions() {
+    let pool = ThreadPool::new(4);
+    let n1 = 30;
+    let n2 = 40;
+
+    struct Ctx {
+        ptr: *mut usize,
+        tag: usize,
+    }
+    unsafe impl Sync for Ctx {}
+
+    unsafe fn worker(ctx: *const (), start: usize, end: usize, _thread_id: usize) {
+        let c = &*(ctx as *const Ctx);
+        for i in start..end {
+            *c.ptr.add(i) = c.tag;
+        }
+    }
+
+    let mut buf1 = vec![0usize; n1];
+    let mut buf2 = vec![0usize; n2];
+
+    let ctx1 = Ctx {
+        ptr: buf1.as_mut_ptr(),
+        tag: 101,
+    };
+    let ctx2 = Ctx {
+        ptr: buf2.as_mut_ptr(),
+        tag: 202,
+    };
+
+    pool.dispatch_two(n1, &ctx1, worker, n2, &ctx2, worker);
+
+    assert!(buf1.iter().all(|&v| v == 101));
+    assert!(buf2.iter().all(|&v| v == 202));
+}
+
+#[test]
+fn test_eval_tp_swiglu_dual_matches_sequential_swiglu() {
+    let dim = 16;
+    let ffn_dim = 32;
+
+    let gate_f32: Vec<f32> = (0..ffn_dim * dim)
+        .map(|i| ((i * 7) % 50) as f32 * 0.04 - 1.0)
+        .collect();
+    let up_f32: Vec<f32> = (0..ffn_dim * dim)
+        .map(|i| ((i * 11) % 50) as f32 * 0.04 - 1.0)
+        .collect();
+    let down_f32: Vec<f32> = (0..dim * ffn_dim)
+        .map(|i| ((i * 13) % 50) as f32 * 0.04 - 1.0)
+        .collect();
+
+    let bytes_gate: Vec<u8> = gate_f32.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let bytes_up: Vec<u8> = up_f32.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let bytes_down: Vec<u8> = down_f32.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+    let gate_w = Weight::from_raw(&bytes_gate, GgmlType::F32, ffn_dim, dim).unwrap();
+    let up_w = Weight::from_raw(&bytes_up, GgmlType::F32, ffn_dim, dim).unwrap();
+    let down_w = Weight::from_raw(&bytes_down, GgmlType::F32, dim, ffn_dim).unwrap();
+
+    let x: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
+
+    let pool = ThreadPool::new(4);
+    let mut out_standard = vec![0.0f32; dim];
+    eval_tp_swiglu(&gate_w, &up_w, &down_w, &x, &mut out_standard, &pool).unwrap();
+
+    let mut out_dual = vec![0.0f32; dim];
+    ferrite::tp::eval_tp_swiglu_dual(&gate_w, &up_w, &down_w, &x, &mut out_dual, &pool).unwrap();
+
+    let bits_std: Vec<u32> = out_standard.iter().map(|f| f.to_bits()).collect();
+    let bits_dual: Vec<u32> = out_dual.iter().map(|f| f.to_bits()).collect();
+    assert_eq!(
+        bits_std, bits_dual,
+        "eval_tp_swiglu_dual must match eval_tp_swiglu bit-identically"
+    );
+}

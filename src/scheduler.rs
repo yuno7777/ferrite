@@ -368,6 +368,187 @@ impl BatchScheduler {
     }
 }
 
+/// A micro-batch of dynamically packed heterogeneous sequences with zero padding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedBatch {
+    /// Contiguous 1D tokens packed across all sequences without padding.
+    pub tokens: Vec<u32>,
+    /// Token count for each constituent sequence.
+    pub seq_lens: Vec<usize>,
+    /// Starting offset of each sequence in `tokens`.
+    pub seq_offsets: Vec<usize>,
+    /// Per-token relative sequence position (0..L_i).
+    pub positions: Vec<usize>,
+    /// Identifiers for each sequence in the packed batch.
+    pub seq_ids: Vec<SequenceId>,
+}
+
+impl Default for PackedBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PackedBatch {
+    pub fn new() -> Self {
+        Self {
+            tokens: Vec::new(),
+            seq_lens: Vec::new(),
+            seq_offsets: Vec::new(),
+            positions: Vec::new(),
+            seq_ids: Vec::new(),
+        }
+    }
+
+    /// Packs multiple sequences of unequal length into a single contiguous packed batch with zero padding.
+    pub fn pack(sequences: &[(SequenceId, &[u32], usize)]) -> Self {
+        let mut tokens = Vec::new();
+        let mut seq_lens = Vec::with_capacity(sequences.len());
+        let mut seq_offsets = Vec::with_capacity(sequences.len());
+        let mut positions = Vec::new();
+        let mut seq_ids = Vec::with_capacity(sequences.len());
+
+        let mut offset = 0;
+        for &(id, seq_tokens, start_pos) in sequences {
+            if seq_tokens.is_empty() {
+                continue;
+            }
+            seq_ids.push(id);
+            seq_offsets.push(offset);
+            seq_lens.push(seq_tokens.len());
+
+            for (i, &tok) in seq_tokens.iter().enumerate() {
+                tokens.push(tok);
+                positions.push(start_pos + i);
+            }
+            offset += seq_tokens.len();
+        }
+
+        Self {
+            tokens,
+            seq_lens,
+            seq_offsets,
+            positions,
+            seq_ids,
+        }
+    }
+
+    /// Total number of packed tokens in this micro-batch.
+    pub fn total_tokens(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Number of sequences in this micro-batch.
+    pub fn num_sequences(&self) -> usize {
+        self.seq_ids.len()
+    }
+
+    /// Tokens corresponding to sequence index `idx`.
+    pub fn sequence_tokens(&self, idx: usize) -> &[u32] {
+        let start = self.seq_offsets[idx];
+        let len = self.seq_lens[idx];
+        &self.tokens[start..start + len]
+    }
+
+    /// Relative position slice corresponding to sequence index `idx`.
+    pub fn sequence_positions(&self, idx: usize) -> &[usize] {
+        let start = self.seq_offsets[idx];
+        let len = self.seq_lens[idx];
+        &self.positions[start..start + len]
+    }
+
+    /// Unpacks logits for the last token of each sequence in the packed batch.
+    pub fn unpack_final_logits<'a>(&self, all_logits: &'a [f32], vocab: usize) -> Vec<&'a [f32]> {
+        let mut res = Vec::with_capacity(self.seq_ids.len());
+        for i in 0..self.seq_ids.len() {
+            let last_token_idx = self.seq_offsets[i] + self.seq_lens[i] - 1;
+            let start = last_token_idx * vocab;
+            let end = start + vocab;
+            res.push(&all_logits[start..end]);
+        }
+        res
+    }
+}
+
+/// Configuration for micro-batch prefilling with dynamic token packing.
+#[derive(Clone, Copy, Debug)]
+pub struct MicroBatchConfig {
+    pub max_tokens_per_micro_batch: usize,
+    pub max_sequences_per_micro_batch: usize,
+}
+
+impl Default for MicroBatchConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens_per_micro_batch: 512,
+            max_sequences_per_micro_batch: 8,
+        }
+    }
+}
+
+/// Micro-batching prefill engine that dynamically packs variable-length sequences
+/// to eliminate wasteful zero-padding computations.
+#[derive(Clone, Debug)]
+pub struct MicroBatchPrefillEngine {
+    pub config: MicroBatchConfig,
+}
+
+impl MicroBatchPrefillEngine {
+    pub fn new(config: MicroBatchConfig) -> Self {
+        Self { config }
+    }
+
+    /// Plans and partitions candidate sequences into zero-padded packed micro-batches.
+    pub fn plan_micro_batches(
+        &self,
+        sequences: &[(SequenceId, &[u32], usize)],
+    ) -> Vec<PackedBatch> {
+        let mut batches = Vec::new();
+        let mut current_seqs: Vec<(SequenceId, &[u32], usize)> = Vec::new();
+        let mut current_tokens = 0;
+
+        for &seq in sequences {
+            let (_, toks, _) = seq;
+            if toks.is_empty() {
+                continue;
+            }
+            if !current_seqs.is_empty()
+                && (current_tokens + toks.len() > self.config.max_tokens_per_micro_batch
+                    || current_seqs.len() >= self.config.max_sequences_per_micro_batch)
+            {
+                batches.push(PackedBatch::pack(&current_seqs));
+                current_seqs.clear();
+                current_tokens = 0;
+            }
+            current_tokens += toks.len();
+            current_seqs.push(seq);
+        }
+
+        if !current_seqs.is_empty() {
+            batches.push(PackedBatch::pack(&current_seqs));
+        }
+
+        batches
+    }
+
+    /// Executes prefill across a packed batch, returning final logits per sequence.
+    pub fn execute_contiguous(
+        &self,
+        model: &Model,
+        state: &mut State,
+        packed: &PackedBatch,
+    ) -> Result<Vec<Vec<f32>>> {
+        let mut results = Vec::with_capacity(packed.num_sequences());
+        for i in 0..packed.num_sequences() {
+            let tokens = packed.sequence_tokens(i);
+            let start_pos = packed.sequence_positions(i)[0];
+            model.prefill(state, tokens, start_pos)?;
+            results.push(state.logits.clone());
+        }
+        Ok(results)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -70,7 +70,9 @@ mod sys {
 
     pub type Handle = *mut c_void;
     pub const PAGE_READONLY: u32 = 0x02;
+    pub const PAGE_READWRITE: u32 = 0x04;
     pub const FILE_MAP_READ: u32 = 0x04;
+    pub const FILE_MAP_ALL: u32 = 0x000F001F;
 
     unsafe extern "system" {
         pub fn CreateFileMappingW(
@@ -88,6 +90,7 @@ mod sys {
             offset_low: u32,
             bytes: usize,
         ) -> *mut c_void;
+        pub fn FlushViewOfFile(base: *const c_void, bytes: usize) -> i32;
         pub fn UnmapViewOfFile(base: *const c_void) -> i32;
         pub fn CloseHandle(handle: Handle) -> i32;
     }
@@ -98,8 +101,6 @@ fn map(file: &File, len: usize) -> Result<Mmap> {
     use std::os::windows::io::AsRawHandle;
 
     let handle = file.as_raw_handle() as sys::Handle;
-    // Size 0/0 means "whole file", so the length never has to be split into
-    // high/low words here.
     let mapping = unsafe {
         sys::CreateFileMappingW(
             handle,
@@ -126,12 +127,46 @@ fn map(file: &File, len: usize) -> Result<Mmap> {
     })
 }
 
+#[cfg(windows)]
+fn map_mut(file: &File, len: usize) -> Result<MmapMut> {
+    use std::os::windows::io::AsRawHandle;
+
+    let handle = file.as_raw_handle() as sys::Handle;
+    let mapping = unsafe {
+        sys::CreateFileMappingW(
+            handle,
+            std::ptr::null_mut(),
+            sys::PAGE_READWRITE,
+            0,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if mapping.is_null() {
+        return Err(Error::last_os_error());
+    }
+    let base = unsafe { sys::MapViewOfFile(mapping, sys::FILE_MAP_ALL, 0, 0, 0) };
+    if base.is_null() {
+        let err = Error::last_os_error();
+        unsafe { sys::CloseHandle(mapping) };
+        return Err(err);
+    }
+    Ok(MmapMut {
+        ptr: base as *mut u8,
+        len,
+        mapping,
+    })
+}
+
 #[cfg(unix)]
 mod sys {
     use core::ffi::c_void;
 
     pub const PROT_READ: i32 = 1;
+    pub const PROT_WRITE: i32 = 2;
+    pub const MAP_SHARED: i32 = 1;
     pub const MAP_PRIVATE: i32 = 2;
+    pub const MS_SYNC: i32 = 4;
 
     unsafe extern "C" {
         // off_t is i64 on every 64-bit target we support.
@@ -144,6 +179,7 @@ mod sys {
             offset: i64,
         ) -> *mut c_void;
         pub fn munmap(addr: *mut c_void, len: usize) -> i32;
+        pub fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32;
     }
 }
 
@@ -170,7 +206,108 @@ fn map(file: &File, len: usize) -> Result<Mmap> {
     })
 }
 
+#[cfg(unix)]
+fn map_mut(file: &File, len: usize) -> Result<MmapMut> {
+    use std::os::unix::io::AsRawFd;
+
+    let ptr = unsafe {
+        sys::mmap(
+            std::ptr::null_mut(),
+            len,
+            sys::PROT_READ | sys::PROT_WRITE,
+            sys::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if ptr == usize::MAX as *mut core::ffi::c_void {
+        return Err(Error::last_os_error());
+    }
+    Ok(MmapMut {
+        ptr: ptr as *mut u8,
+        len,
+    })
+}
+
 impl Drop for Mmap {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            sys::UnmapViewOfFile(self.ptr as *const core::ffi::c_void);
+            sys::CloseHandle(self.mapping);
+        }
+        #[cfg(unix)]
+        unsafe {
+            sys::munmap(self.ptr as *mut core::ffi::c_void, self.len);
+        }
+    }
+}
+
+/// Read-write memory mapped file with shared backing.
+#[derive(Debug)]
+pub struct MmapMut {
+    ptr: *mut u8,
+    len: usize,
+    #[cfg(windows)]
+    mapping: *mut core::ffi::c_void,
+}
+
+unsafe impl Send for MmapMut {}
+unsafe impl Sync for MmapMut {}
+
+impl MmapMut {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let len = file.metadata()?.len();
+        if len == 0 {
+            return Err(Error::new(ErrorKind::InvalidData, "file is empty"));
+        }
+        let len = usize::try_from(len)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "file exceeds address space"))?;
+        map_mut(&file, len)
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        #[cfg(windows)]
+        unsafe {
+            if sys::FlushViewOfFile(self.ptr as *const core::ffi::c_void, self.len) == 0 {
+                return Err(Error::last_os_error());
+            }
+        }
+        #[cfg(unix)]
+        unsafe {
+            if sys::msync(self.ptr as *mut core::ffi::c_void, self.len, sys::MS_SYNC) != 0 {
+                return Err(Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MmapMut {
     fn drop(&mut self) {
         #[cfg(windows)]
         unsafe {

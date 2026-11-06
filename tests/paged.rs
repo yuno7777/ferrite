@@ -260,3 +260,93 @@ fn paged_prefill_and_forward_matches_contiguous_model() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn test_paged_v2_hierarchical_page_table_mapping_and_fork() {
+    let mut pool = PagedPool::new(1, 4, 4, 16);
+    let mut seq = ferrite::PagedSequenceV2::new(4); // 4 blocks per L2 table
+
+    // Map virtual block 0, 1, 5 (crossing into second L2 page table)
+    let b0 = pool.allocate_block();
+    let b1 = pool.allocate_block();
+    let b5 = pool.allocate_block();
+    seq.page_table.map(0, b0);
+    seq.page_table.map(1, b1);
+    seq.page_table.map(5, b5);
+
+    assert_eq!(seq.page_table.lookup(0), Some(b0));
+    assert_eq!(seq.page_table.lookup(1), Some(b1));
+    assert_eq!(seq.page_table.lookup(2), None);
+    assert_eq!(seq.page_table.lookup(5), Some(b5));
+
+    // Test fork with reference counting
+    let mut forked = seq.fork(&mut pool);
+    assert_eq!(pool.ref_counts[b0], 2);
+    assert_eq!(pool.ref_counts[b1], 2);
+    assert_eq!(pool.ref_counts[b5], 2);
+
+    // Free forked sequence
+    forked.free(&mut pool);
+    assert_eq!(pool.ref_counts[b0], 1);
+    assert_eq!(pool.ref_counts[b1], 1);
+    assert_eq!(pool.ref_counts[b5], 1);
+
+    // Free original sequence
+    seq.free(&mut pool);
+    assert_eq!(pool.ref_counts[b0], 0);
+    assert_eq!(pool.ref_counts[b1], 0);
+    assert_eq!(pool.ref_counts[b5], 0);
+}
+
+#[test]
+fn test_paged_v2_matches_paged_v1_and_reference_forward() {
+    let path = write("paged_v2", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open fixture");
+    let model = Model::load(&gguf).expect("load model");
+
+    let prompt = vec![0u32, 1u32, 2u32];
+
+    // 1. Contiguous reference
+    let mut state_ref = State::new(&model.config);
+    model.prefill(&mut state_ref, &prompt, 0).expect("prefill");
+
+    // 2. PagedAttention v2 with hierarchical page table
+    let mut pool = PagedPool::new(model.config.layers, model.config.kv_dim(), 16, 8);
+    let mut seq_v2 = ferrite::PagedSequenceV2::new(ferrite::BLOCKS_PER_PAGE_TABLE);
+    let mut state_v2 = State::new(&model.config);
+
+    model
+        .prefill_paged_v2(&mut pool, &mut seq_v2, &mut state_v2, &prompt, 0)
+        .expect("prefill_paged_v2");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_v2.logits),
+        bits(&state_ref.logits),
+        "PagedAttention v2 prefill logits must match reference"
+    );
+
+    // 3. Decode step
+    let next_token = 3u32;
+    model
+        .forward(&mut state_ref, next_token, prompt.len())
+        .expect("forward ref");
+
+    model
+        .forward_paged_v2(
+            &mut pool,
+            &mut seq_v2,
+            &mut state_v2,
+            next_token,
+            prompt.len(),
+        )
+        .expect("forward_paged_v2");
+
+    assert_eq!(
+        bits(&state_v2.logits),
+        bits(&state_ref.logits),
+        "PagedAttention v2 decode logits must match reference"
+    );
+
+    fs::remove_file(path).ok();
+}

@@ -262,3 +262,107 @@ fn test_dynamic_arrival_during_continuous_batching() {
 
     let _ = fs::remove_file(&path);
 }
+
+#[test]
+fn test_dynamic_token_packing_padding_removal() {
+    use ferrite::scheduler::PackedBatch;
+
+    let seq1 = (1u64, [10u32, 11, 12].as_slice(), 0);
+    let seq2 = (2u64, [20u32, 21, 22, 23, 24].as_slice(), 0);
+    let seq3 = (3u64, [30u32, 31].as_slice(), 0);
+
+    let packed = PackedBatch::pack(&[seq1, seq2, seq3]);
+
+    assert_eq!(packed.num_sequences(), 3);
+    assert_eq!(packed.total_tokens(), 10); // Exactly 3 + 5 + 2, zero padding!
+    assert_eq!(packed.seq_lens, vec![3, 5, 2]);
+    assert_eq!(packed.seq_offsets, vec![0, 3, 8]);
+    assert_eq!(packed.seq_ids, vec![1, 2, 3]);
+
+    // Verify slicing back sequences
+    assert_eq!(packed.sequence_tokens(0), &[10, 11, 12]);
+    assert_eq!(packed.sequence_tokens(1), &[20, 21, 22, 23, 24]);
+    assert_eq!(packed.sequence_tokens(2), &[30, 31]);
+}
+
+#[test]
+fn test_micro_batch_planning() {
+    use ferrite::scheduler::{MicroBatchConfig, MicroBatchPrefillEngine};
+
+    let config = MicroBatchConfig {
+        max_tokens_per_micro_batch: 10,
+        max_sequences_per_micro_batch: 4,
+    };
+    let engine = MicroBatchPrefillEngine::new(config);
+
+    let seqs = [
+        (1u64, [0u32; 4].as_slice(), 0), // 4 tokens
+        (2u64, [0u32; 5].as_slice(), 0), // 5 tokens (total 9 <= 10)
+        (3u64, [0u32; 3].as_slice(), 0), // 3 tokens
+        (4u64, [0u32; 2].as_slice(), 0), // 2 tokens (total 5 <= 10)
+        (5u64, [0u32; 8].as_slice(), 0), // 8 tokens
+    ];
+
+    let batches = engine.plan_micro_batches(&seqs);
+    assert_eq!(batches.len(), 3);
+
+    // Batch 0: seq 1 (4) + seq 2 (5) = 9 tokens
+    assert_eq!(batches[0].seq_ids, vec![1, 2]);
+    assert_eq!(batches[0].total_tokens(), 9);
+
+    // Batch 1: seq 3 (3) + seq 4 (2) = 5 tokens
+    assert_eq!(batches[1].seq_ids, vec![3, 4]);
+    assert_eq!(batches[1].total_tokens(), 5);
+
+    // Batch 2: seq 5 (8) = 8 tokens
+    assert_eq!(batches[2].seq_ids, vec![5]);
+    assert_eq!(batches[2].total_tokens(), 8);
+}
+
+#[test]
+fn test_micro_batch_prefill_execution_parity() {
+    use ferrite::model::State;
+    use ferrite::scheduler::{MicroBatchConfig, MicroBatchPrefillEngine, PackedBatch};
+
+    let path = temp_path("micro_batch_prefill");
+    fs::write(&path, fixture().build()).unwrap();
+    let gguf = Gguf::open(&path).unwrap();
+    let model = Model::load(&gguf).unwrap();
+
+    let seq1 = (1u64, [0u32, 1, 2].as_slice(), 0);
+    let seq2 = (2u64, [1u32, 2].as_slice(), 0);
+
+    let packed = PackedBatch::pack(&[seq1, seq2]);
+
+    let engine = MicroBatchPrefillEngine::new(MicroBatchConfig::default());
+    let mut state = State::new(&model.config);
+
+    // Packed micro-batch execution
+    let packed_logits = engine
+        .execute_contiguous(&model, &mut state, &packed)
+        .expect("execute_contiguous");
+    assert_eq!(packed_logits.len(), 2);
+
+    // Sequential execution baseline
+    let mut state1 = State::new(&model.config);
+    model.prefill(&mut state1, &[0, 1, 2], 0).unwrap();
+    let expected1 = state1.logits.clone();
+
+    let mut state2 = State::new(&model.config);
+    model.prefill(&mut state2, &[1, 2], 0).unwrap();
+    let expected2 = state2.logits.clone();
+
+    // Verify exact parity of final token logits
+    assert_eq!(packed_logits[0], expected1);
+    assert_eq!(packed_logits[1], expected2);
+
+    // Also verify model.prefill_packed direct API
+    let mut state_packed = State::new(&model.config);
+    let direct_logits = model
+        .prefill_packed(&mut state_packed, &packed)
+        .expect("prefill_packed");
+    assert_eq!(direct_logits[0], expected1);
+    assert_eq!(direct_logits[1], expected2);
+
+    let _ = fs::remove_file(&path);
+}

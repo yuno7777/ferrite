@@ -17,7 +17,10 @@ use crate::gguf::Gguf;
 pub mod bpe;
 pub mod bytes;
 pub mod spm;
+pub mod stream;
 pub mod train;
+
+pub use stream::{DetokenizerOptions, StreamingDetokenizer};
 
 fn bad(msg: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidData, msg.into())
@@ -380,5 +383,10 @@ impl Tokenizer {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Creates a continuous streaming detokenizer for this tokenizer.
+    pub fn streaming_detokenizer(&self) -> StreamingDetokenizer<'_> {
+        StreamingDetokenizer::new(self)
     }
 }

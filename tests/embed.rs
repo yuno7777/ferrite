@@ -195,6 +195,7 @@ fn test_server_v1_embeddings_endpoint() {
         threads: 1,
         context: 64,
         kv_cache: ferrite::kv::KvCacheType::F32,
+        tenant_registry: None,
     };
 
     let server = Server::new(model, tokenizer, config);

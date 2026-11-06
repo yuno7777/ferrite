@@ -23,6 +23,16 @@ struct Job {
 unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
 
+#[derive(Clone, Copy)]
+enum JobPayload {
+    Single(Job),
+    Dual {
+        job1: Job,
+        job2: Job,
+        split_thread: usize,
+    },
+}
+
 struct SharedPoolState {
     lock: Mutex<JobState>,
     cvar_worker: Condvar,
@@ -32,7 +42,7 @@ struct SharedPoolState {
 
 struct JobState {
     generation: usize,
-    job: Option<Job>,
+    payload: Option<JobPayload>,
     finished_workers: usize,
 }
 
@@ -50,7 +60,7 @@ impl ThreadPool {
         let shared = Arc::new(SharedPoolState {
             lock: Mutex::new(JobState {
                 generation: 0,
-                job: None,
+                payload: None,
                 finished_workers: 0,
             }),
             cvar_worker: Condvar::new(),
@@ -66,7 +76,7 @@ impl ThreadPool {
                 .spawn(move || {
                     let mut local_gen = 0;
                     loop {
-                        let job = {
+                        let payload = {
                             let mut state = shared_clone.lock.lock().unwrap();
                             while !shared_clone.shutdown.load(Ordering::Relaxed)
                                 && state.generation == local_gen
@@ -79,18 +89,53 @@ impl ThreadPool {
                             }
 
                             local_gen = state.generation;
-                            state.job.expect("job must be set when generation advances")
+                            state
+                                .payload
+                                .expect("payload must be set when generation advances")
                         };
 
-                        // Compute worker range: partition total_len evenly across threads
-                        let total = job.total_len;
-                        let chunk = total.div_ceil(threads);
-                        let start = (thread_id * chunk).min(total);
-                        let end = ((thread_id + 1) * chunk).min(total);
-
-                        if start < end {
-                            unsafe {
-                                (job.run)(job.ctx, start, end, thread_id);
+                        match payload {
+                            JobPayload::Single(job) => {
+                                let total = job.total_len;
+                                let chunk = total.div_ceil(threads);
+                                let start = (thread_id * chunk).min(total);
+                                let end = ((thread_id + 1) * chunk).min(total);
+                                if start < end {
+                                    unsafe {
+                                        (job.run)(job.ctx, start, end, thread_id);
+                                    }
+                                }
+                            }
+                            JobPayload::Dual {
+                                job1,
+                                job2,
+                                split_thread,
+                            } => {
+                                if thread_id < split_thread {
+                                    let t_id = thread_id;
+                                    let t_count = split_thread;
+                                    let total = job1.total_len;
+                                    let chunk = total.div_ceil(t_count);
+                                    let start = (t_id * chunk).min(total);
+                                    let end = ((t_id + 1) * chunk).min(total);
+                                    if start < end {
+                                        unsafe {
+                                            (job1.run)(job1.ctx, start, end, t_id);
+                                        }
+                                    }
+                                } else {
+                                    let t_id = thread_id - split_thread;
+                                    let t_count = threads - split_thread;
+                                    let total = job2.total_len;
+                                    let chunk = total.div_ceil(t_count);
+                                    let start = (t_id * chunk).min(total);
+                                    let end = ((t_id + 1) * chunk).min(total);
+                                    if start < end {
+                                        unsafe {
+                                            (job2.run)(job2.ctx, start, end, t_id);
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -147,7 +192,62 @@ impl ThreadPool {
 
         let mut state = self.shared.lock.lock().unwrap();
         state.generation = state.generation.wrapping_add(1);
-        state.job = Some(job);
+        state.payload = Some(JobPayload::Single(job));
+        state.finished_workers = 0;
+        self.shared.cvar_worker.notify_all();
+
+        while state.finished_workers < self.num_threads {
+            state = self.shared.cvar_master.wait(state).unwrap();
+        }
+    }
+
+    /// Dispatches two independent parallel jobs concurrently across worker partitions.
+    ///
+    /// For example: executing Attention Gate and Up projections simultaneously in FFN,
+    /// or evaluating Q and K projections concurrently on separate thread subsets.
+    pub fn dispatch_two<T1: Sync, T2: Sync>(
+        &self,
+        len1: usize,
+        ctx1: &T1,
+        func1: unsafe fn(*const (), usize, usize, usize),
+        len2: usize,
+        ctx2: &T2,
+        func2: unsafe fn(*const (), usize, usize, usize),
+    ) {
+        if len1 == 0 && len2 == 0 {
+            return;
+        }
+        if self.num_threads <= 1 {
+            unsafe {
+                if len1 > 0 {
+                    func1(ctx1 as *const T1 as *const (), 0, len1, 0);
+                }
+                if len2 > 0 {
+                    func2(ctx2 as *const T2 as *const (), 0, len2, 0);
+                }
+            }
+            return;
+        }
+
+        let split_thread = (self.num_threads / 2).max(1);
+        let job1 = Job {
+            ctx: ctx1 as *const T1 as *const (),
+            run: func1,
+            total_len: len1,
+        };
+        let job2 = Job {
+            ctx: ctx2 as *const T2 as *const (),
+            run: func2,
+            total_len: len2,
+        };
+
+        let mut state = self.shared.lock.lock().unwrap();
+        state.generation = state.generation.wrapping_add(1);
+        state.payload = Some(JobPayload::Dual {
+            job1,
+            job2,
+            split_thread,
+        });
         state.finished_workers = 0;
         self.shared.cvar_worker.notify_all();
 
@@ -343,6 +443,49 @@ pub fn eval_tp_swiglu(
     }
 
     // 3. Row-parallel down projection with all-reduce sum
+    matvec_row_parallel(down_weight, &gate_out, out, pool)?;
+    Ok(())
+}
+
+/// Fused SwiGLU execution running gate and up projections concurrently across dual worker partitions.
+pub fn eval_tp_swiglu_dual(
+    gate_weight: &Weight,
+    up_weight: &Weight,
+    down_weight: &Weight,
+    x: &[f32],
+    out: &mut [f32],
+    pool: &ThreadPool,
+) -> std::io::Result<()> {
+    let ffn_dim = gate_weight.rows;
+    let mut gate_out = vec![0.0f32; ffn_dim];
+    let mut up_out = vec![0.0f32; ffn_dim];
+
+    let ctx1 = ColumnParallelContext {
+        weight: gate_weight,
+        x,
+        out_ptr: gate_out.as_mut_ptr(),
+    };
+    let ctx2 = ColumnParallelContext {
+        weight: up_weight,
+        x,
+        out_ptr: up_out.as_mut_ptr(),
+    };
+
+    pool.dispatch_two(
+        ffn_dim,
+        &ctx1,
+        column_parallel_matvec_worker,
+        ffn_dim,
+        &ctx2,
+        column_parallel_matvec_worker,
+    );
+
+    // Fused elementwise SwiGLU: h = silu(gate) * up
+    for (g, u) in gate_out.iter_mut().zip(&up_out) {
+        *g = ops::silu(*g) * u;
+    }
+
+    // Row-parallel down projection with all-reduce sum
     matvec_row_parallel(down_weight, &gate_out, out, pool)?;
     Ok(())
 }

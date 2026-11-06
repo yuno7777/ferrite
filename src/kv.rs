@@ -22,6 +22,199 @@ pub enum KvCacheType {
     Q4_0,
 }
 
+/// F32 storage for DeepSeek MLA's compact KV latent and decoupled RoPE key.
+/// This stores one latent row and one shared RoPE key per token, independent of
+/// the number of attention heads. Attention projection is performed by the
+/// model layer, which owns the per-head up-projection weights.
+#[derive(Clone, Debug)]
+pub struct MlaKvCache {
+    latent: Vec<f32>,
+    rope_key: Vec<f32>,
+    layers: usize,
+    context: usize,
+    latent_dim: usize,
+    rope_dim: usize,
+}
+
+impl MlaKvCache {
+    pub fn new(layers: usize, context: usize, latent_dim: usize, rope_dim: usize) -> Self {
+        Self {
+            latent: vec![0.0; layers * context * latent_dim],
+            rope_key: vec![0.0; layers * context * rope_dim],
+            layers,
+            context,
+            latent_dim,
+            rope_dim,
+        }
+    }
+
+    pub fn cache_bytes(&self) -> usize {
+        (self.latent.len() + self.rope_key.len()) * std::mem::size_of::<f32>()
+    }
+
+    pub fn store(&mut self, layer: usize, pos: usize, latent: &[f32], rope_key: &[f32]) {
+        assert!(layer < self.layers && pos < self.context);
+        assert_eq!(latent.len(), self.latent_dim);
+        assert_eq!(rope_key.len(), self.rope_dim);
+        let slot = layer * self.context + pos;
+        let latent_start = slot * self.latent_dim;
+        self.latent[latent_start..latent_start + self.latent_dim].copy_from_slice(latent);
+        let rope_start = slot * self.rope_dim;
+        self.rope_key[rope_start..rope_start + self.rope_dim].copy_from_slice(rope_key);
+    }
+
+    pub fn get(&self, layer: usize, pos: usize) -> (&[f32], &[f32]) {
+        assert!(layer < self.layers && pos < self.context);
+        let slot = layer * self.context + pos;
+        let latent_start = slot * self.latent_dim;
+        let rope_start = slot * self.rope_dim;
+        (
+            &self.latent[latent_start..latent_start + self.latent_dim],
+            &self.rope_key[rope_start..rope_start + self.rope_dim],
+        )
+    }
+
+    pub fn truncate(&mut self, keep_pos: usize, end_pos: usize) {
+        for layer in 0..self.layers {
+            for pos in keep_pos..end_pos.min(self.context) {
+                let slot = layer * self.context + pos;
+                let latent_start = slot * self.latent_dim;
+                self.latent[latent_start..latent_start + self.latent_dim].fill(0.0);
+                let rope_start = slot * self.rope_dim;
+                self.rope_key[rope_start..rope_start + self.rope_dim].fill(0.0);
+            }
+        }
+    }
+
+    /// Copy key and value representations from `src_pos` to `dst_pos` across all layers.
+    pub fn copy_token_slot(&mut self, src_pos: usize, dst_pos: usize) {
+        if src_pos == dst_pos || src_pos >= self.context || dst_pos >= self.context {
+            return;
+        }
+        for layer in 0..self.layers {
+            let src_slot = layer * self.context + src_pos;
+            let dst_slot = layer * self.context + dst_pos;
+            let src_latent = src_slot * self.latent_dim;
+            let dst_latent = dst_slot * self.latent_dim;
+            self.latent
+                .copy_within(src_latent..src_latent + self.latent_dim, dst_latent);
+            let src_rope = src_slot * self.rope_dim;
+            let dst_rope = dst_slot * self.rope_dim;
+            self.rope_key
+                .copy_within(src_rope..src_rope + self.rope_dim, dst_rope);
+        }
+    }
+
+    /// Evict a contiguous range of tokens from the MLA cache and shift subsequent tokens left.
+    pub fn evict_range(&mut self, evict_start: usize, evict_count: usize, current_len: usize) {
+        if evict_count == 0 || evict_start >= current_len {
+            return;
+        }
+        let actual_count = evict_count.min(current_len - evict_start);
+        let shift_src_start = evict_start + actual_count;
+        let shift_len = current_len - shift_src_start;
+        let new_len = current_len - actual_count;
+
+        for layer in 0..self.layers {
+            let base = layer * self.context;
+            let dst_latent = (base + evict_start) * self.latent_dim;
+            let src_latent = (base + shift_src_start) * self.latent_dim;
+            let num_latent = shift_len * self.latent_dim;
+            if num_latent > 0 {
+                self.latent
+                    .copy_within(src_latent..src_latent + num_latent, dst_latent);
+            }
+            let clear_latent_start = (base + new_len) * self.latent_dim;
+            let clear_latent_len = actual_count * self.latent_dim;
+            self.latent[clear_latent_start..clear_latent_start + clear_latent_len].fill(0.0);
+
+            let dst_rope = (base + evict_start) * self.rope_dim;
+            let src_rope = (base + shift_src_start) * self.rope_dim;
+            let num_rope = shift_len * self.rope_dim;
+            if num_rope > 0 {
+                self.rope_key
+                    .copy_within(src_rope..src_rope + num_rope, dst_rope);
+            }
+            let clear_rope_start = (base + new_len) * self.rope_dim;
+            let clear_rope_len = actual_count * self.rope_dim;
+            self.rope_key[clear_rope_start..clear_rope_start + clear_rope_len].fill(0.0);
+        }
+    }
+
+    /// Evicts middle tokens using StreamingLLM rolling sink policy for MLA cache.
+    pub fn evict_streaming(
+        &mut self,
+        current_len: usize,
+        max_len: usize,
+        sink_tokens: usize,
+    ) -> usize {
+        if current_len <= max_len || current_len <= sink_tokens {
+            return current_len;
+        }
+        let evict_count = current_len - max_len;
+        let evict_start = sink_tokens;
+        self.evict_range(evict_start, evict_count, current_len);
+        current_len - evict_count
+    }
+
+    /// Selectively compact MLA KV cache to retain only entries in `keep_indices`.
+    pub fn compact_indices(&mut self, keep_indices: &[usize]) {
+        if keep_indices.is_empty() {
+            return;
+        }
+        for layer in 0..self.layers {
+            let base = layer * self.context;
+            for (dst_pos, &src_pos) in keep_indices.iter().enumerate() {
+                if dst_pos != src_pos && src_pos < self.context {
+                    let dst_latent = (base + dst_pos) * self.latent_dim;
+                    let src_latent = (base + src_pos) * self.latent_dim;
+                    self.latent
+                        .copy_within(src_latent..src_latent + self.latent_dim, dst_latent);
+
+                    let dst_rope = (base + dst_pos) * self.rope_dim;
+                    let src_rope = (base + src_pos) * self.rope_dim;
+                    self.rope_key
+                        .copy_within(src_rope..src_rope + self.rope_dim, dst_rope);
+                }
+            }
+            let clear_start = (base + keep_indices.len()) * self.latent_dim;
+            let clear_end = (base + self.context) * self.latent_dim;
+            if clear_start < clear_end {
+                self.latent[clear_start..clear_end].fill(0.0);
+            }
+
+            let clear_rope_start = (base + keep_indices.len()) * self.rope_dim;
+            let clear_rope_end = (base + self.context) * self.rope_dim;
+            if clear_rope_start < clear_rope_end {
+                self.rope_key[clear_rope_start..clear_rope_end].fill(0.0);
+            }
+        }
+    }
+
+    /// Evaluates direct latent attention over cached latent representations.
+    pub fn attention(
+        &self,
+        layer: usize,
+        q_nope_projected: &[f32],
+        q_rope: &[f32],
+        params: crate::ops::MlaAttentionParams,
+        out_latent_sum: &mut [f32],
+    ) {
+        assert!(layer < self.layers);
+        assert!(params.len <= self.context);
+        let lat_start = layer * self.context * self.latent_dim;
+        let rope_start = layer * self.context * self.rope_dim;
+        crate::ops::attention_mla_latent(
+            q_nope_projected,
+            q_rope,
+            &self.latent[lat_start..],
+            &self.rope_key[rope_start..],
+            params,
+            out_latent_sum,
+        );
+    }
+}
+
 impl std::str::FromStr for KvCacheType {
     type Err = String;
 
@@ -452,6 +645,74 @@ impl KvCache {
         }
     }
 
+    /// Copy key and value representations from `src_pos` to `dst_pos` across all layers.
+    ///
+    /// Used for speculative branch cloning and KV cache recycling without recomputation.
+    pub fn copy_token_slot(&mut self, src_pos: usize, dst_pos: usize) {
+        if src_pos == dst_pos {
+            return;
+        }
+        match self {
+            Self::F32 {
+                key,
+                value,
+                layers,
+                context,
+                kv_dim,
+            } => {
+                if src_pos >= *context || dst_pos >= *context {
+                    return;
+                }
+                let v_dim = value.len() / (*layers * *context);
+                for layer in 0..*layers {
+                    let src_k = (layer * *context + src_pos) * *kv_dim;
+                    let dst_k = (layer * *context + dst_pos) * *kv_dim;
+                    key.copy_within(src_k..src_k + *kv_dim, dst_k);
+
+                    let src_v = (layer * *context + src_pos) * v_dim;
+                    let dst_v = (layer * *context + dst_pos) * v_dim;
+                    value.copy_within(src_v..src_v + v_dim, dst_v);
+                }
+            }
+            Self::Q8_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                if src_pos >= *context || dst_pos >= *context {
+                    return;
+                }
+                for layer in 0..*layers {
+                    let src = (layer * *context + src_pos) * *blocks_per_token;
+                    let dst = (layer * *context + dst_pos) * *blocks_per_token;
+                    key.copy_within(src..src + *blocks_per_token, dst);
+                    value.copy_within(src..src + *blocks_per_token, dst);
+                }
+            }
+            Self::Q4_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                if src_pos >= *context || dst_pos >= *context {
+                    return;
+                }
+                for layer in 0..*layers {
+                    let src = (layer * *context + src_pos) * *blocks_per_token;
+                    let dst = (layer * *context + dst_pos) * *blocks_per_token;
+                    key.copy_within(src..src + *blocks_per_token, dst);
+                    value.copy_within(src..src + *blocks_per_token, dst);
+                }
+            }
+        }
+    }
+
     /// Shift tokens left across all layers by evicting `evict_count` entries starting at `evict_start`.
     ///
     /// Tokens in `[evict_start + evict_count .. current_len]` are shifted left to `evict_start`,
@@ -701,6 +962,125 @@ pub fn select_h2o_indices(
     result
 }
 
+/// Configuration for adaptive entropy-bounded rolling sink cache eviction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveEntropyConfig {
+    pub sink_tokens: usize,
+    pub window_tokens: usize,
+    pub min_capacity: usize,
+    pub max_capacity: usize,
+    pub target_entropy_ratio: f32,
+}
+
+impl Default for AdaptiveEntropyConfig {
+    fn default() -> Self {
+        Self {
+            sink_tokens: 4,
+            window_tokens: 16,
+            min_capacity: 32,
+            max_capacity: 128,
+            target_entropy_ratio: 0.8,
+        }
+    }
+}
+
+/// Computes Shannon entropy and normalized entropy over a probability or logit distribution.
+pub fn compute_distribution_entropy(logits_or_probs: &[f32], is_logits: bool) -> (f32, f32) {
+    if logits_or_probs.len() <= 1 {
+        return (0.0, 0.0);
+    }
+
+    let mut probs = vec![0.0f32; logits_or_probs.len()];
+    if is_logits {
+        let max_logit = logits_or_probs
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for (i, &l) in logits_or_probs.iter().enumerate() {
+            let p = (l - max_logit).exp();
+            probs[i] = p;
+            sum += p;
+        }
+        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+        for p in probs.iter_mut() {
+            *p *= inv_sum;
+        }
+    } else {
+        let sum: f32 = logits_or_probs.iter().sum();
+        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+        for (i, &p) in logits_or_probs.iter().enumerate() {
+            probs[i] = p * inv_sum;
+        }
+    }
+
+    let mut entropy = 0.0f32;
+    for &p in &probs {
+        if p > 1e-12 {
+            entropy -= p * p.ln();
+        }
+    }
+    let max_entropy = (logits_or_probs.len() as f32).ln();
+    let normalized = if max_entropy > 0.0 {
+        (entropy / max_entropy).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (entropy, normalized)
+}
+
+/// Computes retained token indices using adaptive entropy bounds and rolling sinks.
+///
+/// When attention distribution has high entropy (diffuse attention), retains up to `max_capacity`.
+/// When attention distribution has low entropy (concentrated attention), dynamically compacts closer to `min_capacity`.
+pub fn select_adaptive_entropy_indices(
+    scores: &[f32],
+    config: &AdaptiveEntropyConfig,
+) -> Vec<usize> {
+    let n = scores.len();
+    let min_req = config.sink_tokens + config.window_tokens;
+    let min_cap = config.min_capacity.max(min_req);
+    let max_cap = config.max_capacity.max(min_cap);
+
+    if n <= min_cap {
+        return (0..n).collect();
+    }
+
+    // Determine normalized entropy of attention scores
+    let (_, normalized_entropy) = compute_distribution_entropy(scores, true);
+
+    // Dynamic capacity interpolation based on entropy
+    let ratio = if config.target_entropy_ratio > 0.0 {
+        (normalized_entropy / config.target_entropy_ratio).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let target_capacity = min_cap + ((max_cap - min_cap) as f32 * ratio).round() as usize;
+    let effective_capacity = target_capacity.min(n).max(min_req);
+
+    let sinks_end = config.sink_tokens.min(n);
+    let window_start = n.saturating_sub(config.window_tokens);
+    let mut selected: std::collections::HashSet<usize> =
+        (0..sinks_end).chain(window_start..n).collect();
+
+    let middle_needed = effective_capacity.saturating_sub(selected.len());
+    if middle_needed > 0 && window_start > sinks_end {
+        let mut middle_indices: Vec<usize> = (sinks_end..window_start).collect();
+        middle_indices.sort_by(|&a, &b| {
+            scores[b]
+                .partial_cmp(&scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in middle_indices.iter().take(middle_needed) {
+            selected.insert(idx);
+        }
+    }
+
+    let mut result: Vec<usize> = selected.into_iter().collect();
+    result.sort_unstable();
+    result
+}
+
 fn attention_online_q8_0(
     query: &[f32],
     keys: &[BlockQ8_0],
@@ -930,6 +1310,75 @@ fn attention_online_q4_0(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mla_cache_stores_compact_latent_and_rope_rows() {
+        let mut cache = MlaKvCache::new(2, 4, 3, 2);
+        cache.store(1, 2, &[1.0, 2.0, 3.0], &[4.0, 5.0]);
+        assert_eq!(cache.get(1, 2), (&[1.0, 2.0, 3.0][..], &[4.0, 5.0][..]));
+        assert_eq!(cache.cache_bytes(), 2 * 4 * 5 * std::mem::size_of::<f32>());
+        cache.truncate(2, 3);
+        assert_eq!(cache.get(1, 2), (&[0.0, 0.0, 0.0][..], &[0.0, 0.0][..]));
+    }
+
+    #[test]
+    fn mla_cache_direct_attention_evaluates_correctly() {
+        let mut cache = MlaKvCache::new(1, 2, 2, 2);
+        // Token 0: latent [1.0, 0.0], rope_key [0.0, 1.0]
+        cache.store(0, 0, &[1.0, 0.0], &[0.0, 1.0]);
+        // Token 1: latent [0.0, 2.0], rope_key [1.0, 0.0]
+        cache.store(0, 1, &[0.0, 2.0], &[1.0, 0.0]);
+
+        let q_nope = [1.0, 0.0];
+        let q_rope = [0.0, 1.0];
+        let mut out = [0.0; 2];
+
+        // Evaluating attention over 2 tokens with scale 1.0
+        cache.attention(
+            0,
+            &q_nope,
+            &q_rope,
+            crate::ops::MlaAttentionParams {
+                latent_dim: 2,
+                rope_dim: 2,
+                len: 2,
+                scale: 1.0,
+                logit_cap: None,
+            },
+            &mut out,
+        );
+
+        // Token 0 score: dot(q_nope, [1, 0]) + dot(q_rope, [0, 1]) = 1 + 1 = 2.0
+        // Token 1 score: dot(q_nope, [0, 2]) + dot(q_rope, [1, 0]) = 0 + 0 = 0.0
+        // Softmax weights:
+        // exp(2 - 2) = 1.0
+        // exp(0 - 2) = exp(-2) ~= 0.135335
+        // den = 1.0 + exp(-2) ~= 1.135335
+        // w0 = 1.0 / 1.135335 ~= 0.8808
+        // w1 = exp(-2) / 1.135335 ~= 0.1192
+        // out[0] = w0 * 1.0 + w1 * 0.0 = 0.8808
+        // out[1] = w0 * 0.0 + w1 * 2.0 = 0.2384
+        let w0 = 1.0f32 / (1.0f32 + (-2.0f32).exp());
+        let w1 = (-2.0f32).exp() / (1.0f32 + (-2.0f32).exp());
+        assert!((out[0] - (w0 * 1.0)).abs() < 1e-5);
+        assert!((out[1] - (w1 * 2.0)).abs() < 1e-5);
+
+        // A partially filled cache must not attend to capacity beyond its live prefix.
+        cache.attention(
+            0,
+            &q_nope,
+            &q_rope,
+            crate::ops::MlaAttentionParams {
+                latent_dim: 2,
+                rope_dim: 2,
+                len: 1,
+                scale: 1.0,
+                logit_cap: None,
+            },
+            &mut out,
+        );
+        assert_eq!(out, [1.0, 0.0]);
+    }
 
     #[test]
     fn f32_cache_supports_distinct_key_and_value_widths() {

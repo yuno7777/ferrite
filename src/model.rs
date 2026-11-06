@@ -2731,6 +2731,49 @@ impl<'a> Model<'a> {
         *current_pos += 1;
         Ok(())
     }
+
+    /// Streaming forward pass with adaptive entropy-bounded rolling sink cache eviction.
+    pub fn forward_adaptive_streaming(
+        &self,
+        state: &mut State,
+        token: u32,
+        current_pos: &mut usize,
+        config: &crate::kv::AdaptiveEntropyConfig,
+        attention_scores: Option<&[f32]>,
+    ) -> Result<()> {
+        if *current_pos >= state.context() {
+            let default_scores;
+            let scores = match attention_scores {
+                Some(s) => s,
+                None => {
+                    default_scores =
+                        state.logits[..(*current_pos).min(state.logits.len())].to_vec();
+                    &default_scores
+                }
+            };
+            *current_pos = state.evict_adaptive_entropy(config, scores);
+        }
+        self.forward(state, token, *current_pos)?;
+        *current_pos += 1;
+        Ok(())
+    }
+
+    /// Executes prefill for a packed heterogeneous batch of sequences without zero-padding,
+    /// returning the final token logits for each sequence in the packed batch.
+    pub fn prefill_packed(
+        &self,
+        state: &mut State,
+        packed: &crate::scheduler::PackedBatch,
+    ) -> Result<Vec<Vec<f32>>> {
+        let mut logits = Vec::with_capacity(packed.num_sequences());
+        for i in 0..packed.num_sequences() {
+            let tokens = packed.sequence_tokens(i);
+            let start_pos = packed.sequence_positions(i)[0];
+            self.prefill(state, tokens, start_pos)?;
+            logits.push(state.logits.clone());
+        }
+        Ok(logits)
+    }
 }
 
 /// Stateful, interruptible chunked prompt prefill runner.
@@ -2902,11 +2945,33 @@ impl State {
 
     /// Turn the integer kernels on or off.
     ///
-    /// On by default. Off gives the exact f32 arithmetic — slower, and the
+    /// On by default. Off gives the exact f32 arithmetic, which is slower, and the
     /// thing to reach for when deciding whether a numerical oddity comes from
     /// the activation quantization or from somewhere else.
     pub fn set_int8(&mut self, enabled: bool) {
         self.workspace.int8 = enabled;
+    }
+
+    /// Dynamic context truncation using rolling sink cache eviction.
+    pub fn truncate_context_rolling_sink(
+        &mut self,
+        current_pos: usize,
+        target_len: usize,
+        sink_tokens: usize,
+    ) -> usize {
+        self.kv_cache
+            .evict_streaming(current_pos, target_len, sink_tokens)
+    }
+
+    /// Dynamic context truncation using adaptive entropy bounds.
+    pub fn evict_adaptive_entropy(
+        &mut self,
+        config: &crate::kv::AdaptiveEntropyConfig,
+        scores: &[f32],
+    ) -> usize {
+        let keep = crate::kv::select_adaptive_entropy_indices(scores, config);
+        self.kv_cache.compact_indices(&keep);
+        keep.len()
     }
 
     /// Bytes held by the KV cache, which dominates everything else here.
@@ -2940,6 +3005,11 @@ impl State {
     /// speculative tokens are rejected by the target model.
     pub fn truncate_cache(&mut self, _config: &Config, keep_pos: usize, end_pos: usize) {
         self.kv_cache.truncate(keep_pos, end_pos);
+    }
+
+    /// Copy key and value representations from `src_pos` to `dst_pos` across all layers.
+    pub fn copy_cache_slot(&mut self, src_pos: usize, dst_pos: usize) {
+        self.kv_cache.copy_token_slot(src_pos, dst_pos);
     }
 
     /// Set `logits` buffer to the given slice.

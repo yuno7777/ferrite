@@ -316,3 +316,91 @@ fn test_train_vocab_file_integration() {
     fs::remove_file(corpus_path).ok();
     fs::remove_file(out_vocab_path).ok();
 }
+
+#[test]
+fn test_streaming_detokenizer_utf8_multibyte_split() {
+    let builder = bpe_fixture(false);
+    let path = write("stream_utf8", &builder);
+    let gguf = Gguf::open(&path).expect("open");
+    let tokenizer = Tokenizer::from_gguf(&gguf).expect("tokenizer");
+
+    let mut stream = tokenizer.streaming_detokenizer();
+
+    // 4-byte UTF-8 character: crab emoji '\u{1F980}' -> [0xF0, 0x9F, 0xA6, 0x80]
+    let crab_bytes = "🦀".as_bytes();
+    assert_eq!(crab_bytes.len(), 4);
+
+    // Feed first byte: incomplete sequence, must yield None
+    assert_eq!(stream.feed_bytes(&[crab_bytes[0]]), None);
+    assert_eq!(stream.buffered_bytes(), 1);
+
+    // Feed second byte: still incomplete, must yield None
+    assert_eq!(stream.feed_bytes(&[crab_bytes[1]]), None);
+    assert_eq!(stream.buffered_bytes(), 2);
+
+    // Feed third and fourth bytes plus an ASCII byte '!'
+    let emitted = stream.feed_bytes(&[crab_bytes[2], crab_bytes[3], b'!']);
+    assert_eq!(emitted, Some("🦀!".to_string()));
+    assert_eq!(stream.buffered_bytes(), 0);
+
+    // Test multi-byte character followed by partial next character
+    // 3-byte euro symbol '\u{20AC}' -> [0xE2, 0x82, 0xAC]
+    let euro_bytes = "€".as_bytes();
+    // Feed euro bytes plus first 2 bytes of crab
+    let chunk1 = stream.feed_bytes(&[
+        euro_bytes[0],
+        euro_bytes[1],
+        euro_bytes[2],
+        crab_bytes[0],
+        crab_bytes[1],
+    ]);
+    assert_eq!(chunk1, Some("€".to_string()));
+    assert_eq!(stream.buffered_bytes(), 2);
+
+    // Feed remaining crab bytes
+    let chunk2 = stream.feed_bytes(&[crab_bytes[2], crab_bytes[3]]);
+    assert_eq!(chunk2, Some("🦀".to_string()));
+    assert_eq!(stream.buffered_bytes(), 0);
+
+    // Finish on empty buffer returns None
+    assert_eq!(stream.finish(), None);
+
+    // Incomplete sequence flushed at the end produces lossy UTF-8
+    assert_eq!(stream.feed_bytes(&[0xE2, 0x82]), None);
+    let flushed = stream.finish();
+    assert!(flushed.is_some());
+    assert_eq!(stream.buffered_bytes(), 0);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_streaming_detokenizer_with_tokens() {
+    let builder = bpe_fixture(true);
+    let path = write("stream_tokens", &builder);
+    let gguf = Gguf::open(&path).expect("open");
+    let tokenizer = Tokenizer::from_gguf(&gguf).expect("tokenizer");
+
+    let text = "hello world";
+    let ids = tokenizer.encode(text, true);
+
+    let mut stream = tokenizer.streaming_detokenizer();
+    let mut streamed_out = String::new();
+    for &id in &ids {
+        if let Some(chunk) = stream.step(id) {
+            streamed_out.push_str(&chunk);
+        }
+    }
+    if let Some(tail) = stream.finish() {
+        streamed_out.push_str(&tail);
+    }
+
+    assert_eq!(streamed_out, "hello world");
+
+    // Batch detokenize agrees
+    let mut stream2 = tokenizer.streaming_detokenizer();
+    let batch_out = stream2.detokenize(&ids);
+    assert_eq!(batch_out, "hello world");
+
+    fs::remove_file(path).ok();
+}

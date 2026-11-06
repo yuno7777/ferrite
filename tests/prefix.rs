@@ -248,3 +248,153 @@ fn test_radix_cache_multi_turn_branching() {
     assert_eq!(tokens, 2);
     assert_eq!(matched, vec![b_sys]);
 }
+
+#[test]
+fn test_radix_cache_disk_persistence_roundtrip() {
+    let mut pool = PagedPool::new(2, 8, 4, 16);
+    let mut cache = RadixCache::with_block_size(4);
+
+    let b1 = pool.allocate_block();
+    let b2 = pool.allocate_block();
+
+    // Populate recognizable patterns in key and value
+    pool.blocks[b1].key.fill(1.25);
+    pool.blocks[b1].value.fill(2.50);
+    pool.blocks[b2].key.fill(3.75);
+    pool.blocks[b2].value.fill(5.00);
+
+    let prompt = vec![100, 101, 102, 103, 200, 201, 202, 203];
+    cache.insert(&prompt, &[b1, b2], &mut pool);
+
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "ferrite-test-prefix-persist-{}.bin",
+        std::process::id()
+    ));
+
+    cache.save_to_file(&pool, &path).expect("save to file");
+
+    let mut pool_loaded = PagedPool::new(2, 8, 4, 16);
+    let mut loaded_cache =
+        RadixCache::load_from_file(&path, &mut pool_loaded).expect("load from file");
+
+    assert_eq!(loaded_cache.len(), 2);
+    let (matched, tokens) = loaded_cache.match_prefix(&prompt);
+    assert_eq!(tokens, 8);
+    assert_eq!(matched.len(), 2);
+
+    let lb1 = matched[0];
+    let lb2 = matched[1];
+    assert_eq!(
+        pool_loaded.blocks[lb1].key,
+        vec![1.25; pool.blocks[b1].key.len()]
+    );
+    assert_eq!(
+        pool_loaded.blocks[lb1].value,
+        vec![2.50; pool.blocks[b1].value.len()]
+    );
+    assert_eq!(
+        pool_loaded.blocks[lb2].key,
+        vec![3.75; pool.blocks[b2].key.len()]
+    );
+    assert_eq!(
+        pool_loaded.blocks[lb2].value,
+        vec![5.00; pool.blocks[b2].value.len()]
+    );
+
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn test_radix_cache_page_swapping_out_and_in() {
+    use ferrite::prefix::PageSwapManager;
+
+    let layers = 1;
+    let kv_dim = 4;
+    let tokens_per_block = 2;
+    let mut pool = PagedPool::new(layers, kv_dim, tokens_per_block, 4);
+    let mut cache = RadixCache::with_block_size(tokens_per_block);
+
+    let b1 = pool.allocate_block();
+    let b2 = pool.allocate_block();
+    pool.blocks[b1].key.fill(11.0);
+    pool.blocks[b1].value.fill(22.0);
+    pool.blocks[b2].key.fill(33.0);
+    pool.blocks[b2].value.fill(44.0);
+
+    let prompt = vec![1, 2, 3, 4];
+    cache.insert(&prompt, &[b1, b2], &mut pool);
+
+    // Release initial sequence ownership so cache is sole owner of blocks
+    pool.free_block(b1);
+    pool.free_block(b2);
+
+    let mut swap_path = std::env::temp_dir();
+    swap_path.push(format!("ferrite-test-page-swap-{}.bin", std::process::id()));
+
+    let block_bytes = layers * tokens_per_block * kv_dim * 8;
+    let mut swap_mgr = PageSwapManager::new(&swap_path, block_bytes).expect("swap manager");
+
+    let free_before = pool.free_blocks();
+
+    // Swap out 1 LRU leaf block (b2)
+    let swapped_count = cache
+        .swap_out_lru_nodes(&mut pool, &mut swap_mgr, 1)
+        .expect("swap out");
+    assert_eq!(swapped_count, 1);
+    assert_eq!(swap_mgr.active_swapped_pages(), 1);
+    assert_eq!(pool.free_blocks(), free_before + 1);
+
+    // Match with swap-in
+    let (matched, tokens) = cache
+        .match_prefix_with_swap_in(&prompt, &mut pool, &mut swap_mgr)
+        .expect("match with swap in");
+    assert_eq!(tokens, 4);
+    assert_eq!(matched.len(), 2);
+    assert_eq!(swap_mgr.active_swapped_pages(), 0);
+
+    let reloaded_b2 = matched[1];
+    assert_eq!(
+        pool.blocks[reloaded_b2].key,
+        vec![33.0; pool.blocks[b2].key.len()]
+    );
+    assert_eq!(
+        pool.blocks[reloaded_b2].value,
+        vec![44.0; pool.blocks[b2].value.len()]
+    );
+
+    let _ = fs::remove_file(&swap_path);
+}
+
+#[test]
+fn test_page_swap_manager_slot_recycling() {
+    use ferrite::prefix::PageSwapManager;
+
+    let mut pool = PagedPool::new(1, 4, 2, 8);
+    let b = pool.allocate_block();
+    pool.blocks[b].key.fill(7.0);
+
+    let mut swap_path = std::env::temp_dir();
+    swap_path.push(format!(
+        "ferrite-test-swap-recycle-{}.bin",
+        std::process::id()
+    ));
+
+    let block_bytes = 2 * 4 * 8;
+    let mut swap_mgr = PageSwapManager::new(&swap_path, block_bytes).expect("swap mgr");
+
+    let slot = swap_mgr.swap_out_block(&mut pool, b).expect("swap out");
+    assert_eq!(slot, 0);
+    assert_eq!(swap_mgr.active_swapped_pages(), 1);
+
+    let b_new = swap_mgr.swap_in_block(&mut pool, slot).expect("swap in");
+    assert_eq!(swap_mgr.active_swapped_pages(), 0);
+    assert_eq!(pool.blocks[b_new].key[0], 7.0);
+
+    // Swap out another block; should reuse slot 0
+    let b2 = pool.allocate_block();
+    let slot2 = swap_mgr.swap_out_block(&mut pool, b2).expect("swap out 2");
+    assert_eq!(slot2, 0);
+
+    let _ = fs::remove_file(&swap_path);
+}
