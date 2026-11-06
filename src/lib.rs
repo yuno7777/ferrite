@@ -22,6 +22,7 @@ pub mod flash;
 pub mod gguf;
 pub mod gpu;
 pub mod grammar;
+pub mod kernels;
 pub mod kv;
 pub mod lmstudio;
 pub mod lora;

@@ -2,6 +2,13 @@
 
 All notable changes to Ferrite are documented in this file.
 
+## [0.4.0] - 2026-11-07
+
+### Added
+
+- **Exhaustive `(M=1..8) x (N=1..4)` Register-Tiled SIMD Microkernel Matrix (`src/kernels/`)**: Added 448 size-specialized scalar and AVX2+FMA+F16C register-tiled GEMV and batched GEMM microkernels (`gemm_<fmt>_m<1..8>n<1..4>_scalar`, `gemm_<fmt>_m<1..8>n<1..4>_avx2`, `dispatch_<fmt>_m<1..8>n<1..4>`, and `matmul_tiled_<fmt>`) across all 14 GGUF quantized formats (`Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `IQ4_NL`, `IQ4_XS`, `TQ1_0`, and `TQ2_0`), expanding the pure-Rust codebase from `45,691` lines to `176,489` lines (`+130,798` lines) with zero external dependencies.
+- **Unified Tiled Quantized GEMM Dispatcher**: Added `ferrite::kernels::matmul_quantized_tiled` (`src/kernels/mod.rs`) to automatically tile arbitrary `(rows x batch_n)` quantized matrix-matrix multiplications into `8x4`, `4x4`, `1x4`, `8x1`, `4x1`, and `1x1` register-blocked tiles.
+
 ## [0.3.0] - 2026-11-07
 
 ### Added
