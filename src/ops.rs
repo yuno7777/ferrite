@@ -334,6 +334,63 @@ pub fn rope_neox(vector: &mut [f32], position: usize, base: f32) {
     }
 }
 
+/// RoPE pair layout mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoPEType {
+    /// Adjacent pair layout (LLaMA style): (x_0, x_1), (x_2, x_3), ...
+    Normal,
+    /// Half-split pair layout (GPT-NeoX / Qwen2-VL style): (x_i, x_{i + dim/2})
+    Neox,
+}
+
+/// Multimodal Rotary Position Embedding (M-RoPE).
+///
+/// Partitions rotary channels across up to 4 coordinate axes (e.g., temporal/sequence,
+/// height, width for vision-language models such as Qwen2-VL).
+pub fn mrope(
+    vector: &mut [f32],
+    positions: [usize; 4],
+    sections: [usize; 4],
+    base: f32,
+    rope_type: RoPEType,
+) {
+    let total_pairs = sections[0] + sections[1] + sections[2] + sections[3];
+    let rot_dim = (total_pairs * 2).min(vector.len());
+    let half = rot_dim / 2;
+    let s0 = sections[0];
+    let s1 = s0 + sections[1];
+    let s2 = s1 + sections[2];
+
+    for i in 0..half {
+        let pos = if i < s0 {
+            positions[0]
+        } else if i < s1 {
+            positions[1]
+        } else if i < s2 {
+            positions[2]
+        } else {
+            positions[3]
+        };
+
+        let frequency = 1.0 / base.powf(2.0 * i as f32 / rot_dim as f32);
+        let angle = pos as f32 * frequency;
+        let (sin, cos) = angle.sin_cos();
+
+        match rope_type {
+            RoPEType::Neox => {
+                let (x, y) = (vector[i], vector[i + half]);
+                vector[i] = x * cos - y * sin;
+                vector[i + half] = x * sin + y * cos;
+            }
+            RoPEType::Normal => {
+                let (x, y) = (vector[i * 2], vector[i * 2 + 1]);
+                vector[i * 2] = x * cos - y * sin;
+                vector[i * 2 + 1] = x * sin + y * cos;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +595,29 @@ mod tests {
         assert_eq!(v[4], 5.0);
         assert_eq!(v[5], 6.0);
         assert!(v[0] != 1.0 || v[1] != 2.0);
+    }
+
+    #[test]
+    fn mrope_uniform_positions_matches_rope_neox() {
+        let mut v1 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let mut v2 = v1;
+        rope_neox(&mut v1, 7, 10000.0);
+        mrope(&mut v2, [7, 7, 7, 7], [1, 1, 2, 0], 10000.0, RoPEType::Neox);
+        for (a, b) in v1.iter().zip(v2.iter()) {
+            assert!(close(*a, *b), "{v1:?} != {v2:?}");
+        }
+    }
+
+    #[test]
+    fn mrope_multimodal_sections_rotate_independent_coordinates() {
+        let mut v = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        // 4 pairs: section 0 (1 pair, T=0), section 1 (1 pair, H=2), section 2 (2 pairs, W=5)
+        mrope(&mut v, [0, 2, 5, 0], [1, 1, 2, 0], 10000.0, RoPEType::Neox);
+        // At T=0, section 0 (pair 0: elements 0 and 4) should stay unchanged because angle = 0!
+        assert!(close(v[0], 1.0));
+        assert!(close(v[4], 5.0));
+        // Sections 1 and 2 (H=2, W=5) should be rotated
+        assert!(!close(v[1], 2.0) || !close(v[5], 6.0));
+        assert!(!close(v[2], 3.0) || !close(v[6], 7.0));
     }
 }

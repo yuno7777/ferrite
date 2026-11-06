@@ -1,5 +1,14 @@
 # Recovery Checkpoint
 
+## Maintenance Run — Phase 43 — 2026-11-06
+- Implemented Phase 43: Multimodal Rotary Position Embedding (M-RoPE) for Qwen2-VL.
+- Added `ops::mrope` and `ops::RoPEType` supporting both half-split Neox and adjacent Normal coordinate-partitioned rotary rotations.
+- Extended `Config` with `mrope_sections: Option<[usize; 4]>` and parsed `qwen2vl.rope.dimension_sections` from GGUF metadata.
+- Added `"qwen2vl"` and `"qwen2_vl"` to supported architectures in `src/model.rs`.
+- Integrated M-RoPE dispatch in `Model::forward` and `Model::prefill_embeddings`.
+- Added unit tests in `src/ops.rs` and full end-to-end integration test `qwen2_vl_mrope_forward_and_prefill_match` in `tests/model.rs` validating bit-exact agreement.
+- Quality gates passed: `cargo tree` = 1 line (0 external deps), `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings` clean, 100% test pass rate across all 16 test targets.
+
 ## Maintenance Run — Phase 42 — 2026-11-06
 - Implemented Phase 42: DeepSeek Multi-Head Latent Attention (MLA) Architecture.
 - Updated `ops::AttentionParams` with `v_row_width` and `v_offset` to support asymmetric query/value head projections ($d_q \ne d_v$).

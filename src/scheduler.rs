@@ -400,6 +400,7 @@ mod tests {
             qk_nope_head_dim: None,
             qk_rope_head_dim: None,
             v_head_dim: None,
+            mrope_sections: None,
         };
 
         let scheduler = BatchScheduler::new(&config, 32, SchedulerConfig::default());

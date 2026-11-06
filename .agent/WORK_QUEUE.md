@@ -426,3 +426,9 @@
 - Implemented asymmetric F32 KV-cache storage, online attention with decoupled key/value head dimensions, MLA projection layer weights, and bit-identical batched prefill vs decode paths.
 - Integration test `deepseek_mla_forward_and_prefill_match` passed with zero external dependencies and zero warnings.
 
+## Phase 43: Multimodal Rotary Position Embedding (M-RoPE) for Qwen2-VL
+- Status: COMPLETED
+- Rationale: Multi-axis 3D spatio-temporal rotary embeddings for Qwen2-VL vision-language models.
+- Implemented `ops::mrope`, GGUF metadata `dimension_sections` parsing, Neox/Normal pair layouts, and end-to-end forward/prefill numerical parity verification in `tests/model.rs`.
+
+

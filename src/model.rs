@@ -14,12 +14,14 @@ fn bad(msg: impl Into<String>) -> Error {
 /// Architectures whose tensor names and layer shape this implements. Others
 /// are rejected by name rather than half-loaded — a model that runs with the
 /// wrong layer structure produces fluent nonsense, not an error.
-const SUPPORTED: [&str; 11] = [
+const SUPPORTED: [&str; 13] = [
     "llama",
     "qwen",
     "qwen2",
     "qwen2moe",
     "qwen2_moe",
+    "qwen2vl",
+    "qwen2_vl",
     "gemma",
     "gemma2",
     "mixtral",
@@ -56,6 +58,7 @@ pub struct Config {
     pub qk_nope_head_dim: Option<usize>,
     pub qk_rope_head_dim: Option<usize>,
     pub v_head_dim: Option<usize>,
+    pub mrope_sections: Option<[usize; 4]>,
 }
 
 impl Config {
@@ -246,6 +249,17 @@ impl Config {
                 .arch_u64("attention.value_length")
                 .or_else(|| model.arch_u64("attention.v_head_dim"))
                 .map(|v| v as usize),
+            mrope_sections: model
+                .get(&format!("{arch}.rope.dimension_sections"))
+                .or_else(|| model.get("rope.dimension_sections"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    let mut secs = [0usize; 4];
+                    for (i, val) in arr.iter().take(4).enumerate() {
+                        secs[i] = val.as_u64().unwrap_or(0) as usize;
+                    }
+                    secs
+                }),
         })
     }
 
@@ -1246,23 +1260,44 @@ impl<'a> Model<'a> {
                 }
 
                 // Position is baked into the query and key, never into the value.
-                for head in 0..c.heads {
-                    ops::rope_scaled(
-                        &mut q[head * head_dim..(head + 1) * head_dim],
-                        position,
-                        c.rope_base,
-                        c.rope_dim,
-                        c.rope_scaling.as_ref(),
-                    );
-                }
-                for head in 0..c.kv_heads {
-                    ops::rope_scaled(
-                        &mut k[head * head_dim..(head + 1) * head_dim],
-                        position,
-                        c.rope_base,
-                        c.rope_dim,
-                        c.rope_scaling.as_ref(),
-                    );
+                if let Some(sections) = c.mrope_sections {
+                    for head in 0..c.heads {
+                        ops::mrope(
+                            &mut q[head * head_dim..(head + 1) * head_dim],
+                            [position, position, position, position],
+                            sections,
+                            c.rope_base,
+                            ops::RoPEType::Neox,
+                        );
+                    }
+                    for head in 0..c.kv_heads {
+                        ops::mrope(
+                            &mut k[head * head_dim..(head + 1) * head_dim],
+                            [position, position, position, position],
+                            sections,
+                            c.rope_base,
+                            ops::RoPEType::Neox,
+                        );
+                    }
+                } else {
+                    for head in 0..c.heads {
+                        ops::rope_scaled(
+                            &mut q[head * head_dim..(head + 1) * head_dim],
+                            position,
+                            c.rope_base,
+                            c.rope_dim,
+                            c.rope_scaling.as_ref(),
+                        );
+                    }
+                    for head in 0..c.kv_heads {
+                        ops::rope_scaled(
+                            &mut k[head * head_dim..(head + 1) * head_dim],
+                            position,
+                            c.rope_base,
+                            c.rope_dim,
+                            c.rope_scaling.as_ref(),
+                        );
+                    }
                 }
 
                 kv_cache.store(index, position, k, v);
@@ -1762,23 +1797,44 @@ impl<'a> Model<'a> {
                     let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
                     let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
 
-                    for head in 0..c.heads {
-                        ops::rope_scaled(
-                            &mut q_tok[head * head_dim..(head + 1) * head_dim],
-                            pos,
-                            c.rope_base,
-                            c.rope_dim,
-                            c.rope_scaling.as_ref(),
-                        );
-                    }
-                    for head in 0..c.kv_heads {
-                        ops::rope_scaled(
-                            &mut k_tok[head * head_dim..(head + 1) * head_dim],
-                            pos,
-                            c.rope_base,
-                            c.rope_dim,
-                            c.rope_scaling.as_ref(),
-                        );
+                    if let Some(sections) = c.mrope_sections {
+                        for head in 0..c.heads {
+                            ops::mrope(
+                                &mut q_tok[head * head_dim..(head + 1) * head_dim],
+                                [pos, pos, pos, pos],
+                                sections,
+                                c.rope_base,
+                                ops::RoPEType::Neox,
+                            );
+                        }
+                        for head in 0..c.kv_heads {
+                            ops::mrope(
+                                &mut k_tok[head * head_dim..(head + 1) * head_dim],
+                                [pos, pos, pos, pos],
+                                sections,
+                                c.rope_base,
+                                ops::RoPEType::Neox,
+                            );
+                        }
+                    } else {
+                        for head in 0..c.heads {
+                            ops::rope_scaled(
+                                &mut q_tok[head * head_dim..(head + 1) * head_dim],
+                                pos,
+                                c.rope_base,
+                                c.rope_dim,
+                                c.rope_scaling.as_ref(),
+                            );
+                        }
+                        for head in 0..c.kv_heads {
+                            ops::rope_scaled(
+                                &mut k_tok[head * head_dim..(head + 1) * head_dim],
+                                pos,
+                                c.rope_base,
+                                c.rope_dim,
+                                c.rope_scaling.as_ref(),
+                            );
+                        }
                     }
 
                     kv_cache.store(index, pos, k_tok, v_tok);

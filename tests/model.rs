@@ -1808,3 +1808,152 @@ fn deepseek_mla_forward_and_prefill_match() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn qwen2_vl_mrope_forward_and_prefill_match() {
+    let heads = 2;
+    let head_dim = DIM / heads; // 2
+
+    let builder = Builder::new()
+        .meta("general.architecture", Value::String("qwen2vl".into()))
+        .meta("qwen2vl.block_count", Value::U32(1))
+        .meta("qwen2vl.embedding_length", Value::U32(DIM as u32))
+        .meta("qwen2vl.feed_forward_length", Value::U32(FFN as u32))
+        .meta("qwen2vl.attention.head_count", Value::U32(heads as u32))
+        .meta("qwen2vl.attention.head_count_kv", Value::U32(heads as u32))
+        .meta("qwen2vl.attention.key_length", Value::U32(head_dim as u32))
+        .meta("qwen2vl.context_length", Value::U32(16))
+        .meta("qwen2vl.attention.layer_norm_rms_epsilon", Value::F32(EPS))
+        .meta("qwen2vl.rope.freq_base", Value::F32(1_000_000.0))
+        .meta(
+            "qwen2vl.rope.dimension_sections",
+            Value::Array(vec![
+                Value::U32(1),
+                Value::U32(0),
+                Value::U32(0),
+                Value::U32(0),
+            ]),
+        )
+        .meta("tokenizer.ggml.model", Value::String("gpt2".into()))
+        .meta(
+            "tokenizer.ggml.tokens",
+            Value::Array((0..VOCAB).map(|i| Value::String(format!("t{i}"))).collect()),
+        )
+        .tensor(
+            "token_embd.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&embeddings()),
+        )
+        .tensor(
+            "blk.0.attn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_q.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_q.bias",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.1; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_k.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_k.bias",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.05; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_v.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.attn_v.bias",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.02; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_output.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        )
+        .tensor(
+            "blk.0.ffn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.ffn_gate.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.0; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_up.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.0; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_down.weight",
+            &[FFN as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.0; FFN * DIM]),
+        )
+        .tensor(
+            "output_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "output.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        );
+
+    let path = write("qwen2_vl_mrope_test", &builder);
+    let gguf = Gguf::open(&path).expect("open fixture");
+    let model = Model::load(&gguf).expect("load model");
+
+    assert_eq!(model.config.mrope_sections, Some([1, 0, 0, 0]));
+
+    let mut state_seq = State::new(&model.config);
+    let mut state_batch = State::new(&model.config);
+    let prompt = [0u32, 1u32, 2u32];
+
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_seq.logits),
+        bits(&state_batch.logits),
+        "Qwen2-VL M-RoPE batched prefill logits must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}
