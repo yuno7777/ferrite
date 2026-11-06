@@ -252,3 +252,16 @@
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` prints exactly 1 line (0 external dependencies).
 
+## Autonomous Execution — Phase 34 Completion
+- Branch: `codex/audit-baseline`
+- Phase 34 (Tokenizer Training / BPE & SPM Vocabulary Export):
+  - Created `src/tokenizer/train.rs` with `train_bpe`, `train_vocab_file`, `write_vocab_gguf`, `TrainConfig`, and `TrainedVocab`.
+  - Added CLI `ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]` in `src/main.rs`.
+  - Added integration tests in `tests/tokenizer.rs` validating vocabulary training, GGUF export, and round-trip encode/decode equivalence.
+- Validation:
+  - `cargo test --all-targets` passes (113 unit tests, 73 integration tests, 100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` prints exactly 1 line (0 external dependencies).
+
+

@@ -17,6 +17,7 @@ use crate::gguf::Gguf;
 pub mod bpe;
 pub mod bytes;
 pub mod spm;
+pub mod train;
 
 fn bad(msg: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidData, msg.into())

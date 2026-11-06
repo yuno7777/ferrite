@@ -23,6 +23,7 @@ usage:
   ferrite perplexity <model> <file> evaluate text perplexity and loss
   ferrite convert <src> <dst.gguf>  convert SafeTensors to GGUF format
   ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>
+  ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]
 
 run/serve options:
   -n <count>      tokens to generate (default 128)
@@ -64,6 +65,7 @@ fn main() -> ExitCode {
         Some("perplexity") => cmd_perplexity(&args[1..]),
         Some("convert") => cmd_convert(&args[1..]),
         Some("lora") => cmd_lora(&args[1..]),
+        Some("train-vocab") => cmd_train_vocab(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -81,6 +83,54 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_train_vocab(args: &[String]) -> std::io::Result<()> {
+    if args.len() < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]",
+        ));
+    }
+    let corpus_path = std::path::Path::new(&args[0]);
+    let out_path = std::path::Path::new(&args[1]);
+    let mut vocab_size = 1000;
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--vocab-size" && i + 1 < args.len() {
+            vocab_size = args[i + 1].parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid vocab-size: {e}"),
+                )
+            })?;
+            i += 2;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unknown option: {}", args[i]),
+            ));
+        }
+    }
+    let config = ferrite::TrainConfig {
+        vocab_size,
+        ..Default::default()
+    };
+    println!(
+        "Training BPE vocabulary from {} (target size: {})...",
+        corpus_path.display(),
+        vocab_size
+    );
+    let start = Instant::now();
+    let vocab = ferrite::train_vocab_file(corpus_path, out_path, &config)?;
+    println!(
+        "Trained {} tokens ({} merges) in {:.2?}. Saved to {}",
+        vocab.tokens.len(),
+        vocab.merges.len(),
+        start.elapsed(),
+        out_path.display()
+    );
+    Ok(())
 }
 
 fn cmd_lora(args: &[String]) -> std::io::Result<()> {

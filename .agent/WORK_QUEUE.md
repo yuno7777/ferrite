@@ -290,10 +290,11 @@
 
 ### Phase 34: Tokenizer Training / BPE & Unigram Vocabulary Export (`ferrite train-vocab`)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Pure-Rust tokenizer training tool extracting BPE merges or Unigram scores directly from text corpora and writing GGUF-compatible vocabulary metadata.
-- Files: `src/tokenizer/train.rs`, `src/main.rs`, `tests/tokenizer.rs`
+- Files: `src/tokenizer/train.rs`, `src/tokenizer/mod.rs`, `src/main.rs`, `tests/tokenizer.rs`
 - Acceptance: CLI `ferrite train-vocab <corpus.txt> <out_vocab.gguf> --vocab-size <n>`; valid merges and piece round-trips.
+- Completion evidence: Implemented `train_bpe`, `train_vocab_file`, and `write_vocab_gguf` in `src/tokenizer/train.rs`. Added CLI `ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]` in `src/main.rs`. Added integration tests in `tests/tokenizer.rs` verifying vocabulary training, GGUF export, and round-trip encode/decode equivalence. All 186 tests pass.
 
 ### Phase 35: Embedding Model & Vector Search Engine (`ferrite embed` + `/v1/embeddings`)
 - Priority: P2
