@@ -427,3 +427,142 @@ fn test_smoothquant_scale_migration_and_w8a8_matvec() {
         assert!(rel < 0.08, "row {r} SmoothQuant error {rel} too large");
     }
 }
+
+#[test]
+fn test_fp8_e5m2_conversion_and_vectorized_gemm() {
+    use ferrite::quant::fp8::{f32_to_fp8_e4m3, f32_to_fp8_e5m2, fp8_e5m2_to_f32};
+    use ferrite::{gemm_fp8_batched, gemm_fp8_fused, Fp8HardwareTuning};
+
+    // 1. E5M2 format conversions
+    assert_eq!(fp8_e5m2_to_f32(0x00), 0.0);
+    assert_eq!(fp8_e5m2_to_f32(0x3C), 1.0);
+    assert_eq!(fp8_e5m2_to_f32(0xBC), -1.0);
+    assert!(fp8_e5m2_to_f32(0x7C).is_infinite());
+    assert!(fp8_e5m2_to_f32(0x7F).is_nan());
+
+    let test_vals = [0.0, 1.0, -1.0, 2.0, -4.0, 16.0, 1024.0];
+    for &val in &test_vals {
+        let byte = f32_to_fp8_e5m2(val);
+        let dec = fp8_e5m2_to_f32(byte);
+        assert_eq!(val, dec, "exact E5M2 roundtrip failed for {val}");
+    }
+
+    // 2. Vectorized GEMM vs reference float matrix-vector product
+    let rows = 4;
+    let cols = 64;
+    let block_size = 32;
+
+    // Create synthetic weight and activations
+    let mut w_f32 = vec![0.0f32; rows * cols];
+    let mut w_e4m3 = vec![0u8; rows * cols];
+    let mut w_e5m2 = vec![0u8; rows * cols];
+
+    for (i, w) in w_f32.iter_mut().enumerate() {
+        *w = ((i as f32 * 0.17).sin() * 4.0).round() * 0.5;
+        w_e4m3[i] = f32_to_fp8_e4m3(*w);
+        w_e5m2[i] = f32_to_fp8_e5m2(*w);
+    }
+
+    let x: Vec<f32> = (0..cols).map(|i| (i as f32 * 0.23).cos()).collect();
+    let scales = vec![1.0f32; (rows * cols) / block_size];
+
+    // Reference float matrix-vector
+    let mut expected_e4m3 = vec![0.0f32; rows];
+    let mut expected_e5m2 = vec![0.0f32; rows];
+
+    for r in 0..rows {
+        let mut sum4 = 0.0f32;
+        let mut sum5 = 0.0f32;
+        for (c, &x_val) in x.iter().enumerate().take(cols) {
+            let idx = r * cols + c;
+            sum4 += ferrite::quant::fp8::fp8_e4m3_to_f32(w_e4m3[idx]) * x_val;
+            sum5 += fp8_e5m2_to_f32(w_e5m2[idx]) * x_val;
+        }
+        expected_e4m3[r] = sum4;
+        expected_e5m2[r] = sum5;
+    }
+
+    // Fused FP8 GEMM (E4M3)
+    let mut actual_e4m3 = vec![0.0f32; rows];
+    gemm_fp8_fused(
+        &w_e4m3,
+        Some(&scales),
+        block_size,
+        false,
+        &x,
+        &mut actual_e4m3,
+        rows,
+        cols,
+    );
+    for r in 0..rows {
+        assert!(
+            (actual_e4m3[r] - expected_e4m3[r]).abs() < 1e-4,
+            "E4M3 fused GEMM mismatch at row {r}: {} vs {}",
+            actual_e4m3[r],
+            expected_e4m3[r]
+        );
+    }
+
+    // Fused FP8 GEMM (E5M2)
+    let mut actual_e5m2 = vec![0.0f32; rows];
+    gemm_fp8_fused(
+        &w_e5m2,
+        Some(&scales),
+        block_size,
+        true,
+        &x,
+        &mut actual_e5m2,
+        rows,
+        cols,
+    );
+    for r in 0..rows {
+        assert!(
+            (actual_e5m2[r] - expected_e5m2[r]).abs() < 1e-4,
+            "E5M2 fused GEMM mismatch at row {r}: {} vs {}",
+            actual_e5m2[r],
+            expected_e5m2[r]
+        );
+    }
+
+    // 3. Batched FP8 GEMM with auto-tuning
+    let batch = 3;
+    let mut x_batch = Vec::with_capacity(batch * cols);
+    for b in 0..batch {
+        for c in 0..cols {
+            x_batch.push(((b * cols + c) as f32 * 0.1).sin());
+        }
+    }
+
+    let mut out_batch = vec![0.0f32; batch * rows];
+    let tuning = Fp8HardwareTuning::auto_detect();
+    gemm_fp8_batched(
+        &w_e4m3,
+        Some(&scales),
+        block_size,
+        false,
+        &x_batch,
+        &mut out_batch,
+        batch,
+        rows,
+        cols,
+        Some(&tuning),
+    );
+
+    // Verify each batch output matches individual matvec
+    for b in 0..batch {
+        let mut single_out = vec![0.0f32; rows];
+        let x_tok = &x_batch[b * cols..(b + 1) * cols];
+        gemm_fp8_fused(
+            &w_e4m3,
+            Some(&scales),
+            block_size,
+            false,
+            x_tok,
+            &mut single_out,
+            rows,
+            cols,
+        );
+        let batch_slice = &out_batch[b * rows..(b + 1) * rows];
+        assert_eq!(batch_slice, single_out.as_slice());
+    }
+}

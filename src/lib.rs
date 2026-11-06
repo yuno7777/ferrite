@@ -65,8 +65,8 @@ pub use kv::{
 pub use map::{Mmap, MmapMut};
 pub use model::ChunkedPrefill;
 pub use ops::{
-    dot_i8, flash_decoding_attention, gemm_int8_fused, quantize_int8_dynamic, tree_reduce_splits,
-    FlashDecodingSplit, RopeCache,
+    dot_i8, flash_decoding_attention, gemm_fp8_batched, gemm_fp8_fused, gemm_int8_fused,
+    quantize_int8_dynamic, tree_reduce_splits, FlashDecodingSplit, Fp8HardwareTuning, RopeCache,
 };
 pub use paged::{
     BlockId, HierarchicalPageTable, PageTable, PagedPool, PagedSequence, PagedSequenceV2,

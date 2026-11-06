@@ -703,6 +703,8 @@ pub fn gemm_int8_fused(
     }
 }
 
+pub use crate::quant::fp8::{gemm_fp8_batched, gemm_fp8_fused, Fp8HardwareTuning};
+
 /// Plain dot product, accumulated in four lanes.
 ///
 /// The lanes exist so the compiler can vectorize: a single accumulator forces a
