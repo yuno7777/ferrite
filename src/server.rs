@@ -150,6 +150,7 @@ impl<'a> Server<'a> {
         let mut content_length = 0usize;
         let mut auth_header: Option<String> = None;
         let mut tenant_header: Option<String> = None;
+        let mut accepts_html = false;
 
         loop {
             let mut line = String::new();
@@ -169,6 +170,8 @@ impl<'a> Server<'a> {
                     auth_header = Some(v_trim.to_string());
                 } else if k_trim.eq_ignore_ascii_case("x-tenant-id") {
                     tenant_header = Some(v_trim.to_string());
+                } else if k_trim.eq_ignore_ascii_case("accept") && v_trim.contains("text/html") {
+                    accepts_html = true;
                 }
             }
         }
@@ -243,6 +246,12 @@ impl<'a> Server<'a> {
         };
 
         match (method, path) {
+            ("GET", "/ui") | ("GET", "/playground") => {
+                self.write_html(stream, 200, crate::webui::PLAYGROUND_HTML)
+            }
+            ("GET", "/") if accepts_html => {
+                self.write_html(stream, 200, crate::webui::PLAYGROUND_HTML)
+            }
             ("GET", "/health") | ("GET", "/") => {
                 let json = format!(
                     "{{\"status\":\"ok\",\"model\":\"{}\"}}\n",
@@ -537,6 +546,17 @@ impl<'a> Server<'a> {
             "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             json.len(),
             json
+        )?;
+        stream.flush()
+    }
+
+    fn write_html(&self, stream: &mut TcpStream, status: u16, html: &str) -> Result<()> {
+        let status_text = if status == 200 { "OK" } else { "Error" };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {status_text}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            html.len(),
+            html
         )?;
         stream.flush()
     }

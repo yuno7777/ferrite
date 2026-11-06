@@ -264,6 +264,18 @@ impl BlockQ8_0 {
     pub fn dequantize(&self, index: usize) -> f32 {
         self.scale * (self.qs[index] as f32)
     }
+
+    /// Compute dot product between this 32-element `Q8_0` block and `q`.
+    #[inline]
+    pub fn dot_f32(&self, q: &[f32]) -> f32 {
+        dot_block_q8_0(q, self)
+    }
+
+    /// Accumulate `weight * dequantize(self)` into `out`.
+    #[inline]
+    pub fn accumulate_weighted(&self, weight: f32, out: &mut [f32]) {
+        add_weighted_block_q8_0(out, weight, self);
+    }
 }
 
 /// A 32-element Q4_0 KV cache block (16 bytes packed nibbles + 4 byte f32 scale).

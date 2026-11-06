@@ -498,21 +498,38 @@ impl<'a> Weight<'a> {
         int8: bool,
         scratch: &mut [f32],
     ) -> Result<()> {
+        if int8 {
+            let mut offset = 0;
+            while offset + 4 <= out.len() {
+                let r0 = self.row_slice(first + offset);
+                let r1 = self.row_slice(first + offset + 1);
+                let r2 = self.row_slice(first + offset + 2);
+                let r3 = self.row_slice(first + offset + 3);
+                let vals = quant::idot::integer_4rows(self.ty, [r0, r1, r2, r3], quantized)
+                    .expect("type was checked");
+                out[offset..offset + 4].copy_from_slice(&vals);
+                offset += 4;
+            }
+            while offset < out.len() {
+                let row = self.row_slice(first + offset);
+                out[offset] =
+                    quant::idot::integer(self.ty, row, quantized).expect("type was checked");
+                offset += 1;
+            }
+            return Ok(());
+        }
+
         for (offset, slot) in out.iter_mut().enumerate() {
             let row = self.row_slice(first + offset);
-            *slot = if int8 {
-                quant::idot::integer(self.ty, row, quantized).expect("type was checked")
-            } else {
-                match quant::dot::fused(self.ty, row, x) {
-                    Some(value) => value,
-                    None => {
-                        // The workspace is sized for the widest matrix in the
-                        // model, so it has to be cut to this one's width —
-                        // `dequantize` takes the element count from the slice.
-                        let scratch = &mut scratch[..self.cols];
-                        quant::dequantize(self.ty, row, scratch)?;
-                        ops::dot(scratch, x)
-                    }
+            *slot = match quant::dot::fused(self.ty, row, x) {
+                Some(value) => value,
+                None => {
+                    // The workspace is sized for the widest matrix in the
+                    // model, so it has to be cut to this one's width —
+                    // `dequantize` takes the element count from the slice.
+                    let scratch = &mut scratch[..self.cols];
+                    quant::dequantize(self.ty, row, scratch)?;
+                    ops::dot(scratch, x)
                 }
             };
         }
@@ -637,17 +654,40 @@ impl<'a> Weight<'a> {
         batch: usize,
         scratch: &mut [f32],
     ) -> Result<()> {
+        if int8 {
+            let mut r_offset = 0;
+            while r_offset + 4 <= num_rows {
+                let row_idx = first_row + r_offset;
+                let r0 = self.row_slice(row_idx);
+                let r1 = self.row_slice(row_idx + 1);
+                let r2 = self.row_slice(row_idx + 2);
+                let r3 = self.row_slice(row_idx + 3);
+                for (b, q_tok) in batch_quantized.iter().enumerate().take(batch) {
+                    let vals = quant::idot::integer_4rows(self.ty, [r0, r1, r2, r3], q_tok)
+                        .expect("supported");
+                    let dst = b * self.rows + row_idx;
+                    out[dst..dst + 4].copy_from_slice(&vals);
+                }
+                r_offset += 4;
+            }
+            while r_offset < num_rows {
+                let row_idx = first_row + r_offset;
+                let row = self.row_slice(row_idx);
+                for (b, q_tok) in batch_quantized.iter().enumerate().take(batch) {
+                    out[b * self.rows + row_idx] =
+                        quant::idot::integer(self.ty, row, q_tok).expect("supported");
+                }
+                r_offset += 1;
+            }
+            return Ok(());
+        }
+
         let has_fused = quant::dot::supports(self.ty);
 
         for r_offset in 0..num_rows {
             let row_idx = first_row + r_offset;
             let row = self.row_slice(row_idx);
-            if int8 {
-                for (b, q_tok) in batch_quantized.iter().enumerate().take(batch) {
-                    out[b * self.rows + row_idx] =
-                        quant::idot::integer(self.ty, row, q_tok).expect("supported");
-                }
-            } else if has_fused {
+            if has_fused {
                 for b in 0..batch {
                     let x_tok = &x[b * self.cols..(b + 1) * self.cols];
                     out[b * self.rows + row_idx] =
@@ -676,19 +716,47 @@ impl<'a> Weight<'a> {
         batch: usize,
         scratch: &mut [f32],
     ) -> Result<()> {
-        let has_fused = quant::dot::supports(self.ty);
-
-        for r_offset in 0..num_rows {
-            let row_idx = first_row + r_offset;
-            let row = self.row_slice(row_idx);
-            if int8 {
+        if int8 {
+            let mut r_offset = 0;
+            while r_offset + 4 <= num_rows {
+                let row_idx = first_row + r_offset;
+                let r0 = self.row_slice(row_idx);
+                let r1 = self.row_slice(row_idx + 1);
+                let r2 = self.row_slice(row_idx + 2);
+                let r3 = self.row_slice(row_idx + 3);
+                for (b, q_tok) in batch_quantized.iter().enumerate().take(batch) {
+                    let vals = quant::idot::integer_4rows(self.ty, [r0, r1, r2, r3], q_tok)
+                        .expect("supported");
+                    unsafe {
+                        let dst = out.0.add(b * self.rows + row_idx);
+                        *dst = vals[0];
+                        *dst.add(1) = vals[1];
+                        *dst.add(2) = vals[2];
+                        *dst.add(3) = vals[3];
+                    }
+                }
+                r_offset += 4;
+            }
+            while r_offset < num_rows {
+                let row_idx = first_row + r_offset;
+                let row = self.row_slice(row_idx);
                 for (b, q_tok) in batch_quantized.iter().enumerate().take(batch) {
                     let val = quant::idot::integer(self.ty, row, q_tok).expect("supported");
                     unsafe {
                         *out.0.add(b * self.rows + row_idx) = val;
                     }
                 }
-            } else if has_fused {
+                r_offset += 1;
+            }
+            return Ok(());
+        }
+
+        let has_fused = quant::dot::supports(self.ty);
+
+        for r_offset in 0..num_rows {
+            let row_idx = first_row + r_offset;
+            let row = self.row_slice(row_idx);
+            if has_fused {
                 for b in 0..batch {
                     let x_tok = &x[b * self.cols..(b + 1) * self.cols];
                     let val = quant::dot::fused(self.ty, row, x_tok).expect("supported");

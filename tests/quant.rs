@@ -131,9 +131,11 @@ fn k_quant_tensor_matches_a_direct_block_expansion() {
 
 #[test]
 fn unsupported_types_are_reported_not_guessed() {
-    let err = quant::dequantize_to_vec(GgmlType::Q2_K, &[0; 84], 256).unwrap_err();
+    let ok_q2k = quant::dequantize_to_vec(GgmlType::Q2_K, &[0; 84], 256).unwrap();
+    assert_eq!(ok_q2k.len(), 256);
+    let err = quant::dequantize_to_vec(GgmlType::I32, &[0; 16], 4).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-    assert!(err.to_string().contains("Q2_K"), "{err}");
+    assert!(err.to_string().contains("I32"), "{err}");
 }
 
 #[test]

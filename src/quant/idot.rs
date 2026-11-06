@@ -46,7 +46,20 @@ use crate::gguf::GgmlType;
 pub fn supports(ty: GgmlType) -> bool {
     matches!(
         ty,
-        GgmlType::Q8_0 | GgmlType::Q4_0 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K
+        GgmlType::Q8_0
+            | GgmlType::Q4_0
+            | GgmlType::Q4_1
+            | GgmlType::Q5_0
+            | GgmlType::Q5_1
+            | GgmlType::Q2_K
+            | GgmlType::Q3_K
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS
+            | GgmlType::TQ1_0
+            | GgmlType::TQ2_0
     )
 }
 
@@ -72,9 +85,17 @@ pub fn integer(ty: GgmlType, row: &[u8], x: &Quantized) -> Option<f32> {
             match ty {
                 GgmlType::Q8_0 => return Some(unsafe { super::avx2::q8_0(row, x) }),
                 GgmlType::Q4_0 => return Some(unsafe { super::avx2::q4_0(row, x) }),
+                GgmlType::Q4_1 => return Some(unsafe { super::avx2::q4_1(row, x) }),
+                GgmlType::Q5_0 => return Some(unsafe { super::avx2::q5_0(row, x) }),
+                GgmlType::Q5_1 => return Some(unsafe { super::avx2::q5_1(row, x) }),
+                GgmlType::Q2_K => return Some(unsafe { super::avx2::q2_k(row, x) }),
+                GgmlType::Q3_K => return Some(unsafe { super::avx2::q3_k(row, x) }),
                 GgmlType::Q4_K => return Some(unsafe { super::avx2::q4_k(row, x) }),
                 GgmlType::Q5_K => return Some(unsafe { super::avx2::q5_k(row, x) }),
                 GgmlType::Q6_K => return Some(unsafe { super::avx2::q6_k(row, x) }),
+                GgmlType::IQ4_NL => return Some(unsafe { super::avx2::iq4_nl(row, x) }),
+                GgmlType::IQ4_XS => return Some(unsafe { super::avx2::iq4_xs(row, x) }),
+                GgmlType::TQ2_0 => return Some(unsafe { super::avx2::tq2_0(row, x) }),
                 _ => {}
             }
         }
@@ -94,11 +115,48 @@ pub fn integer(ty: GgmlType, row: &[u8], x: &Quantized) -> Option<f32> {
     Some(match ty {
         GgmlType::Q8_0 => q8_0(row, x),
         GgmlType::Q4_0 => q4_0(row, x),
+        GgmlType::Q4_1 => q4_1(row, x),
+        GgmlType::Q5_0 => q5_0(row, x),
+        GgmlType::Q5_1 => q5_1(row, x),
+        GgmlType::Q2_K => q2_k(row, x),
+        GgmlType::Q3_K => q3_k(row, x),
         GgmlType::Q4_K => q4_k(row, x),
         GgmlType::Q5_K => q5_k(row, x),
         GgmlType::Q6_K => q6_k(row, x),
+        GgmlType::IQ4_NL => super::iq::dot_iq4_nl(row, x),
+        GgmlType::IQ4_XS => super::iq::dot_iq4_xs(row, x),
+        GgmlType::TQ1_0 => super::bitnet::dot_tq1_0(row, x),
+        GgmlType::TQ2_0 => super::bitnet::dot_tq2_0(row, x),
         _ => return None,
     })
+}
+
+/// Dot 4 quantized weight rows against a single quantized activation vector simultaneously.
+///
+/// Reuses activation registers across all 4 rows, cutting L1 activation memory
+/// traffic by 75% and saturating AVX2 execution ports.
+#[inline]
+pub fn integer_4rows(ty: GgmlType, rows: [&[u8]; 4], x: &Quantized) -> Option<[f32; 4]> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if super::avx2::available_fma_f16c() {
+            match ty {
+                GgmlType::Q8_0 => return Some(unsafe { super::avx2::q8_0_4rows(rows, x) }),
+                GgmlType::Q4_0 => return Some(unsafe { super::avx2::q4_0_4rows(rows, x) }),
+                GgmlType::Q4_K => return Some(unsafe { super::avx2::q4_k_4rows(rows, x) }),
+                GgmlType::Q5_K => return Some(unsafe { super::avx2::q5_k_4rows(rows, x) }),
+                GgmlType::Q6_K => return Some(unsafe { super::avx2::q6_k_4rows(rows, x) }),
+                _ => {}
+            }
+        }
+    }
+
+    Some([
+        integer(ty, rows[0], x)?,
+        integer(ty, rows[1], x)?,
+        integer(ty, rows[2], x)?,
+        integer(ty, rows[3], x)?,
+    ])
 }
 
 #[inline]
@@ -286,6 +344,154 @@ pub fn q6_k(row: &[u8], x: &Quantized) -> f32 {
     acc
 }
 
+/// `Q4_1`: 32 elements in 20 bytes (`f16` scale, `f16` min, 16 bytes of 4-bit unsigned nibbles).
+pub fn q4_1(row: &[u8], x: &Quantized) -> f32 {
+    let mut acc = 0.0f32;
+    for (index, block) in row.chunks_exact(20).enumerate() {
+        let d = half::read_f16(block);
+        let min = half::read_f16(&block[2..4]);
+        let quants = &block[4..20];
+        let (acts, scale, sum) = x.block(index);
+
+        let mut dot = 0i32;
+        for j in 0..16 {
+            dot += (quants[j] & 0x0F) as i32 * acts[j] as i32;
+            dot += (quants[j] >> 4) as i32 * acts[j + 16] as i32;
+        }
+        acc += scale * (d * dot as f32 + min * sum as f32);
+    }
+    acc
+}
+
+/// `Q5_0`: 32 elements in 22 bytes (`f16` scale, `u32` high bits, 16 bytes of 4-bit low nibbles, centered at 16).
+pub fn q5_0(row: &[u8], x: &Quantized) -> f32 {
+    let mut acc = 0.0f32;
+    for (index, block) in row.chunks_exact(22).enumerate() {
+        let d = half::read_f16(block);
+        let qh = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+        let qs = &block[6..22];
+        let (acts, scale, sum) = x.block(index);
+
+        let mut dot = 0i32;
+        for j in 0..16 {
+            let xh_0 = (((qh >> j) << 4) & 0x10) as u8;
+            let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+            let w0 = ((qs[j] & 0x0F) | xh_0) as i32;
+            let w1 = ((qs[j] >> 4) | xh_1) as i32;
+            dot += w0 * acts[j] as i32 + w1 * acts[j + 16] as i32;
+        }
+        acc += d * scale * (dot - 16 * sum) as f32;
+    }
+    acc
+}
+
+/// `Q5_1`: 32 elements in 24 bytes (`f16` scale, `f16` min, `u32` high bits, 16 bytes of 4-bit low nibbles).
+pub fn q5_1(row: &[u8], x: &Quantized) -> f32 {
+    let mut acc = 0.0f32;
+    for (index, block) in row.chunks_exact(24).enumerate() {
+        let d = half::read_f16(block);
+        let min = half::read_f16(&block[2..4]);
+        let qh = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+        let qs = &block[8..24];
+        let (acts, scale, sum) = x.block(index);
+
+        let mut dot = 0i32;
+        for j in 0..16 {
+            let xh_0 = (((qh >> j) << 4) & 0x10) as u8;
+            let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+            let w0 = ((qs[j] & 0x0F) | xh_0) as i32;
+            let w1 = ((qs[j] >> 4) | xh_1) as i32;
+            dot += w0 * acts[j] as i32 + w1 * acts[j + 16] as i32;
+        }
+        acc += scale * (d * dot as f32 + min * sum as f32);
+    }
+    acc
+}
+
+/// `Q2_K`: 256 elements in 84 bytes.
+pub fn q2_k(row: &[u8], x: &Quantized) -> f32 {
+    let mut acc = 0.0f32;
+    for (super_index, block) in row.chunks_exact(84).enumerate() {
+        let scales = &block[0..16];
+        let qs = &block[16..80];
+        let d = half::read_f16(&block[80..82]);
+        let dmin = half::read_f16(&block[82..84]);
+        let first_sub = super_index * 8;
+
+        for half_block in 0..2 {
+            let q = &qs[half_block * 32..(half_block + 1) * 32];
+            for shift_idx in 0..4 {
+                let sub_idx = first_sub + half_block * 4 + shift_idx;
+                let (acts, s_act, _) = x.block(sub_idx);
+                let shift = (shift_idx * 2) as u32;
+                let sc_lo = scales[half_block * 8 + shift_idx * 2];
+                let sc_hi = scales[half_block * 8 + shift_idx * 2 + 1];
+
+                let mut dot_lo = 0i32;
+                let mut sum_lo = 0i32;
+                for l in 0..16 {
+                    let a = acts[l] as i32;
+                    dot_lo += ((q[l] >> shift) & 3) as i32 * a;
+                    sum_lo += a;
+                }
+                let mut dot_hi = 0i32;
+                let mut sum_hi = 0i32;
+                for l in 0..16 {
+                    let a = acts[16 + l] as i32;
+                    dot_hi += ((q[16 + l] >> shift) & 3) as i32 * a;
+                    sum_hi += a;
+                }
+
+                let weighted_q = (sc_lo & 0x0F) as i32 * dot_lo + (sc_hi & 0x0F) as i32 * dot_hi;
+                let weighted_m = (sc_lo >> 4) as i32 * sum_lo + (sc_hi >> 4) as i32 * sum_hi;
+                acc += s_act * (d * weighted_q as f32 - dmin * weighted_m as f32);
+            }
+        }
+    }
+    acc
+}
+
+/// `Q3_K`: 256 elements in 110 bytes.
+pub fn q3_k(row: &[u8], x: &Quantized) -> f32 {
+    let mut acc = 0.0f32;
+    for (super_index, block) in row.chunks_exact(110).enumerate() {
+        let hmask = &block[0..32];
+        let qs = &block[32..96];
+        let scales = k::q3_k_scales(&block[96..108]);
+        let d = half::read_f16(&block[108..110]);
+        let first_sub = super_index * 8;
+
+        for half_block in 0..2 {
+            let q = &qs[half_block * 32..(half_block + 1) * 32];
+            for shift_idx in 0..4 {
+                let sub_idx = first_sub + half_block * 4 + shift_idx;
+                let (acts, s_act, _) = x.block(sub_idx);
+                let shift = (shift_idx * 2) as u32;
+                let m_bit = 1u8 << (half_block * 4 + shift_idx);
+                let sc_lo = scales[half_block * 8 + shift_idx * 2] as i32;
+                let sc_hi = scales[half_block * 8 + shift_idx * 2 + 1] as i32;
+
+                let mut dot_lo = 0i32;
+                for l in 0..16 {
+                    let q0 =
+                        ((q[l] >> shift) & 3) as i32 - if hmask[l] & m_bit != 0 { 0 } else { 4 };
+                    dot_lo += q0 * acts[l] as i32;
+                }
+                let mut dot_hi = 0i32;
+                for l in 0..16 {
+                    let q1 = ((q[16 + l] >> shift) & 3) as i32
+                        - if hmask[16 + l] & m_bit != 0 { 0 } else { 4 };
+                    dot_hi += q1 * acts[16 + l] as i32;
+                }
+
+                let weighted = sc_lo * dot_lo + sc_hi * dot_hi;
+                acc += d * s_act * weighted as f32;
+            }
+        }
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +564,30 @@ mod tests {
         for blocks in [1, 2, 8] {
             let error = relative_error(GgmlType::Q6_K, blocks);
             assert!(error < 5e-3, "{blocks} blocks: relative error {error}");
+        }
+    }
+
+    #[test]
+    fn q4_1_q5_0_q5_1_q2_k_q3_k_stay_close_to_exact_dot() {
+        for ty in [GgmlType::Q4_1, GgmlType::Q5_0, GgmlType::Q5_1] {
+            for blocks in [1, 4, 16] {
+                let error = relative_error(ty, blocks);
+                assert!(
+                    error < 5e-3,
+                    "{} {blocks} blocks: relative error {error}",
+                    ty.name()
+                );
+            }
+        }
+        for ty in [GgmlType::Q2_K, GgmlType::Q3_K] {
+            for blocks in [1, 2, 8] {
+                let error = relative_error(ty, blocks);
+                assert!(
+                    error < 5e-3,
+                    "{} {blocks} blocks: relative error {error}",
+                    ty.name()
+                );
+            }
         }
     }
 

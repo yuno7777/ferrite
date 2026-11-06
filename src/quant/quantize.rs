@@ -9,10 +9,19 @@ use crate::gguf::{align_up, GgmlType, Gguf, Value};
 /// Quantize supported floating-point tensors and copy other tensor encodings
 /// without decoding them. Tensor order, dimensions, and metadata are retained.
 pub fn quantize_file(src: &Path, dst: &Path, target: GgmlType) -> io::Result<()> {
-    if !matches!(target, GgmlType::Q4_0 | GgmlType::Q8_0 | GgmlType::Q4_K) {
+    if !matches!(
+        target,
+        GgmlType::Q4_0
+            | GgmlType::Q8_0
+            | GgmlType::Q4_K
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS
+            | GgmlType::TQ1_0
+            | GgmlType::TQ2_0
+    ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "target must be Q4_0, Q8_0, or Q4_K",
+            "target must be Q4_0, Q8_0, Q4_K, IQ4_NL, IQ4_XS, TQ1_0, or TQ2_0",
         ));
     }
     let model = Gguf::open(src)?;
@@ -90,17 +99,38 @@ pub fn quantize_file(src: &Path, dst: &Path, target: GgmlType) -> io::Result<()>
 }
 
 pub(crate) fn encode(values: &[f32], target: GgmlType) -> io::Result<Vec<u8>> {
-    let (block, _) = target.layout().expect("supported output format");
+    let (block, type_sz) = target.layout().expect("supported output format");
     let block = block as usize;
+    let type_sz = type_sz as usize;
     if values.len() % block != 0 {
         return Err(invalid("tensor dimensions do not fill quantization blocks"));
     }
-    let mut out = Vec::with_capacity(values.len() / block * target.layout().unwrap().1 as usize);
+    let mut out = Vec::with_capacity(values.len() / block * type_sz);
     for xs in values.chunks_exact(block) {
         match target {
             GgmlType::Q8_0 => encode_q8(xs, &mut out),
             GgmlType::Q4_0 => encode_q4(xs, &mut out),
             GgmlType::Q4_K => encode_q4k(xs, &mut out),
+            GgmlType::IQ4_NL => {
+                let mut blk = [0u8; 18];
+                crate::quant::iq::quantize_iq4_nl_block(xs, None, &mut blk);
+                out.extend_from_slice(&blk);
+            }
+            GgmlType::IQ4_XS => {
+                let mut blk = [0u8; 136];
+                crate::quant::iq::quantize_iq4_xs_block(xs, &mut blk);
+                out.extend_from_slice(&blk);
+            }
+            GgmlType::TQ1_0 => {
+                let mut blk = [0u8; 54];
+                crate::quant::bitnet::quantize_tq1_0_block(xs, &mut blk);
+                out.extend_from_slice(&blk);
+            }
+            GgmlType::TQ2_0 => {
+                let mut blk = [0u8; 66];
+                crate::quant::bitnet::quantize_tq2_0_block(xs, &mut blk);
+                out.extend_from_slice(&blk);
+            }
             _ => unreachable!(),
         }
     }

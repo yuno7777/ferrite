@@ -21,8 +21,8 @@ usage:
   ferrite tokenize <model> <text>   encode text, show ids and pieces
   ferrite run <model> <prompt>      generate, streaming to stdout
   ferrite chat <model>              interactive multi-turn terminal chat TUI
-  ferrite serve <model>             serve HTTP/SSE API daemon
-  ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
+  ferrite serve <model>             serve HTTP/SSE API daemon & WebUI playground
+  ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K|IQ4_NL|IQ4_XS|TQ1_0|TQ2_0>
   ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare> [--weight <0..1>]
   ferrite split <src.gguf> <out_prefix> [--shards <n>] [--max-bytes <bytes>]
   ferrite prune <model.gguf> --sparsity <0..1> [--tensor <name>]
@@ -347,17 +347,21 @@ fn cmd_quantize(args: &[String]) -> std::io::Result<()> {
     if args.len() != 3 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "usage: ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>",
+            "usage: ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K|IQ4_NL|IQ4_XS|TQ1_0|TQ2_0>",
         ));
     }
     let target = match args[2].to_ascii_uppercase().as_str() {
         "Q8_0" => ferrite::GgmlType::Q8_0,
         "Q4_0" => ferrite::GgmlType::Q4_0,
         "Q4_K" => ferrite::GgmlType::Q4_K,
+        "IQ4_NL" => ferrite::GgmlType::IQ4_NL,
+        "IQ4_XS" => ferrite::GgmlType::IQ4_XS,
+        "TQ1_0" => ferrite::GgmlType::TQ1_0,
+        "TQ2_0" => ferrite::GgmlType::TQ2_0,
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "quantization type must be Q8_0, Q4_0, or Q4_K",
+                "quantization type must be Q8_0, Q4_0, Q4_K, IQ4_NL, IQ4_XS, TQ1_0, or TQ2_0",
             ))
         }
     };
@@ -1502,6 +1506,12 @@ fn cmd_doctor(args: &[String]) -> std::io::Result<()> {
         "  ARM NEON:        {}",
         if has_neon { "yes (active)" } else { "no" }
     );
+    let gpu_rt = ferrite::gpu::DynamicGpuRuntime::probe();
+    println!(
+        "Compute Backend:   {} ({} device(s) detected)",
+        gpu_rt.active_backend.name(),
+        gpu_rt.devices.len()
+    );
 
     // Quick Q4_K integer dot bandwidth probe (4096 x 1024)
     let cols = 4096usize;
@@ -1515,19 +1525,26 @@ fn cmd_doctor(args: &[String]) -> std::io::Result<()> {
     let t0 = Instant::now();
     let mut sink = 0.0f32;
     for _ in 0..iters {
-        for r in 0..rows {
-            sink += ferrite::quant::idot::integer(
+        let mut r = 0usize;
+        while r + 4 <= rows {
+            let r0 = &raw[r * row_bytes..(r + 1) * row_bytes];
+            let r1 = &raw[(r + 1) * row_bytes..(r + 2) * row_bytes];
+            let r2 = &raw[(r + 2) * row_bytes..(r + 3) * row_bytes];
+            let r3 = &raw[(r + 3) * row_bytes..(r + 4) * row_bytes];
+            if let Some(vals) = ferrite::quant::idot::integer_4rows(
                 ferrite::GgmlType::Q4_K,
-                &raw[r * row_bytes..(r + 1) * row_bytes],
+                [r0, r1, r2, r3],
                 &quantized,
-            )
-            .unwrap_or(0.0);
+            ) {
+                sink += vals[0] + vals[1] + vals[2] + vals[3];
+            }
+            r += 4;
         }
     }
     let dt = t0.elapsed().as_secs_f64().max(1e-9);
     std::hint::black_box(sink);
     let bw_1t = (raw.len() as f64 * iters as f64) / dt / (1024.0 * 1024.0 * 1024.0);
-    println!("Q4_K iDot Speed:   {bw_1t:.1} GiB/s (single-core streaming)");
+    println!("Q4_K iDot Speed:   {bw_1t:.1} GiB/s (single-core 4-row tiled)");
 
     if total_bytes > 0 {
         println!("\nModel Tier Recommendations (Q4_K_M quantization):");
@@ -1760,13 +1777,42 @@ struct BenchPoolCtx {
 unsafe fn bench_pool_worker(ctx_ptr: *const (), start: usize, end: usize, _tid: usize) {
     let ctx = &*(ctx_ptr as *const BenchPoolCtx);
     let q = &*(ctx.q_ptr as *const ferrite::quant::activation::Quantized);
-    for r in start..end {
+    let mut r = start;
+    while r + 4 <= end {
+        let r0 = std::slice::from_raw_parts(
+            (ctx.raw_ptr as *const u8).add(r * ctx.row_bytes),
+            ctx.row_bytes,
+        );
+        let r1 = std::slice::from_raw_parts(
+            (ctx.raw_ptr as *const u8).add((r + 1) * ctx.row_bytes),
+            ctx.row_bytes,
+        );
+        let r2 = std::slice::from_raw_parts(
+            (ctx.raw_ptr as *const u8).add((r + 2) * ctx.row_bytes),
+            ctx.row_bytes,
+        );
+        let r3 = std::slice::from_raw_parts(
+            (ctx.raw_ptr as *const u8).add((r + 3) * ctx.row_bytes),
+            ctx.row_bytes,
+        );
+        if let Some(vals) = ferrite::quant::idot::integer_4rows(ctx.qtype, [r0, r1, r2, r3], q) {
+            *(ctx.out_ptr as *mut f32).add(r) = vals[0];
+            *(ctx.out_ptr as *mut f32).add(r + 1) = vals[1];
+            *(ctx.out_ptr as *mut f32).add(r + 2) = vals[2];
+            *(ctx.out_ptr as *mut f32).add(r + 3) = vals[3];
+            r += 4;
+        } else {
+            break;
+        }
+    }
+    while r < end {
         let row_slice = std::slice::from_raw_parts(
             (ctx.raw_ptr as *const u8).add(r * ctx.row_bytes),
             ctx.row_bytes,
         );
         let val = ferrite::quant::idot::integer(ctx.qtype, row_slice, q).unwrap_or(0.0);
         *(ctx.out_ptr as *mut f32).add(r) = val;
+        r += 1;
     }
 }
 
@@ -1913,29 +1959,31 @@ fn cmd_bench(args: &[String]) -> std::io::Result<()> {
         }
         let ms_f32_1t = (t_f32.elapsed().as_secs_f64() * 1000.0) / 4.0;
 
-        // Warmup 1T INT8 iDot
+        // Warmup 1T INT8 iDot (4-row register-tiled)
         quantized.fill(&act);
-        for (r, slot) in out.iter_mut().enumerate() {
-            *slot = ferrite::quant::idot::integer(
+        {
+            let ctx = BenchPoolCtx {
                 qtype,
-                &raw[r * row_bytes..(r + 1) * row_bytes],
-                &quantized,
-            )
-            .unwrap_or(0.0);
+                raw_ptr: raw.as_ptr() as usize,
+                row_bytes,
+                q_ptr: (&quantized as *const ferrite::quant::activation::Quantized) as usize,
+                out_ptr: out.as_mut_ptr() as usize,
+            };
+            unsafe { bench_pool_worker(&ctx as *const BenchPoolCtx as *const (), 0, rows, 0) };
         }
 
-        // 1T INT8 iDot
+        // 1T INT8 iDot (4-row register-tiled)
         let t_i8_1t = Instant::now();
         for _ in 0..iters {
             quantized.fill(&act);
-            for (r, slot) in out.iter_mut().enumerate() {
-                *slot = ferrite::quant::idot::integer(
-                    qtype,
-                    &raw[r * row_bytes..(r + 1) * row_bytes],
-                    &quantized,
-                )
-                .unwrap_or(0.0);
-            }
+            let ctx = BenchPoolCtx {
+                qtype,
+                raw_ptr: raw.as_ptr() as usize,
+                row_bytes,
+                q_ptr: (&quantized as *const ferrite::quant::activation::Quantized) as usize,
+                out_ptr: out.as_mut_ptr() as usize,
+            };
+            unsafe { bench_pool_worker(&ctx as *const BenchPoolCtx as *const (), 0, rows, 0) };
             std::hint::black_box(&out);
         }
         let dt_1t = t_i8_1t.elapsed().as_secs_f64().max(1e-9);

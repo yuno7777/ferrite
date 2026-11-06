@@ -46,6 +46,11 @@ pub enum GgmlType {
     Q5_K,
     Q6_K,
     Q8_K,
+    IQ2_XXS,
+    IQ3_XXS,
+    IQ4_NL,
+    IQ3_S,
+    IQ4_XS,
     I8,
     I16,
     I32,
@@ -53,8 +58,10 @@ pub enum GgmlType {
     F64,
     BF16,
     F8_E4M3,
-    /// A type we can name but not size — the IQ family, mostly. Inspecting a
-    /// model that uses one works; reading its bytes does not.
+    TQ1_0,
+    TQ2_0,
+    /// A type we can name but not size. Inspecting a model that uses one
+    /// works; reading its bytes does not.
     Other(u32),
 }
 
@@ -75,6 +82,11 @@ impl GgmlType {
             13 => Self::Q5_K,
             14 => Self::Q6_K,
             15 => Self::Q8_K,
+            16 => Self::IQ2_XXS,
+            18 => Self::IQ3_XXS,
+            20 => Self::IQ4_NL,
+            21 => Self::IQ3_S,
+            23 => Self::IQ4_XS,
             24 => Self::I8,
             25 => Self::I16,
             26 => Self::I32,
@@ -82,6 +94,8 @@ impl GgmlType {
             28 => Self::F64,
             30 => Self::BF16,
             31 | 39 => Self::F8_E4M3,
+            34 => Self::TQ1_0,
+            35 => Self::TQ2_0,
             other => Self::Other(other),
         }
     }
@@ -105,6 +119,13 @@ impl GgmlType {
             Self::Q5_K => (256, 176),
             Self::Q6_K => (256, 210),
             Self::Q8_K => (256, 292),
+            Self::IQ2_XXS => (256, 66),
+            Self::IQ3_XXS => (256, 98),
+            Self::IQ4_NL => (32, 18),
+            Self::IQ3_S => (256, 110),
+            Self::IQ4_XS => (256, 136),
+            Self::TQ1_0 => (256, 54),
+            Self::TQ2_0 => (256, 66),
             Self::Other(_) => return None,
         })
     }
@@ -132,6 +153,11 @@ impl GgmlType {
             Self::Q5_K => 13,
             Self::Q6_K => 14,
             Self::Q8_K => 15,
+            Self::IQ2_XXS => 16,
+            Self::IQ3_XXS => 18,
+            Self::IQ4_NL => 20,
+            Self::IQ3_S => 21,
+            Self::IQ4_XS => 23,
             Self::I8 => 24,
             Self::I16 => 25,
             Self::I32 => 26,
@@ -139,6 +165,8 @@ impl GgmlType {
             Self::F64 => 28,
             Self::BF16 => 30,
             Self::F8_E4M3 => 31,
+            Self::TQ1_0 => 34,
+            Self::TQ2_0 => 35,
             Self::Other(id) => id,
         }
     }

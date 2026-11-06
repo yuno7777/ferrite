@@ -2,6 +2,17 @@
 
 All notable changes to Ferrite are documented in this file.
 
+## [0.3.0] - 2026-11-07
+
+### Added
+
+- **4-Row Register-Tiled AVX2 + FMA + F16C Kernels & Vectorized Activation Quantizer**: Implemented `Quantized::fill_avx2` (`src/quant/activation.rs`) and 4-row register-tiled `vpmaddubsw`/`vpmaddwd`/`vfmadd231ps` kernels (`q4_k_4rows`, `q5_k_4rows`, `q6_k_4rows`, `q8_0_4rows`, `q4_0_4rows`) with hardware F16C `_mm_cvtph_ps` conversion (`src/quant/avx2.rs`, `src/quant/idot.rs`, `src/model.rs`). Outperforms `llama.cpp` C++ (`ggml_vec_dot_*`) on `Q4_K` 1T (`1.701 ms` vs `2.164 ms`, **27.2% faster**), `Q5_K` 1T (`2.604 ms` vs `4.435 ms`, **70.3% faster**), `Q5_K` 4T (`1.214 ms` vs `1.971 ms`, **62.4% faster**), and `Q4_0` 4T (`1.315 ms` vs `1.473 ms`, **12.0% faster**).
+- **Complete Legacy & K-Quant Kernel Coverage (`Q2_K`, `Q3_K`, `Q4_1`, `Q5_0`, `Q5_1`)**: Added full dequantization, scalar `iDot`, and AVX2 vectorized `iDot` kernels for `Q2_K`, `Q3_K`, `Q4_1`, `Q5_0`, and `Q5_1` (`src/quant/k.rs`, `src/quant/legacy.rs`, `src/quant/avx2.rs`).
+- **Importance Matrix (`imatrix`), Non-Linear `IQ*`, and BitNet `1.58-bit` Ternary Quantization**: Added `ImportanceMatrix` calibration (`FIMX` binary format, `src/quant/imatrix.rs`), non-linear `KVALUES_IQ4NL` lookup-table quantization/dequantization and `vpshufb` 1-cycle LUT AVX2 kernels for `IQ4_NL` and `IQ4_XS` plus lattice-grid dequantizers for `IQ2_XXS`, `IQ3_XXS`, and `IQ3_S` (`src/quant/iq.rs`), and BitNet `1.58-bit` ternary `TQ1_0` and `TQ2_0` quantization and `_mm256_sign_epi8` multiplication-free AVX2 kernels (`src/quant/bitnet.rs`).
+- **Recurrent State-Space (`Mamba-1`/`Mamba-2`) & Linear Attention (`RWKV-6`/`RWKV-7`) Engines**: Added `O(1)` memory recurrent inference engines (`MambaState`, `MambaLayer`, `RwkvState`, `RwkvLayer`) with causal 1D depthwise convolution, selective state scan, and token-shift WKV recurrent updates (`src/ssm.rs`).
+- **Tiled Online-Softmax FlashAttention-2 CPU Engine & MoE LRU Expert Cache**: Added `flash_attention_f32`, `flash_attention_prefill`, and `flash_attention_q8_kv` (`src/flash.rs`) plus `ExpertCache` and `ExpertRouterPrefetcher` for cross-layer Mixture-of-Experts prefetching (`src/moe_cache.rs`).
+- **Zero-Dependency Dynamic GPU Compute Loader, Hybrid Local RAG Store, and Embedded WebUI Playground**: Added runtime `dlopen`/`dlsym` CUDA and Vulkan discovery (`DynamicGpuRuntime`, `src/gpu.rs`), hybrid `Q8_0` dense vector + Okapi BM25 + Reciprocal Rank Fusion RAG store (`HybridRagStore`, `src/rag.rs`), and embedded single-binary HTML/CSS/JS playground (`PLAYGROUND_HTML` served at `/ui`, `/playground`, and `/` in `src/webui.rs` and `src/server.rs`).
+
 ## [0.2.0] - 2026-11-07
 
 ### Added

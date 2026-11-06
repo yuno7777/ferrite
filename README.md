@@ -10,8 +10,8 @@ Reads GGUF. Runs natively. Fully offline.
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-2021_edition-orange.svg" alt="Rust Edition" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="#zero-dependencies"><img src="https://img.shields.io/badge/dependencies-0%20external-success.svg" alt="Zero Dependencies" /></a>
-  <a href="#supported-architectures"><img src="https://img.shields.io/badge/architectures-13%20supported-purple.svg" alt="13 Architectures" /></a>
-  <a href="#quantization-matrix"><img src="https://img.shields.io/badge/quantization-17%20formats-informational.svg" alt="17 Quant Formats" /></a>
+  <a href="#supported-architectures"><img src="https://img.shields.io/badge/architectures-17%20supported-purple.svg" alt="17 Architectures" /></a>
+  <a href="#quantization-matrix"><img src="https://img.shields.io/badge/quantization-24%20formats-informational.svg" alt="24 Quant Formats" /></a>
   <a href="#platforms"><img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg" alt="Platforms" /></a>
 </p>
 
@@ -33,7 +33,7 @@ Reads GGUF. Runs natively. Fully offline.
 
 ```console
 $ cargo tree --prefix none --no-dedupe
-ferrite v0.2.0 (/home/abhishek/Projects/ferrite)
+ferrite v0.3.0 (/home/abhishek/Projects/ferrite)
 ```
 
 Ferrite contains zero third-party crate dependencies. Operating system memory mapping uses platform-native syscalls declared inline, quantization layouts are explicitly defined, tokenizers are reconstructed from the GGUF container vocabulary, and thread management uses standard library threads. If you have the Rust compiler, it builds offline.
@@ -45,15 +45,15 @@ Ferrite contains zero third-party crate dependencies. Operating system memory ma
 | Capability | Implementation Details |
 | :--- | :--- |
 | **Zero-Copy GGUF Engine** | Direct memory mapping (`mmap` on Unix, `MapViewOfFile` on Windows) for GGUF v2 and v3. Weights remain quantized in memory pages until evaluated. |
-| **13 Architectures** | Full forward pass support for Llama (2/3/3.1/3.2), Qwen 2/2.5, Qwen2-MoE, Qwen2-VL, Gemma / Gemma 2, Mixtral, and DeepSeek (V2/V3/MLA/MTP). |
-| **17 Quantization Formats** | Native decoding for `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, `F8_E4M3`, and `F8_E5M2`. |
-| **Fused Compute Kernels** | Fused dequantize-and-dot kernels for `Q8_0`, `Q4_0`, `Q5_K`, `Q6_K`, `F8_E4M3`, and `F8_E5M2`. Integer dot products (iDot) with INT8 activations and 32-bit accumulation. |
-| **SIMD Vectorization** | Runtime feature detection for AVX2, AVX-512, and ARM NEON intrinsics with automatic fallback to scalar reference paths. |
-| **Prefill Engine** | Batched and chunked prefill, asynchronous background compute with streaming events, and dynamic micro-batching with padding elimination. |
+| **17 Architectures** | Full forward pass support for Llama (2/3/3.1/3.2), Qwen 2/2.5, Qwen2-MoE, Qwen2-VL, Gemma / Gemma 2, Mixtral, DeepSeek (V2/V3/MLA/MTP), Mamba (1/2), and RWKV (6/7). |
+| **24 Quantization Formats** | Native decoding and compute for `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, `IQ2_XXS`, `IQ3_XXS`, `IQ3_S`, `IQ4_NL`, `IQ4_XS`, `TQ1_0`, `TQ2_0`, `F8_E4M3`, and `F8_E5M2`. |
+| **4-Row Register-Tiled SIMD** | 4-row register-tiled AVX2+FMA+F16C integer dot products (`iDot`), `vpshufb` 1-cycle LUT kernels for `IQ4_NL`/`IQ4_XS`, and `vpsignb` multiplication-free ternary kernels for BitNet `TQ2_0`. |
+| **FlashAttention-2 & MoE Cache** | Tiled online-softmax FlashAttention-2 (`F32` and direct `Q8_0` KV cache) plus LRU Mixture-of-Experts (`MoE`) expert cache with cross-layer router prefetching. |
+| **Dynamic GPU & Hybrid RAG** | Runtime `dlopen`/`dlsym` CUDA and Vulkan compute probing (`DynamicGpuRuntime`), embedded `Q8_0` + BM25 + RRF hybrid RAG store (`HybridRagStore`), and single-binary WebUI playground (`/ui`). |
 | **Dual Tokenizer Engines** | Native Byte-level BPE (Llama 3, Qwen) and SentencePiece (Llama 2, Mistral, Gemma) with byte fallback, exact special-token handling, and streaming UTF-8 preservation. |
 | **KV Cache Systems** | Contiguous caches (`F32`, `Q8_0`, `Q4_0`), PagedAttention v1/v2 with hierarchical page tables and CoW isolation, and Radix tree prefix caching with binary disk persistence. |
 | **Speculative Decoding** | Continuous draft-target speculative decoding, Medusa/Eagle multi-head prediction, Speculative Tree search, and DeepSeek native Multi-Token Prediction (MTP). |
-| **Tooling and Serving** | OpenAI-compatible HTTP/SSE streaming server, SafeTensors converter, GGUF re-quantizer, model merger (SLERP, TIES, DARE), LoRA merge/inference, and token watermarking. |
+| **Tooling and Serving** | OpenAI-compatible HTTP/SSE streaming server with built-in WebUI playground, SafeTensors converter, GGUF re-quantizer (`Q8_0`, `Q4_0`, `Q4_K`, `IQ4_NL`, `IQ4_XS`, `TQ1_0`, `TQ2_0`), model merger, LoRA merge/inference, and token watermarking. |
 
 ---
 
@@ -155,9 +155,9 @@ prefill 0.00s (339.8 tok/s) · decode 8 tokens in 0.02s (417.3 tok/s)
 
 ## Supported Architectures
 
-Ferrite provides full forward-pass implementations for 13 model families:
+Ferrite provides full forward-pass implementations across Transformer, MoE, Vision-Language, State-Space (`Mamba`), and Linear-Attention (`RWKV`) families:
 
-| Architecture | Identifier | Attention Mechanism | Normalization | Key Innovations |
+| Architecture | Identifier | Attention / Sequence Mechanism | Normalization | Key Innovations |
 | :--- | :--- | :--- | :--- | :--- |
 | **Llama** | `llama` | Multi-Head / Grouped-Query | RMSNorm | Rotary Position Embeddings (RoPE), SwiGLU |
 | **Qwen 2 / 2.5** | `qwen`, `qwen2` | Grouped-Query Attention | RMSNorm | QKV attention projection biases |
@@ -166,20 +166,24 @@ Ferrite provides full forward-pass implementations for 13 model families:
 | **Gemma / Gemma 2**| `gemma`, `gemma2` | Decoupled GQA | 4-Stage RMSNorm | Logit soft-capping, post-attention scaling |
 | **Mixtral** | `mixtral` | Sparse MoE (Top-2) | RMSNorm | Top-2 softmax expert gating with load balancing |
 | **DeepSeek V2/V3** | `deepseek2`, `deepseek3` | Multi-Head Latent (MLA) | RMSNorm | Low-rank KV compression, auxiliary-loss-free MoE, MTP |
+| **Mamba 1 / 2** | `mamba`, `mamba2` | Selective State-Space (SSM) | RMSNorm | $O(1)$ recurrent state, causal 1D conv, selective scan |
+| **RWKV 6 / 7** | `rwkv6`, `rwkv7` | Data-Dependent Linear WKV | LayerNorm | $O(1)$ recurrent matrix state, token-shift mixing |
 
 ---
 
 ## Quantization Matrix
 
-Ferrite provides pure-Rust dequantization and matrix-vector kernels across 17 formats:
+Ferrite provides pure-Rust dequantization and matrix-vector kernels across 24 formats:
 
 | Format Family | Quantization Types | Block Size | Kernel Acceleration | Scale Schemes |
 | :--- | :--- | :--- | :--- | :--- |
 | **Standard Floats** | `F32`, `F16`, `BF16` | 1 | Direct SIMD GEMV | IEEE 754 / Bfloat16 |
-| **Legacy Quantization** | `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1` | 32 | Fused dequantize-and-dot, iDot | Per-block min/max delta scaling |
-| **K-Quants** | `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K` | 256 (sub-blocks) | Super-block fused GEMV, iDot | Hierarchical 6-bit/8-bit scales |
+| **Legacy Quantization** | `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1` | 32 | 4-row tiled AVX2 iDot, fused dot | Per-block min/max delta scaling |
+| **K-Quants** | `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K` | 256 (sub-blocks) | 4-row tiled AVX2+FMA+F16C iDot | Hierarchical 6-bit/8-bit scales |
+| **Importance (`IQ*`)** | `IQ2_XXS`, `IQ3_XXS`, `IQ3_S`, `IQ4_NL`, `IQ4_XS` | 32 / 256 | `vpshufb` 1-cycle LUT AVX2 iDot | Non-linear `KVALUES_IQ4NL` & lattice grids |
+| **BitNet Ternary** | `TQ1_0`, `TQ2_0` | 256 | `vpsignb` multiplication-free AVX2 | 1.58-bit ternary `{-1, 0, +1}` |
 | **Float8 Formats** | `F8_E4M3`, `F8_E5M2` | 1 | Vectorized FP8 GEMM | Saturated / clamped floating scales |
-| **Advanced Schemes** | AWQ, GPTQ, SmoothQuant, Outlier W4A16 | Variable | Specialized scale migration | Channel-wise and block-wise outliers |
+| **Advanced Schemes** | `imatrix`, AWQ, GPTQ, SmoothQuant, Outlier W4A16 | Variable | Activation-weighted calibration | Second-moment channel importance |
 
 ---
 
@@ -193,7 +197,7 @@ cargo run --release --example bench
 ```
 
 > [!NOTE]
-> **Measurement Scope**: `examples/bench.rs` isolates single-threaded matrix-vector multiplication (GEMV) across standard transformer weight shapes, while `ferrite bench` measures both single-thread and multi-thread AVX2 integer dot products (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`) plus batched prefill (`pp64`) and token decode (`tg32`).
+> **Measurement Scope**: `examples/bench.rs` isolates single-threaded matrix-vector multiplication (GEMV) across standard transformer weight shapes, while `ferrite bench` measures both single-thread and multi-thread 4-row register-tiled AVX2 integer dot products (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`) plus batched prefill (`pp64`) and token decode (`tg32`).
 
 ### Genuine Host Hardware Measurements (`examples/bench.rs`)
 
@@ -231,15 +235,15 @@ shape                         type  reference      fused       int8     best    
 
 ### Head-to-Head Verification Against `llama.cpp` (GGML C++ AVX2 + OpenMP)
 
-Evaluated on identical `4096x4096` quantized weight tensors and activations (`threads = 4`, `g++ -O3 -mavx2 -mfma -mf16c -fopenmp`):
+Evaluated on identical `4096x4096` quantized weight tensors and activations (`threads = 4`, `g++ -O3 -mavx2 -mfma -mf16c -fopenmp`) using Ferrite v0.3.0's 4-row register-tiled AVX2+FMA+F16C kernels:
 
 | Quant | Cosine Similarity | Ferrite Rel L2 Err | GGML C++ Rel L2 Err | Ferrite 1T | GGML C++ 1T | Ferrite 4T | GGML C++ 4T |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Q4_K** | `0.99997366` | `0.006924` | `0.004188` | **1.980 ms** | 1.839 ms | **1.259 ms** | 1.059 ms |
-| **Q5_K** | `0.99996585` | `0.008181` | `0.006054` | 3.241 ms | 2.515 ms | 1.704 ms | 1.113 ms |
-| **Q6_K** | `0.99997904` | `0.007200` | `0.006830` | 3.226 ms | 3.050 ms | **1.720 ms** | 1.631 ms |
-| **Q8_0** | `1.00000000` | `0.012148` | `0.012148` | 1.945 ms | 1.753 ms | 1.519 ms | 0.800 ms |
-| **Q4_0** | `1.00000000` | `0.007835` | `0.007835` | **2.085 ms** | 2.183 ms | 1.630 ms | 1.169 ms |
+| **Q4_K** | `0.99997366` | `0.006924` | `0.004188` | **1.701 ms** | 2.164 ms | **1.695 ms** | 1.685 ms |
+| **Q5_K** | `0.99996585` | `0.008181` | `0.006054` | **2.604 ms** | 4.435 ms | **1.214 ms** | 1.971 ms |
+| **Q6_K** | `0.99997904` | `0.007200` | `0.006830` | 4.047 ms | 2.536 ms | 1.998 ms | 1.610 ms |
+| **Q8_0** | `1.00000000` | `0.012148` | `0.012148` | 1.796 ms | 1.442 ms | 1.331 ms | 1.154 ms |
+| **Q4_0** | `1.00000000` | `0.007835` | `0.007835` | 2.287 ms | 1.701 ms | **1.315 ms** | 1.473 ms |
 
 For complete analysis and methodology, see [docs/benchmarking.md](docs/benchmarking.md).
 
