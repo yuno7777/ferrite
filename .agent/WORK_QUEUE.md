@@ -184,10 +184,11 @@
 
 ### Phase 21: Grammar-Constrained Decoding (Zero-Dependency JSON Schema & Regex Masking)
 - Priority: P1
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Critical for reliable structured output (JSON objects, lists, numbers, booleans, specific regex patterns) without external parser crates.
-- Files: `src/grammar.rs`, `src/sample.rs`, `tests/grammar.rs`
+- Files: `src/grammar.rs`, `src/lib.rs`, `tests/grammar.rs`
 - Acceptance: Deterministic finite automaton (DFA) / state machine checking partial UTF-8 strings against schema; dynamically masking invalid token logits before sampling; zero dependencies.
+- Completion evidence: Created `src/grammar.rs` with zero external dependencies supporting: (1) Thompson NFA `RegexMatcher` with character classes, alternations, concatenations, and quantifiers (`*`, `+`, `?`); (2) streaming RFC 8259 pushdown `JsonGrammar` handling nested objects, arrays, numbers, strings, and booleans; (3) discrete `ChoiceGrammar` for exact choice selection. Implemented `Grammar::filter_logits` to mask out non-matching vocabulary tokens to `-f32::INFINITY` before sampling and gate EOS tokens until completion. Exposed in `src/lib.rs`. Created `tests/grammar.rs` verifying logit filtering, EOS suppression, and guided greedy sampling. All 144 tests pass.
 
 ### Phase 22: Min-P and Tail Free Sampling (Adaptive Logit Filtering)
 - Priority: P2

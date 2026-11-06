@@ -133,12 +133,20 @@
    - Implemented `match_prefix`, `insert`, `apply_prefix_to_sequence`, and `evict_lru` leaf eviction.
    - Exposed `RadixCache` and `RadixNode` in `src/lib.rs`.
    - Added integration test suite in `tests/prefix.rs` validating exact bit-level logit equivalence for cached prefix prompt reuse, multi-turn dialogue branching, and LRU eviction under memory bounds.
-23. Verification after Phase 20:
-   - `cargo test --all-targets` passes (141 tests).
+24. Phase 21 Grammar-Constrained Decoding:
+   - Created `src/grammar.rs` with zero-dependency structural decoders:
+     - `RegexMatcher` with Thompson NFA byte-level simulation, character classes, and quantifiers.
+     - `JsonGrammar` RFC 8259 streaming pushdown parser supporting nested objects, arrays, booleans, and numbers.
+     - `ChoiceGrammar` prefix-guided discrete string selection.
+   - Built `Grammar::filter_logits` to mask non-conforming tokens to `-f32::INFINITY` and suppress EOS until completion.
+   - Exposed `Grammar`, `RegexMatcher`, `JsonGrammar`, `ChoiceGrammar` in `src/lib.rs`.
+   - Created integration test suite `tests/grammar.rs` verifying logit filtering, EOS suppression, and guided greedy token sampling.
+25. Verification after Phase 21:
+   - `cargo test --all-targets` passes (144 tests).
    - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
    - `cargo clippy --all-targets -- -D warnings` passes without warnings.
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 21: Grammar-Constrained Decoding (Zero-Dependency JSON Schema & Regex Masking; status QUEUED).
+- Phase 22: Min-P and Tail Free Sampling (Adaptive Logit Filtering; status QUEUED).

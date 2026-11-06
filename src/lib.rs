@@ -12,6 +12,7 @@
 //! ```
 
 pub mod gguf;
+pub mod grammar;
 pub mod kv;
 pub mod lmstudio;
 pub mod lora;
@@ -28,6 +29,7 @@ pub mod synth;
 pub mod tokenizer;
 
 pub use gguf::{GgmlType, Gguf, TensorInfo, Value};
+pub use grammar::{ChoiceGrammar, Grammar, JsonGrammar, RegexMatcher};
 pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType};
 pub use lora::{LoraAdapter, LoraPair};
 pub use map::Mmap;
