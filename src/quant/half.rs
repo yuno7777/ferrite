@@ -25,6 +25,12 @@ pub fn f16(bits: u16) -> f32 {
     }
 }
 
+/// Alias for [`f16`] used across specialized microkernel tables.
+#[inline(always)]
+pub fn f16_to_f32(bits: u16) -> f32 {
+    f16(bits)
+}
+
 /// bfloat16 to f32 — the top 16 bits of an f32, so this is a shift.
 #[inline(always)]
 pub fn bf16(bits: u16) -> f32 {
