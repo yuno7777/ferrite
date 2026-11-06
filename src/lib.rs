@@ -32,6 +32,7 @@ pub mod quant;
 pub mod sample;
 pub mod scheduler;
 pub mod server;
+pub mod sparse;
 pub mod speculative;
 pub mod split;
 pub mod synth;
@@ -68,6 +69,7 @@ pub use scheduler::{
     BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
 };
 pub use server::{Server, ServerConfig};
+pub use sparse::{SparseAttentionMask, SparsePattern};
 pub use speculative::{
     DraftKvRecycler, MedusaEngine, MedusaHead, MtpEngine, MtpTreeEngine, SpeculativeEngine,
     SpeculativeRecycleEngine, SpeculativeStats, SpeculativeTreeEngine,
