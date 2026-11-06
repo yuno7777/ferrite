@@ -141,7 +141,18 @@
 
 ### Phase 16: Zero-Copy LoRA Adapter Application
 - Priority: P1
-- Status: READY TO IMPLEMENT
+- Status: COMPLETED
 - Rationale: Load and blend GGUF LoRA adapter tensors (`lora_a`, `lora_b`) at runtime with scaling alpha, either dynamically fusing into activations or into weights without duplicating model storage.
-- Files: `src/lora.rs`, `src/model.rs`, `tests/lora.rs`
+- Files: `src/lora.rs`, `src/model.rs`, `src/lib.rs`, `src/main.rs`, `tests/lora.rs`
 - Acceptance: Load LoRA GGUF, compute low-rank additive delta `(A * B) * (alpha / rank)`, verify output against reference adapter forward pass.
+- Completion evidence: Added zero-copy GGUF-bound adapter pairs, alpha/rank scaling, decode and batched activation deltas, optional dense accumulation, and dynamic binding/clearing on model projections. Wired LoRA through decode, prefill, and `prefill_all_logits` (including speculative decoding). Reference dense-delta and batched-vs-single-token tests pass.
+- Tests: `tests/lora.rs::lora_adapter_forward_and_prefill_match`, `tests/lora.rs::lora_matches_baked_weights_mathematically`. All 127 tests pass.
+
+## Backlog
+
+### Phase 17: Chunked Prefill & Bounded-Latency Prompt Scheduling
+- Priority: P1
+- Status: READY TO IMPLEMENT
+- Rationale: Very long prompt ingestion (e.g. 16k-64k tokens) monopolizes execution threads and causes high time-to-first-token (TTFT) tail latencies. Chunked prefill partitions large prompts into bounded token chunks (e.g. 512 tokens), interleaving prompt chunk ingestion with active sequence decode steps to maintain bounded response latency.
+- Files: `src/model.rs`, `src/server.rs`, `tests/model.rs`
+- Acceptance: Break prompt ingestion into configurable chunk sizes; verify identical KV-cache states and final logits against full batched prefill; support resume/continuation across chunks.

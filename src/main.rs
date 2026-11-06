@@ -32,6 +32,7 @@ run/serve options:
   --port <port>   port to bind (default: 8080)
   --draft <model> draft model for speculative decoding acceleration
   --spec-k <k>    speculative candidate count (default 3)
+  --lora <adapter> apply GGUF LoRA adapter dynamically
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -257,6 +258,11 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     };
     let spec_k: usize = flag(args, "--spec-k", 3)?;
 
+    let lora_query: Option<String> = {
+        let at = args.iter().position(|a| a == "--lora");
+        at.and_then(|i| args.get(i + 1).cloned())
+    };
+
     // Positionals are whatever is left once flags and their values are removed.
     let flags = [
         "-n",
@@ -268,6 +274,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--threads",
         "--draft",
         "--spec-k",
+        "--lora",
     ];
     let mut positional = Vec::new();
     let mut index = 0;
@@ -292,7 +299,18 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let path = lmstudio::resolve(&query)?;
     let gguf = Gguf::open(&path)?;
     let tokenizer = Tokenizer::from_gguf(&gguf)?;
-    let model = Model::load(&gguf)?;
+    let mut model = Model::load(&gguf)?;
+
+    let lora_gguf = if let Some(lq) = &lora_query {
+        let lora_path = lmstudio::resolve(lq)?;
+        Some(Gguf::open(&lora_path)?)
+    } else {
+        None
+    };
+    if let Some(lgguf) = &lora_gguf {
+        let adapter = ferrite::lora::LoraAdapter::load(lgguf, None)?;
+        model.apply_lora(adapter);
+    }
     let mut state = State::with_context(&model.config, context);
     if threads > 0 {
         state.threads = threads;
@@ -462,6 +480,7 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
         .map(|p| p.get())
         .unwrap_or(4);
     let mut query = None;
+    let mut lora: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -490,6 +509,12 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
                     threads = t;
                 }
             }
+            "--lora" => {
+                i += 1;
+                if let Some(l) = args.get(i) {
+                    lora = Some(l.clone());
+                }
+            }
             arg if !arg.starts_with('-') && query.is_none() => {
                 query = Some(arg.to_string());
             }
@@ -508,6 +533,12 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
     let path = lmstudio::resolve(&query)?;
     let gguf = Box::leak(Box::new(Gguf::open(&path)?));
     let model = Box::leak(Box::new(Model::load(gguf)?));
+    if let Some(lq) = &lora {
+        let lora_path = lmstudio::resolve(lq)?;
+        let lora_gguf = Box::leak(Box::new(Gguf::open(&lora_path)?));
+        let adapter = ferrite::lora::LoraAdapter::load(lora_gguf, None)?;
+        model.apply_lora(adapter);
+    }
     let tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(gguf)?));
 
     let config = ferrite::server::ServerConfig {

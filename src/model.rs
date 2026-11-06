@@ -589,16 +589,23 @@ pub struct Layer<'a> {
     pub post_attn_norm: Option<Vec<f32>>,
     pub wq: Weight<'a>,
     pub bq: Option<Vec<f32>>,
+    pub lora_wq: Option<crate::lora::LoraPair<'a>>,
     pub wk: Weight<'a>,
     pub bk: Option<Vec<f32>>,
+    pub lora_wk: Option<crate::lora::LoraPair<'a>>,
     pub wv: Weight<'a>,
     pub bv: Option<Vec<f32>>,
+    pub lora_wv: Option<crate::lora::LoraPair<'a>>,
     pub wo: Weight<'a>,
+    pub lora_wo: Option<crate::lora::LoraPair<'a>>,
     pub ffn_norm: Vec<f32>,
     pub post_ffn_norm: Option<Vec<f32>>,
     pub gate: Weight<'a>,
+    pub lora_gate: Option<crate::lora::LoraPair<'a>>,
     pub up: Weight<'a>,
+    pub lora_up: Option<crate::lora::LoraPair<'a>>,
     pub down: Weight<'a>,
+    pub lora_down: Option<crate::lora::LoraPair<'a>>,
 }
 
 pub struct Model<'a> {
@@ -607,6 +614,7 @@ pub struct Model<'a> {
     pub layers: Vec<Layer<'a>>,
     pub output_norm: Vec<f32>,
     pub output: Weight<'a>,
+    pub lora_output: Option<crate::lora::LoraPair<'a>>,
 }
 
 /// Read a small tensor straight into f32. Norm weights are one vector each, so
@@ -640,19 +648,26 @@ impl<'a> Model<'a> {
                 )?,
                 wq: Weight::bind(gguf, &format!("blk.{index}.attn_q.weight"))?,
                 bq: load_vector_optional(gguf, &format!("blk.{index}.attn_q.bias"))?,
+                lora_wq: None,
                 wk: Weight::bind(gguf, &format!("blk.{index}.attn_k.weight"))?,
                 bk: load_vector_optional(gguf, &format!("blk.{index}.attn_k.bias"))?,
+                lora_wk: None,
                 wv: Weight::bind(gguf, &format!("blk.{index}.attn_v.weight"))?,
                 bv: load_vector_optional(gguf, &format!("blk.{index}.attn_v.bias"))?,
+                lora_wv: None,
                 wo: Weight::bind(gguf, &format!("blk.{index}.attn_output.weight"))?,
+                lora_wo: None,
                 ffn_norm: load_vector(gguf, &format!("blk.{index}.ffn_norm.weight"))?,
                 post_ffn_norm: load_vector_optional(
                     gguf,
                     &format!("blk.{index}.post_ffn_norm.weight"),
                 )?,
                 gate: Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))?,
+                lora_gate: None,
                 up: Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))?,
+                lora_up: None,
                 down: Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))?,
+                lora_down: None,
             });
         }
 
@@ -669,7 +684,56 @@ impl<'a> Model<'a> {
             layers,
             output_norm: load_vector(gguf, "output_norm.weight")?,
             output,
+            lora_output: None,
         })
+    }
+
+    /// Dynamically bind a parsed LoRA adapter to model layers.
+    pub fn apply_lora(&mut self, lora: crate::lora::LoraAdapter<'a>) {
+        for (name, pair) in lora.pairs {
+            if name.starts_with("output") {
+                self.lora_output = Some(pair);
+                continue;
+            }
+            if let Some(rest) = name.strip_prefix("blk.") {
+                if let Some((idx_str, proj)) = rest.split_once('.') {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if let Some(layer) = self.layers.get_mut(idx) {
+                            if proj.starts_with("attn_q") {
+                                layer.lora_wq = Some(pair);
+                            } else if proj.starts_with("attn_k") {
+                                layer.lora_wk = Some(pair);
+                            } else if proj.starts_with("attn_v") {
+                                layer.lora_wv = Some(pair);
+                            } else if proj.starts_with("attn_output") || proj.starts_with("attn_wo")
+                            {
+                                layer.lora_wo = Some(pair);
+                            } else if proj.starts_with("ffn_gate") {
+                                layer.lora_gate = Some(pair);
+                            } else if proj.starts_with("ffn_up") {
+                                layer.lora_up = Some(pair);
+                            } else if proj.starts_with("ffn_down") {
+                                layer.lora_down = Some(pair);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clear all attached LoRA adapter weights.
+    pub fn clear_lora(&mut self) {
+        self.lora_output = None;
+        for layer in &mut self.layers {
+            layer.lora_wq = None;
+            layer.lora_wk = None;
+            layer.lora_wv = None;
+            layer.lora_wo = None;
+            layer.lora_gate = None;
+            layer.lora_up = None;
+            layer.lora_down = None;
+        }
     }
 
     /// One decode step: token in, logits out, KV cache extended by one.
@@ -726,6 +790,10 @@ impl<'a> Model<'a> {
                     *slot += b;
                 }
             }
+            if let Some(l) = &layer.lora_wq {
+                l.apply(&xb[..c.embedding], q)?;
+            }
+
             layer
                 .wk
                 .matvec_threaded(&xb[..c.embedding], k, *threads, workspace)?;
@@ -734,6 +802,10 @@ impl<'a> Model<'a> {
                     *slot += b;
                 }
             }
+            if let Some(l) = &layer.lora_wk {
+                l.apply(&xb[..c.embedding], k)?;
+            }
+
             layer
                 .wv
                 .matvec_threaded(&xb[..c.embedding], v, *threads, workspace)?;
@@ -741,6 +813,9 @@ impl<'a> Model<'a> {
                 for (slot, b) in v.iter_mut().zip(bv) {
                     *slot += b;
                 }
+            }
+            if let Some(l) = &layer.lora_wv {
+                l.apply(&xb[..c.embedding], v)?;
             }
 
             // Position is baked into the query and key, never into the value.
@@ -799,6 +874,9 @@ impl<'a> Model<'a> {
                 *threads,
                 workspace,
             )?;
+            if let Some(l) = &layer.lora_wo {
+                l.apply(&xb[..att_dim], &mut xb2[..c.embedding])?;
+            }
             if let Some(post_attn_norm) = &layer.post_attn_norm {
                 ops::rms_norm(
                     &xb2[..c.embedding],
@@ -819,9 +897,15 @@ impl<'a> Model<'a> {
             layer
                 .gate
                 .matvec_threaded(&xb[..c.embedding], hb, *threads, workspace)?;
+            if let Some(l) = &layer.lora_gate {
+                l.apply(&xb[..c.embedding], hb)?;
+            }
             layer
                 .up
                 .matvec_threaded(&xb[..c.embedding], hb2, *threads, workspace)?;
+            if let Some(l) = &layer.lora_up {
+                l.apply(&xb[..c.embedding], hb2)?;
+            }
             // SwiGLU: the gate is squashed, the up projection is not.
             for (gate, up) in hb.iter_mut().zip(hb2.iter()) {
                 *gate = ops::silu(*gate) * up;
@@ -829,6 +913,9 @@ impl<'a> Model<'a> {
             layer
                 .down
                 .matvec_threaded(hb, &mut xb2[..c.embedding], *threads, workspace)?;
+            if let Some(l) = &layer.lora_down {
+                l.apply(hb, &mut xb2[..c.embedding])?;
+            }
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 ops::rms_norm(
                     &xb2[..c.embedding],
@@ -849,6 +936,9 @@ impl<'a> Model<'a> {
         ops::rms_norm(x, &self.output_norm, c.eps, &mut xb[..c.embedding]);
         self.output
             .matvec_threaded(&xb[..c.embedding], logits, *threads, workspace)?;
+        if let Some(l) = &self.lora_output {
+            l.apply(&xb[..c.embedding], logits)?;
+        }
         if let Some(cap) = c.final_logit_softcapping {
             for logit in logits.iter_mut() {
                 *logit = cap * (*logit / cap).tanh();
@@ -939,6 +1029,10 @@ impl<'a> Model<'a> {
                     }
                 }
             }
+            if let Some(l) = &layer.lora_wq {
+                l.apply_batched_threaded(&xb_batch, n, &mut q_batch, *threads)?;
+            }
+
             layer
                 .wk
                 .matmul_threaded(&xb_batch, &mut k_batch, n, *threads, workspace)?;
@@ -950,6 +1044,10 @@ impl<'a> Model<'a> {
                     }
                 }
             }
+            if let Some(l) = &layer.lora_wk {
+                l.apply_batched_threaded(&xb_batch, n, &mut k_batch, *threads)?;
+            }
+
             layer
                 .wv
                 .matmul_threaded(&xb_batch, &mut v_batch, n, *threads, workspace)?;
@@ -960,6 +1058,9 @@ impl<'a> Model<'a> {
                         *slot += val;
                     }
                 }
+            }
+            if let Some(l) = &layer.lora_wv {
+                l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
             }
 
             for b in 0..n {
@@ -1026,6 +1127,9 @@ impl<'a> Model<'a> {
             layer
                 .wo
                 .matmul_threaded(&att_batch, &mut xb2_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_wo {
+                l.apply_batched_threaded(&att_batch, n, &mut xb2_batch, *threads)?;
+            }
             if let Some(post_attn_norm) = &layer.post_attn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -1050,9 +1154,15 @@ impl<'a> Model<'a> {
             layer
                 .gate
                 .matmul_threaded(&xb_batch, &mut hb_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_gate {
+                l.apply_batched_threaded(&xb_batch, n, &mut hb_batch, *threads)?;
+            }
             layer
                 .up
                 .matmul_threaded(&xb_batch, &mut hb2_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_up {
+                l.apply_batched_threaded(&xb_batch, n, &mut hb2_batch, *threads)?;
+            }
             for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
                 *gate = ops::silu(*gate) * up;
             }
@@ -1060,6 +1170,9 @@ impl<'a> Model<'a> {
             layer
                 .down
                 .matmul_threaded(&hb_batch, &mut xb2_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_down {
+                l.apply_batched_threaded(&hb_batch, n, &mut xb2_batch, *threads)?;
+            }
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -1082,6 +1195,9 @@ impl<'a> Model<'a> {
         ops::rms_norm(last_x, &self.output_norm, c.eps, last_xb);
         self.output
             .matvec_threaded(last_xb, logits, *threads, workspace)?;
+        if let Some(l) = &self.lora_output {
+            l.apply(last_xb, logits)?;
+        }
         if let Some(cap) = c.final_logit_softcapping {
             for logit in logits.iter_mut() {
                 *logit = cap * (*logit / cap).tanh();
@@ -1186,6 +1302,9 @@ impl<'a> Model<'a> {
                     }
                 }
             }
+            if let Some(l) = &layer.lora_wq {
+                l.apply_batched_threaded(&xb_batch, n, &mut q_batch, *threads)?;
+            }
             layer
                 .wk
                 .matmul_threaded(&xb_batch, &mut k_batch, n, *threads, workspace)?;
@@ -1197,6 +1316,9 @@ impl<'a> Model<'a> {
                     }
                 }
             }
+            if let Some(l) = &layer.lora_wk {
+                l.apply_batched_threaded(&xb_batch, n, &mut k_batch, *threads)?;
+            }
             layer
                 .wv
                 .matmul_threaded(&xb_batch, &mut v_batch, n, *threads, workspace)?;
@@ -1207,6 +1329,18 @@ impl<'a> Model<'a> {
                         *slot += val;
                     }
                 }
+            }
+            if let Some(l) = &layer.lora_wq {
+                l.apply_batched_threaded(&xb_batch, n, &mut q_batch, *threads)?;
+            }
+            if let Some(l) = &layer.lora_wk {
+                l.apply_batched_threaded(&xb_batch, n, &mut k_batch, *threads)?;
+            }
+            if let Some(l) = &layer.lora_wv {
+                l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
+            }
+            if let Some(l) = &layer.lora_wv {
+                l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
             }
 
             for b in 0..n {
@@ -1273,6 +1407,9 @@ impl<'a> Model<'a> {
             layer
                 .wo
                 .matmul_threaded(&att_batch, &mut xb2_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_wo {
+                l.apply_batched_threaded(&att_batch, n, &mut xb2_batch, *threads)?;
+            }
             if let Some(post_attn_norm) = &layer.post_attn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -1297,9 +1434,21 @@ impl<'a> Model<'a> {
             layer
                 .gate
                 .matmul_threaded(&xb_batch, &mut hb_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_gate {
+                l.apply_batched_threaded(&xb_batch, n, &mut hb_batch, *threads)?;
+            }
+            if let Some(l) = &layer.lora_gate {
+                l.apply_batched_threaded(&xb_batch, n, &mut hb_batch, *threads)?;
+            }
             layer
                 .up
                 .matmul_threaded(&xb_batch, &mut hb2_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_up {
+                l.apply_batched_threaded(&xb_batch, n, &mut hb2_batch, *threads)?;
+            }
+            if let Some(l) = &layer.lora_up {
+                l.apply_batched_threaded(&xb_batch, n, &mut hb2_batch, *threads)?;
+            }
             for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
                 *gate = ops::silu(*gate) * up;
             }
@@ -1307,6 +1456,12 @@ impl<'a> Model<'a> {
             layer
                 .down
                 .matmul_threaded(&hb_batch, &mut xb2_batch, n, *threads, workspace)?;
+            if let Some(l) = &layer.lora_down {
+                l.apply_batched_threaded(&hb_batch, n, &mut xb2_batch, *threads)?;
+            }
+            if let Some(l) = &layer.lora_down {
+                l.apply_batched_threaded(&hb_batch, n, &mut xb2_batch, *threads)?;
+            }
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -1331,6 +1486,9 @@ impl<'a> Model<'a> {
 
         self.output
             .matmul_threaded(&xb_batch, all_logits, n, *threads, workspace)?;
+        if let Some(l) = &self.lora_output {
+            l.apply_batched_threaded(&xb_batch, n, all_logits, *threads)?;
+        }
 
         if let Some(cap) = c.final_logit_softcapping {
             for logit in all_logits.iter_mut() {

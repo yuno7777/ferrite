@@ -13,6 +13,7 @@
 
 pub mod gguf;
 pub mod lmstudio;
+pub mod lora;
 pub mod map;
 pub mod model;
 pub mod ops;
@@ -24,6 +25,7 @@ pub mod synth;
 pub mod tokenizer;
 
 pub use gguf::{GgmlType, Gguf, TensorInfo, Value};
+pub use lora::{LoraAdapter, LoraPair};
 pub use map::Mmap;
 pub use server::{Server, ServerConfig};
 pub use speculative::{SpeculativeEngine, SpeculativeStats};

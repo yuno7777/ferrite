@@ -1,6 +1,6 @@
 # Recovery Checkpoint
 
-- Timestamp: 2026-11-06T05:37:19+05:30
+- Timestamp: 2026-11-06T06:02:55+05:30
 - Repository: `/home/abhishek/Projects/ferrite-audit`
 - Branch: `codex/audit-baseline`
 - Baseline commit: `e174548e30b36271c4302646cdb9fe861926321b`
@@ -77,11 +77,26 @@
    - Removed materialized `att` vector from `State`, eliminating $O(\text{context})$ memory allocations.
    - Added `ops::tests::tiled_online_attention_matches_materialized_reference`.
 13. Verification:
-   - `cargo test --all-targets` passes (125 tests).
+   - `cargo test --all-targets` passes (127 tests).
    - Strictly 0 external dependencies (`cargo tree` is 1 line).
    - `cargo clippy --all-targets -- -D warnings` passes without warnings.
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
+## Completed in This Execution
+14. Phase 16 Zero-Copy LoRA Adapter Application:
+   - Added GGUF adapter loading for `lora_a`/`lora_b` pairs, with metadata or override alpha and `alpha / rank` scaling.
+   - Added activation-side low-rank delta application for decode, batched prefill, and threaded batched prefill; base model tensor storage remains bound to the original GGUF.
+   - Added optional dense delta accumulation and model APIs to attach or clear adapter projections.
+   - Wired LoRA through `forward`, `prefill`, and `prefill_all_logits`, including the speculative decoding verification path.
+   - Added CLI support via `--lora <adapter>` in both `ferrite run` and `ferrite serve`.
+   - Added integration test suite `tests/lora.rs` verifying bit-identical logits between batched prefill and sequential forward, and exact mathematical match against dense baked weights.
+15. Verification after Phase 16:
+   - `cargo test --all-targets` passes (127 tests).
+   - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
+   - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+   - `cargo fmt --check` passes without differences.
+   - `git diff --check` passes without errors.
+
 ## Next Up in Work Queue
-- Phase 16: Zero-Copy LoRA Adapter Application (GGUF LoRA adapter loading, low-rank additive delta `(A * B) * (alpha / rank)`, dynamic fusion; status READY TO IMPLEMENT).
+- Phase 17: Chunked Prefill & Bounded-Latency Prompt Scheduling (partitioning long prompt ingestion into bounded token chunks with stateful resumption to bound TTFT and interleave decode steps; status READY TO IMPLEMENT).
