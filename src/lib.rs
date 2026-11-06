@@ -87,8 +87,10 @@ pub use scheduler::{
 pub use server::{Server, ServerConfig};
 pub use sparse::{SparseAttentionMask, SparsePattern};
 pub use speculative::{
-    DraftKvRecycler, MedusaEngine, MedusaHead, MtpEngine, MtpTreeEngine, SpeculativeEngine,
-    SpeculativeRecycleEngine, SpeculativeStats, SpeculativeTreeEngine,
+    calibrate_draft_temperature, eval_adaptive_acceptance, AdaptiveSpeculativeEngine,
+    AdaptiveThresholdTracker, DraftKvRecycler, MedusaEngine, MedusaHead, MtpEngine, MtpTreeEngine,
+    SpeculativeAdaptiveConfig, SpeculativeEngine, SpeculativeRecycleEngine, SpeculativeStats,
+    SpeculativeTreeEngine,
 };
 pub use split::{split_gguf, SplitOptions};
 pub use template::{ChatMessage, ChatTemplate};

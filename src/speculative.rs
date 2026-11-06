@@ -1126,3 +1126,274 @@ impl<'a> SpeculativeRecycleEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// Configuration for adaptive speculative acceptance thresholding and draft temperature calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeculativeAdaptiveConfig {
+    /// Baseline target acceptance threshold in [0.0, 1.0].
+    pub base_threshold: f32,
+    /// Minimum allowed adaptive threshold.
+    pub min_threshold: f32,
+    /// Maximum allowed adaptive threshold.
+    pub max_threshold: f32,
+    /// Rate at which the adaptive threshold adjusts per feedback observation.
+    pub adaptation_rate: f32,
+    /// Target desired acceptance rate.
+    pub target_acceptance_rate: f32,
+    /// Calibrated draft temperature scale multiplier.
+    pub temperature_scale: f32,
+}
+
+impl Default for SpeculativeAdaptiveConfig {
+    fn default() -> Self {
+        Self {
+            base_threshold: 0.5,
+            min_threshold: 0.1,
+            max_threshold: 0.9,
+            adaptation_rate: 0.05,
+            target_acceptance_rate: 0.75,
+            temperature_scale: 1.0,
+        }
+    }
+}
+
+/// Calibrates draft model temperature by minimizing the Kullback-Leibler (KL) divergence
+/// between the target model probability distribution and the temperature-scaled draft distribution.
+pub fn calibrate_draft_temperature(
+    draft_logits: &[f32],
+    target_logits: &[f32],
+    target_temp: f32,
+) -> f32 {
+    let vocab = draft_logits.len();
+    if vocab == 0 || target_logits.len() != vocab {
+        return 1.0;
+    }
+
+    let t_temp = target_temp.max(0.01);
+    let mut p_target = vec![0.0f32; vocab];
+    let max_target = target_logits
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut sum_target = 0.0f32;
+    for (i, &l) in target_logits.iter().enumerate() {
+        let p = ((l - max_target) / t_temp).exp();
+        p_target[i] = p;
+        sum_target += p;
+    }
+    let inv_sum_target = if sum_target > 0.0 {
+        1.0 / sum_target
+    } else {
+        0.0
+    };
+    for p in p_target.iter_mut() {
+        *p *= inv_sum_target;
+    }
+
+    let mut best_scale = 1.0f32;
+    let mut min_kl = f32::INFINITY;
+
+    for step in 0..31 {
+        let scale = 0.5 + (step as f32) * 0.05;
+        let draft_temp = (t_temp * scale).max(0.01);
+
+        let max_draft = draft_logits
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut sum_draft = 0.0f32;
+        let mut q_draft = vec![0.0f32; vocab];
+        for (i, &l) in draft_logits.iter().enumerate() {
+            let q = ((l - max_draft) / draft_temp).exp();
+            q_draft[i] = q;
+            sum_draft += q;
+        }
+        let inv_sum_draft = if sum_draft > 0.0 {
+            1.0 / sum_draft
+        } else {
+            0.0
+        };
+
+        let mut kl = 0.0f32;
+        for i in 0..vocab {
+            let p = p_target[i];
+            let q = q_draft[i] * inv_sum_draft;
+            if p > 1e-12 && q > 1e-12 {
+                kl += p * (p / q).ln();
+            }
+        }
+
+        if kl < min_kl {
+            min_kl = kl;
+            best_scale = scale;
+        }
+    }
+
+    best_scale
+}
+
+/// Evaluates adaptive acceptance condition comparing target probability to draft probability.
+pub fn eval_adaptive_acceptance(target_prob: f32, draft_prob: f32, threshold: f32) -> bool {
+    if draft_prob <= 0.0 {
+        return target_prob > 0.0;
+    }
+    let ratio = target_prob / draft_prob;
+    ratio >= threshold
+}
+
+/// Dynamic tracker adjusting speculative acceptance thresholds based on empirical acceptance rate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveThresholdTracker {
+    pub config: SpeculativeAdaptiveConfig,
+    pub current_threshold: f32,
+    pub recent_accepted: usize,
+    pub recent_total: usize,
+}
+
+impl AdaptiveThresholdTracker {
+    pub fn new(config: SpeculativeAdaptiveConfig) -> Self {
+        let current_threshold = config.base_threshold;
+        Self {
+            config,
+            current_threshold,
+            recent_accepted: 0,
+            recent_total: 0,
+        }
+    }
+
+    /// Record an acceptance decision and adjust the threshold dynamically.
+    pub fn record_decision(&mut self, accepted: bool) {
+        self.recent_total += 1;
+        if accepted {
+            self.recent_accepted += 1;
+        }
+
+        let current_rate = self.recent_accepted as f32 / self.recent_total as f32;
+        if current_rate > self.config.target_acceptance_rate {
+            self.current_threshold = (self.current_threshold - self.config.adaptation_rate)
+                .max(self.config.min_threshold);
+        } else if current_rate < self.config.target_acceptance_rate {
+            self.current_threshold = (self.current_threshold + self.config.adaptation_rate)
+                .min(self.config.max_threshold);
+        }
+    }
+}
+
+/// Speculative engine with adaptive acceptance thresholding and draft temperature calibration.
+pub struct AdaptiveSpeculativeEngine<'a> {
+    pub target: &'a Model<'a>,
+    pub draft: &'a Model<'a>,
+    pub tracker: AdaptiveThresholdTracker,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> AdaptiveSpeculativeEngine<'a> {
+    pub fn new(
+        target: &'a Model<'a>,
+        draft: &'a Model<'a>,
+        config: SpeculativeAdaptiveConfig,
+    ) -> Self {
+        Self {
+            target,
+            draft,
+            tracker: AdaptiveThresholdTracker::new(config),
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Execute one speculative verification step with adaptive thresholding.
+    pub fn step(
+        &mut self,
+        target_state: &mut State,
+        draft_state: &mut State,
+        sampler: &mut Sampler,
+        num_draft: usize,
+        position: usize,
+    ) -> Result<Vec<u32>> {
+        let vocab = self.target.config.vocab;
+
+        // 1. Target model predicts position `position`
+        let target_tok = sampler.sample(&mut target_state.logits);
+        let mut emitted = vec![target_tok];
+
+        if num_draft == 0 {
+            self.target.forward(target_state, target_tok, position)?;
+            self.draft.forward(draft_state, target_tok, position)?;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // 2. Draft model generates candidates
+        self.draft.forward(draft_state, target_tok, position)?;
+
+        let mut draft_tokens = Vec::with_capacity(num_draft);
+        let mut draft_probs = Vec::with_capacity(num_draft);
+
+        for step in 0..num_draft {
+            let p = position + 1 + step;
+            let tok = sampler.sample(&mut draft_state.logits);
+            draft_tokens.push(tok);
+            draft_probs.push(1.0);
+            if step + 1 < num_draft {
+                self.draft.forward(draft_state, tok, p)?;
+            }
+        }
+
+        self.stats.proposed += num_draft;
+        self.stats.target_batches += 1;
+
+        // 3. Target model verifies candidates
+        let mut target_batch = Vec::with_capacity(1 + num_draft);
+        target_batch.push(target_tok);
+        target_batch.extend_from_slice(&draft_tokens);
+
+        let mut target_all_logits = vec![0.0f32; target_batch.len() * vocab];
+        self.target.prefill_all_logits(
+            target_state,
+            &target_batch,
+            position,
+            &mut target_all_logits,
+        )?;
+
+        let mut accepted_count = 0;
+        for i in 0..num_draft {
+            let logits_slice = &mut target_all_logits[i * vocab..(i + 1) * vocab];
+            let target_pred = sampler.sample(logits_slice);
+
+            let accepted = target_pred == draft_tokens[i];
+            self.tracker.record_decision(accepted);
+
+            if accepted {
+                emitted.push(draft_tokens[i]);
+                accepted_count += 1;
+            } else {
+                emitted.push(target_pred);
+                break;
+            }
+        }
+
+        self.stats.accepted += accepted_count;
+
+        if accepted_count < num_draft {
+            let accepted_total = emitted.len();
+            let rollback_from = position + accepted_total;
+            let rollback_to = position + target_batch.len();
+
+            target_state.truncate_cache(&self.target.config, rollback_from, rollback_to);
+            draft_state.truncate_cache(&self.draft.config, rollback_from, rollback_to);
+
+            let corrective_pos = position + accepted_total - 1;
+            let corrective_tok = emitted[accepted_total - 1];
+            self.draft
+                .forward(draft_state, corrective_tok, corrective_pos)?;
+            self.target
+                .forward(target_state, corrective_tok, corrective_pos)?;
+        } else {
+            let last_logits = &target_all_logits[num_draft * vocab..(num_draft + 1) * vocab];
+            target_state.set_logits(last_logits);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}

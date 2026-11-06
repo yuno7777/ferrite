@@ -976,3 +976,86 @@ fn test_draft_kv_cache_recycling_matches_baseline_forward() {
     fs::remove_file(target_path).ok();
     fs::remove_file(draft_path).ok();
 }
+
+#[test]
+fn test_speculative_temperature_calibration() {
+    use ferrite::speculative::calibrate_draft_temperature;
+
+    // 1. Identical distributions -> optimal scale is 1.0
+    let target = vec![2.0, 1.0, 0.5, -1.0];
+    let draft_identical = target.clone();
+    let scale = calibrate_draft_temperature(&draft_identical, &target, 1.0);
+    assert!((scale - 1.0).abs() <= 0.05, "expected ~1.0, got {scale}");
+
+    // 2. Draft is 2x sharper/overconfident -> scale should be ~2.0 to soften it
+    let draft_sharp: Vec<f32> = target.iter().map(|&x| x * 2.0).collect();
+    let scale_sharp = calibrate_draft_temperature(&draft_sharp, &target, 1.0);
+    assert!(scale_sharp > 1.5, "expected scale > 1.5, got {scale_sharp}");
+}
+
+#[test]
+fn test_adaptive_acceptance_threshold_tracking() {
+    use ferrite::speculative::{
+        eval_adaptive_acceptance, AdaptiveThresholdTracker, SpeculativeAdaptiveConfig,
+    };
+
+    assert!(eval_adaptive_acceptance(0.8, 1.0, 0.7));
+    assert!(!eval_adaptive_acceptance(0.5, 1.0, 0.7));
+
+    let config = SpeculativeAdaptiveConfig {
+        base_threshold: 0.5,
+        min_threshold: 0.2,
+        max_threshold: 0.8,
+        adaptation_rate: 0.1,
+        target_acceptance_rate: 0.7,
+        temperature_scale: 1.0,
+    };
+    let mut tracker = AdaptiveThresholdTracker::new(config);
+    assert_eq!(tracker.current_threshold, 0.5);
+
+    // Consecutive accepted decisions (> 70% rate) should relax the threshold
+    for _ in 0..5 {
+        tracker.record_decision(true);
+    }
+    assert!(tracker.current_threshold < 0.5);
+
+    // Consecutive rejected decisions should tighten the threshold
+    for _ in 0..10 {
+        tracker.record_decision(false);
+    }
+    assert!(tracker.current_threshold > 0.5);
+}
+
+#[test]
+fn test_adaptive_speculative_engine_parity() {
+    use ferrite::model::State;
+    use ferrite::sample::Sampler;
+    use ferrite::speculative::{AdaptiveSpeculativeEngine, SpeculativeAdaptiveConfig};
+
+    let target_path = make_model_fixture("adapt_target", 0.0);
+    let target_gguf = Gguf::open(&target_path).expect("open target");
+    let target_model = Model::load(&target_gguf).expect("load target");
+
+    let draft_path = make_model_fixture("adapt_draft", 0.0);
+    let draft_gguf = Gguf::open(&draft_path).expect("open draft");
+    let draft_model = Model::load(&draft_gguf).expect("load draft");
+
+    let config = SpeculativeAdaptiveConfig::default();
+    let mut engine = AdaptiveSpeculativeEngine::new(&target_model, &draft_model, config);
+
+    let mut target_state = State::new(&target_model.config);
+    let mut draft_state = State::new(&draft_model.config);
+    let mut sampler = Sampler::greedy();
+
+    // Step with 2 speculative draft candidates
+    let emitted = engine
+        .step(&mut target_state, &mut draft_state, &mut sampler, 2, 0)
+        .expect("step");
+
+    assert!(!emitted.is_empty());
+    assert_eq!(engine.stats.total_emitted, emitted.len());
+    assert!(engine.stats.accepted <= 2);
+
+    fs::remove_file(target_path).ok();
+    fs::remove_file(draft_path).ok();
+}
