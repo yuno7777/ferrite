@@ -168,10 +168,11 @@
 
 ### Phase 19: Paged KV-Cache & Block Table Allocator
 - Priority: P1
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Eliminates contiguous KV buffer pre-allocation and memory fragmentation by organizing KV cache into fixed-size physical blocks (e.g. 16 or 32 tokens) with logical-to-physical block tables (vLLM style).
-- Files: `src/paged.rs`, `src/model.rs`, `tests/paged.rs`
+- Files: `src/paged.rs`, `src/model.rs`, `src/lib.rs`, `tests/paged.rs`
 - Acceptance: Dynamic non-contiguous block allocation on demand; copy-on-write fork support; attention kernel updated to follow block tables.
+- Completion evidence: Implemented `src/paged.rs` with `PhysicalBlock`, `PagedPool`, `PagedSequence`, and block-table mapped online attention. Added `Model::forward_paged` and `Model::prefill_paged`. Implemented zero-copy sequence forking with refcounting and Copy-on-Write (CoW) page splitting. Added comprehensive test suite `tests/paged.rs` covering pool allocation/freeing, CoW isolation, and bit-identical parity against contiguous prefill and single-token decode. All 138 tests pass.
 
 ### Phase 20: Radix Tree Prefix Caching & Prompt Deduplication
 - Priority: P2

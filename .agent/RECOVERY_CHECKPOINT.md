@@ -123,5 +123,17 @@
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
+20. Phase 19 Paged KV-Cache & Block Table Allocator:
+   - Created `src/paged.rs` with `PhysicalBlock`, `PagedPool`, `PagedSequence`, and logical-to-physical block tables.
+   - Built online attention over physical blocks and implemented `Model::forward_paged` and `Model::prefill_paged`.
+   - Supported instantaneous zero-copy sequence forking (`PagedSequence::fork`) with reference-counted Copy-on-Write (`prepare_for_write`) page duplication.
+   - Created comprehensive integration test suite `tests/paged.rs` verifying allocation, deallocation, CoW data isolation, and bit-identical parity against contiguous execution.
+21. Verification after Phase 19:
+   - `cargo test --all-targets` passes (138 tests).
+   - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
+   - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+   - `cargo fmt --check` passes without differences.
+   - `git diff --check` passes without errors.
+
 ## Next Up in Work Queue
-- Phase 19: Paged KV-Cache & Block Table Allocator (dynamic non-contiguous block allocation, copy-on-write fork support, and block table attention; status QUEUED).
+- Phase 20: Radix Tree Prefix Caching & Prompt Deduplication (hash-based block prefix indexing for 0ms prompt ingestion and multi-turn KV reuse; status QUEUED).

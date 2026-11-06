@@ -1614,17 +1614,17 @@ impl<'a, 'm> ChunkedPrefill<'a, 'm> {
 /// Separate from `Model` so the weights stay shareable: two sequences decoding
 /// at once want two of these and one of those.
 pub struct State {
-    x: Vec<f32>,
-    xb: Vec<f32>,
-    xb2: Vec<f32>,
-    hb: Vec<f32>,
-    hb2: Vec<f32>,
-    q: Vec<f32>,
-    k: Vec<f32>,
-    v: Vec<f32>,
+    pub(crate) x: Vec<f32>,
+    pub(crate) xb: Vec<f32>,
+    pub(crate) xb2: Vec<f32>,
+    pub(crate) hb: Vec<f32>,
+    pub(crate) hb2: Vec<f32>,
+    pub(crate) q: Vec<f32>,
+    pub(crate) k: Vec<f32>,
+    pub(crate) v: Vec<f32>,
     /// Scores for the last token processed, one per vocabulary entry.
     pub logits: Vec<f32>,
-    workspace: Workspace,
+    pub(crate) workspace: Workspace,
     pub kv_cache: KvCache,
     context: usize,
     /// Workers per matvec. Defaults to the machine's parallelism.
