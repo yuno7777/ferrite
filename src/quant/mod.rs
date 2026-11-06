@@ -26,6 +26,8 @@ pub mod k;
 pub mod legacy;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
+pub mod outlier;
+pub use outlier::{OutlierConfig, OutlierMatrix, OutlierQuantMode};
 pub mod quantize;
 pub use quantize::{quantize_file, quantize_model};
 

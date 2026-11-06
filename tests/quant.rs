@@ -218,3 +218,113 @@ fn test_awq_and_gptq_group_dequantization() {
     let fused_gptq = ferrite::dot_gptq_int4(&packed, &scales, Some(&zeros), group_size, &x);
     assert_eq!(fused_awq, fused_gptq);
 }
+
+#[test]
+fn test_outlier_aware_quantization_w8a8_and_w4a16() {
+    let rows = 8;
+    let cols = 64;
+    let mut weights = vec![0.0f32; rows * cols];
+
+    // Bulk channels with small normal weights in [-0.05, 0.05]
+    for r in 0..rows {
+        for c in 0..cols {
+            weights[r * cols + c] = ((r * 17 + c * 31) % 97) as f32 / 1000.0 - 0.048;
+        }
+    }
+
+    // Two prominent outlier channels: 12 and 45
+    for r in 0..rows {
+        weights[r * cols + 12] = 8.5 + (r as f32) * 0.2;
+        weights[r * cols + 45] = -12.0 - (r as f32) * 0.15;
+    }
+
+    // 1. W8A8 Mode
+    let config_w8a8 = ferrite::OutlierConfig {
+        mode: ferrite::OutlierQuantMode::W8A8,
+        threshold_multiplier: 4.0,
+        max_outlier_ratio: 0.10,
+        min_magnitude: 1.0,
+    };
+
+    let outlier_w8a8 = ferrite::OutlierMatrix::from_weights(&weights, rows, cols, config_w8a8)
+        .expect("quantize W8A8");
+
+    assert_eq!(outlier_w8a8.outlier_channels, vec![12, 45]);
+    assert!((outlier_w8a8.outlier_ratio() - 2.0 / 64.0).abs() < 1e-5);
+
+    let mut dequant_w8a8 = vec![0.0f32; rows * cols];
+    outlier_w8a8
+        .dequantize(&mut dequant_w8a8)
+        .expect("dequantize W8A8");
+
+    // Outlier channels must be preserved in FP16 precision
+    for r in 0..rows {
+        let orig_12 = weights[r * cols + 12];
+        let dq_12 = dequant_w8a8[r * cols + 12];
+        assert!(
+            (orig_12 - dq_12).abs() < 0.02,
+            "outlier channel 12 preserved"
+        );
+
+        let orig_45 = weights[r * cols + 45];
+        let dq_45 = dequant_w8a8[r * cols + 45];
+        assert!(
+            (orig_45 - dq_45).abs() < 0.02,
+            "outlier channel 45 preserved"
+        );
+    }
+
+    let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.1).sin()).collect();
+    let mut expected_y = vec![0.0f32; rows];
+    for r in 0..rows {
+        for c in 0..cols {
+            expected_y[r] += weights[r * cols + c] * x[c];
+        }
+    }
+
+    let mut actual_y_w8a8 = vec![0.0f32; rows];
+    outlier_w8a8
+        .matvec(&x, &mut actual_y_w8a8)
+        .expect("matvec W8A8");
+
+    for r in 0..rows {
+        let diff = (expected_y[r] - actual_y_w8a8[r]).abs();
+        let rel = diff / expected_y[r].abs();
+        assert!(rel < 0.05, "row {r} W8A8 matvec error {rel} too large");
+    }
+
+    // 2. W4A16 Mode
+    let config_w4a16 = ferrite::OutlierConfig {
+        mode: ferrite::OutlierQuantMode::W4A16,
+        threshold_multiplier: 4.0,
+        max_outlier_ratio: 0.10,
+        min_magnitude: 1.0,
+    };
+
+    let outlier_w4a16 = ferrite::OutlierMatrix::from_weights(&weights, rows, cols, config_w4a16)
+        .expect("quantize W4A16");
+
+    assert_eq!(outlier_w4a16.outlier_channels, vec![12, 45]);
+
+    let mut dequant_w4a16 = vec![0.0f32; rows * cols];
+    outlier_w4a16
+        .dequantize(&mut dequant_w4a16)
+        .expect("dequantize W4A16");
+
+    for r in 0..rows {
+        let orig_12 = weights[r * cols + 12];
+        let dq_12 = dequant_w4a16[r * cols + 12];
+        assert!((orig_12 - dq_12).abs() < 0.02);
+    }
+
+    let mut actual_y_w4a16 = vec![0.0f32; rows];
+    outlier_w4a16
+        .matvec(&x, &mut actual_y_w4a16)
+        .expect("matvec W4A16");
+
+    for r in 0..rows {
+        let diff = (expected_y[r] - actual_y_w4a16[r]).abs();
+        let rel = diff / expected_y[r].abs();
+        assert!(rel < 0.05, "row {r} W4A16 matvec error {rel} too large");
+    }
+}

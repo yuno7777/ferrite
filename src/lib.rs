@@ -55,6 +55,7 @@ pub use paged::{
 };
 pub use prefix::{RadixCache, RadixNode};
 pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, dot_gptq_int4};
+pub use quant::outlier::{OutlierConfig, OutlierMatrix, OutlierQuantMode};
 pub use quant::quantize::{quantize_file, quantize_model};
 pub use scheduler::{
     BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
