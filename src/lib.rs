@@ -71,6 +71,10 @@ pub use prefix::{RadixCache, RadixNode};
 pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, dot_gptq_int4};
 pub use quant::outlier::{OutlierConfig, OutlierMatrix, OutlierQuantMode};
 pub use quant::quantize::{quantize_file, quantize_model};
+pub use quant::smooth::{
+    compute_smoothing_scales, compute_weight_channel_max, smooth_activations, smooth_weights,
+    SmoothQuantConfig, SmoothQuantLinear,
+};
 pub use scheduler::{
     BatchScheduler, FinishReason, MicroBatchConfig, MicroBatchPrefillEngine, PackedBatch,
     SchedulerConfig, SequenceId, SequenceRequest, StepOutput,

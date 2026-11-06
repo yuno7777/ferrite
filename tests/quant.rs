@@ -328,3 +328,102 @@ fn test_outlier_aware_quantization_w8a8_and_w4a16() {
         assert!(rel < 0.05, "row {r} W4A16 matvec error {rel} too large");
     }
 }
+
+#[test]
+fn test_smoothquant_scale_migration_and_w8a8_matvec() {
+    use ferrite::quant::smooth::{
+        compute_smoothing_scales, compute_weight_channel_max, smooth_activations, smooth_weights,
+        SmoothQuantConfig, SmoothQuantLinear,
+    };
+
+    let rows = 8;
+    let cols = 16;
+
+    // Synthetic weights
+    let mut weights = vec![0.0f32; rows * cols];
+    for r in 0..rows {
+        for c in 0..cols {
+            weights[r * cols + c] = ((r as f32 * 0.7 + c as f32 * 0.3).sin() * 0.5) + 0.1;
+        }
+    }
+
+    // Activations with massive channel outliers at indices 3 and 7
+    let mut x = vec![1.0f32; cols];
+    for (i, val) in x.iter_mut().enumerate() {
+        *val = ((i as f32) * 0.4).cos();
+    }
+    x[3] = 64.0; // Outlier channel 3
+    x[7] = -48.0; // Outlier channel 7
+
+    // Activation channel maximum statistics (from calibration)
+    let mut act_channel_max = vec![1.5f32; cols];
+    act_channel_max[3] = 64.0;
+    act_channel_max[7] = 48.0;
+
+    // Reference unquantized f32 result
+    let mut expected_y = vec![0.0f32; rows];
+    for r in 0..rows {
+        let mut sum = 0.0f32;
+        for c in 0..cols {
+            sum += weights[r * cols + c] * x[c];
+        }
+        expected_y[r] = sum;
+    }
+
+    // 1. Verify scale computation
+    let wt_channel_max = compute_weight_channel_max(&weights, rows, cols);
+    let config = SmoothQuantConfig {
+        alpha: 0.5,
+        epsilon: 1e-5,
+    };
+    let scales = compute_smoothing_scales(&act_channel_max, &wt_channel_max, &config);
+
+    // Outlier channels 3 and 7 must receive much higher scale factors
+    assert!(scales[3] > 4.0);
+    assert!(scales[7] > 4.0);
+    assert!(scales[0] < 2.5);
+
+    // 2. Verify mathematical equivalence of smoothed activations and smoothed weights
+    let mut x_smooth = x.clone();
+    smooth_activations(&mut x_smooth, &scales);
+    // Outliers in activations should be significantly suppressed
+    assert!(x_smooth[3].abs() < 16.0);
+    assert!(x_smooth[7].abs() < 16.0);
+
+    let mut w_smooth = weights.clone();
+    smooth_weights(&mut w_smooth, rows, cols, &scales);
+
+    // Unquantized product X_smooth * W_smooth must match original X * W exactly
+    for r in 0..rows {
+        let mut sum = 0.0f32;
+        for c in 0..cols {
+            sum += w_smooth[r * cols + c] * x_smooth[c];
+        }
+        assert!(
+            (sum - expected_y[r]).abs() < 1e-4,
+            "mathematical equivalence broken: {sum} vs {}",
+            expected_y[r]
+        );
+    }
+
+    // 3. Quantize with SmoothQuantLinear (W8A8)
+    let linear = SmoothQuantLinear::from_f32(&weights, rows, cols, &act_channel_max, config)
+        .expect("from_f32");
+
+    // Dequantize and check weight preservation
+    let mut dequant_w = vec![0.0f32; rows * cols];
+    linear.dequantize(&mut dequant_w).expect("dequantize");
+    for i in 0..weights.len() {
+        assert!((weights[i] - dequant_w[i]).abs() < 0.05);
+    }
+
+    // Evaluate W8A8 matvec
+    let mut actual_y = vec![0.0f32; rows];
+    linear.matvec(&x, &mut actual_y).expect("matvec");
+
+    for r in 0..rows {
+        let diff = (expected_y[r] - actual_y[r]).abs();
+        let rel = diff / expected_y[r].abs().max(1e-3);
+        assert!(rel < 0.08, "row {r} SmoothQuant error {rel} too large");
+    }
+}

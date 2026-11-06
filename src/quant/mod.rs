@@ -30,6 +30,11 @@ pub mod outlier;
 pub use outlier::{OutlierConfig, OutlierMatrix, OutlierQuantMode};
 pub mod quantize;
 pub use quantize::{quantize_file, quantize_model};
+pub mod smooth;
+pub use smooth::{
+    compute_smoothing_scales, compute_weight_channel_max, smooth_activations, smooth_weights,
+    SmoothQuantConfig, SmoothQuantLinear,
+};
 
 fn unsupported(ty: GgmlType) -> Error {
     Error::new(
@@ -120,7 +125,7 @@ pub fn dequantize_to_vec(ty: GgmlType, bytes: &[u8], elements: usize) -> Result<
 pub(crate) mod testdata {
     use super::GgmlType;
 
-    /// f16 0.0625 and 0.0078125 — small, exactly representable, and definitely
+    /// f16 0.0625 and 0.0078125, which are small, exactly representable, and definitely
     /// not Inf or NaN.
     const SCALE: [u8; 2] = [0x00, 0x2C];
     const MIN_SCALE: [u8; 2] = [0x00, 0x20];
