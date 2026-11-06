@@ -59,6 +59,8 @@ pub struct RequestParams {
     pub presence_penalty: f32,
     pub seed: u64,
     pub stream: bool,
+    pub tools: Vec<crate::tools::ToolDefinition>,
+    pub tool_choice: crate::tools::ToolChoice,
 }
 
 impl Default for RequestParams {
@@ -76,6 +78,8 @@ impl Default for RequestParams {
             presence_penalty: 0.0,
             seed: 1,
             stream: false,
+            tools: Vec::new(),
+            tool_choice: crate::tools::ToolChoice::Auto,
         }
     }
 }
@@ -260,10 +264,36 @@ impl<'a> Server<'a> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        let (content_json, finish_reason) = if !params.tools.is_empty()
+            && params.tool_choice != crate::tools::ToolChoice::None
+        {
+            if let Some(tool_call) = crate::tools::parse_tool_call(&completion_text, &params.tools)
+            {
+                (
+                    format!(
+                        "\"content\":null,\"tool_calls\":[{{\"id\":\"{}\",\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"arguments\":\"{}\"}}}}]",
+                        tool_call.id,
+                        tool_call.function_name,
+                        escape_json(&tool_call.arguments)
+                    ),
+                    "tool_calls",
+                )
+            } else {
+                (
+                    format!("\"content\":\"{}\"", escape_json(&completion_text)),
+                    "stop",
+                )
+            }
+        } else {
+            (
+                format!("\"content\":\"{}\"", escape_json(&completion_text)),
+                "stop",
+            )
+        };
+
         let json = format!(
-            "{{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion\",\"created\":{now},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{}\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\"total_tokens\":{}}}}}\n",
+            "{{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion\",\"created\":{now},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",{content_json}}},\"finish_reason\":\"{finish_reason}\"}}],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\"total_tokens\":{}}}}}\n",
             escape_json(&self.model.config.arch),
-            escape_json(&completion_text),
             tokens.len(),
             generated_tokens.len(),
             tokens.len() + generated_tokens.len()
@@ -319,6 +349,7 @@ impl<'a> Server<'a> {
         };
         let mut pending = Vec::new();
         let mut history = tokens.clone();
+        let mut completion_text = String::new();
 
         while generated < limit && pos < state.context() {
             let tok = sampler.sample_with_history(&mut state.logits, &history);
@@ -329,18 +360,53 @@ impl<'a> Server<'a> {
             generated += 1;
             pending.extend(self.tokenizer.piece(tok));
             if let Ok(text) = std::str::from_utf8(&pending) {
-                let chunk_json = format!(
-                    "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":{now},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n",
-                    escape_json(&self.model.config.arch),
-                    escape_json(text)
-                );
-                stream.write_all(chunk_json.as_bytes())?;
-                stream.flush()?;
+                completion_text.push_str(text);
+                if params.tools.is_empty() || params.tool_choice == crate::tools::ToolChoice::None {
+                    let chunk_json = format!(
+                        "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":{now},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n",
+                        escape_json(&self.model.config.arch),
+                        escape_json(text)
+                    );
+                    stream.write_all(chunk_json.as_bytes())?;
+                    stream.flush()?;
+                }
                 pending.clear();
             }
             pos += 1;
             if pos < state.context() {
                 self.model.forward(&mut state, tok, pos)?;
+            }
+        }
+
+        if !params.tools.is_empty() && params.tool_choice != crate::tools::ToolChoice::None {
+            if let Some(tool_call) = crate::tools::parse_tool_call(&completion_text, &params.tools)
+            {
+                let tool_chunk = format!(
+                    "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":{now},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{{\"index\":0,\"id\":\"{}\",\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"arguments\":\"{}\"}}}}]}},\"finish_reason\":null}}]}}\n\n",
+                    escape_json(&self.model.config.arch),
+                    tool_call.id,
+                    tool_call.function_name,
+                    escape_json(&tool_call.arguments)
+                );
+                stream.write_all(tool_chunk.as_bytes())?;
+                stream.flush()?;
+
+                let final_json = format!(
+                    "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":{now},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n",
+                    escape_json(&self.model.config.arch)
+                );
+                stream.write_all(final_json.as_bytes())?;
+                stream.write_all(b"data: [DONE]\n\n")?;
+                stream.flush()?;
+                return Ok(());
+            } else {
+                let content_chunk = format!(
+                    "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":{now},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n",
+                    escape_json(&self.model.config.arch),
+                    escape_json(&completion_text)
+                );
+                stream.write_all(content_chunk.as_bytes())?;
+                stream.flush()?;
             }
         }
 
@@ -454,6 +520,8 @@ pub fn parse_request_json(json: &str) -> RequestParams {
         seed: 1,
         stream: false,
         prompt: String::new(),
+        tools: Vec::new(),
+        tool_choice: crate::tools::ToolChoice::Auto,
     };
 
     if let Some(val) = extract_number(json, "max_tokens") {
@@ -510,6 +578,9 @@ pub fn parse_request_json(json: &str) -> RequestParams {
         }
     }
 
+    params.tools = crate::tools::parse_tools(json);
+    params.tool_choice = crate::tools::parse_tool_choice(json);
+
     params
 }
 
@@ -523,6 +594,14 @@ pub fn parse_request_json_with_template(json: &str, template: &ChatTemplate) -> 
             .map(|(r, c)| ChatMessage::new(r, c))
             .collect();
         params.prompt = template.render(&chat_msgs, true, None, None);
+    }
+    if !params.tools.is_empty() && params.tool_choice != crate::tools::ToolChoice::None {
+        params
+            .prompt
+            .push_str(&crate::tools::format_tools_system_prompt(
+                &params.tools,
+                &params.tool_choice,
+            ));
     }
     params
 }

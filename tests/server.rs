@@ -297,3 +297,99 @@ fn test_not_found_endpoint() {
     let _ = handle.join();
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn test_chat_completions_tools_schema() {
+    let (path, port, shutdown, handle) = setup_server("tools_schema");
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let req_body = r#"{
+        "messages":[{"role":"user","content":"t0"}],
+        "tools":[
+            {
+                "type":"function",
+                "function":{
+                    "name":"fetch_metric",
+                    "description":"Fetch system metric",
+                    "parameters":{
+                        "type":"object",
+                        "properties":{"metric":{"type":"string"}}
+                    }
+                }
+            }
+        ],
+        "tool_choice":"auto",
+        "max_tokens":2,
+        "stream":false
+    }"#;
+    let req = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+        req_body.len(),
+        req_body
+    );
+    stream.write_all(req.as_bytes()).expect("write request");
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).expect("read status");
+    assert!(status_line.contains("200 OK"), "{status_line}");
+
+    let mut response_text = String::new();
+    reader
+        .read_to_string(&mut response_text)
+        .expect("read response");
+    assert!(response_text.contains("chat.completion"));
+
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_chat_completions_tools_streaming() {
+    let (path, port, shutdown, handle) = setup_server("tools_streaming");
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let req_body = r#"{
+        "messages":[{"role":"user","content":"t0"}],
+        "tools":[
+            {
+                "type":"function",
+                "function":{
+                    "name":"fetch_metric",
+                    "description":"Fetch metric",
+                    "parameters":{"type":"object"}
+                }
+            }
+        ],
+        "max_tokens":2,
+        "stream":true
+    }"#;
+    let req = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+        req_body.len(),
+        req_body
+    );
+    stream.write_all(req.as_bytes()).expect("write request");
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).expect("read status");
+    assert!(status_line.contains("200 OK"), "{status_line}");
+
+    let mut sse_lines = Vec::new();
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+        if line.starts_with("data: ") {
+            sse_lines.push(line.trim().to_string());
+        }
+        line.clear();
+    }
+
+    assert!(!sse_lines.is_empty(), "expected SSE data chunks");
+    assert_eq!(sse_lines.last().map(String::as_str), Some("data: [DONE]"));
+
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    std::fs::remove_file(path).ok();
+}

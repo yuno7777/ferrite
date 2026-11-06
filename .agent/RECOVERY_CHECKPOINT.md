@@ -299,3 +299,19 @@
   - `cargo clippy --all-targets -- -D warnings` passes without warnings.
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` outputs exactly 1 line (0 external dependencies).
+
+## Autonomous Execution — Phase 37 Completion
+- Branch: `codex/audit-baseline`
+- Phase 37 (Structured Function Calling & Tool Use Engine):
+  - Created `src/tools.rs` with `ToolDefinition`, `ToolChoice`, `ToolCall`, request `tools` and `tool_choice` parsing, prompt formatting/injection, and tool-call detection with JSON argument validation.
+  - Integrated into `src/server.rs` OpenAI-compatible `/v1/chat/completions`:
+    - Populated `RequestParams.tools` and `RequestParams.tool_choice`.
+    - Handled non-streaming tool calling emitting `tool_calls` array, null `content`, and `finish_reason: "tool_calls"`.
+    - Handled streaming SSE tool calling emitting `delta.tool_calls` chunks and final `finish_reason: "tool_calls"`.
+  - Added unit tests in `src/tools.rs` and live socket integration tests in `tests/server.rs` (`test_chat_completions_tools_schema`, `test_chat_completions_tools_streaming`).
+- Validation:
+  - `cargo test --all-targets` passes (100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` prints exactly 1 line (0 external dependencies).
+

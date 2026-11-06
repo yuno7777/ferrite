@@ -33,6 +33,7 @@ pub mod speculative;
 pub mod synth;
 pub mod template;
 pub mod tokenizer;
+pub mod tools;
 
 pub use convert::{convert_safetensors_to_gguf, JsonValue, SafeTensorsHeader};
 pub use embed::{cosine_similarity, l2_normalize, pool, EmbedEngine, Pooling};

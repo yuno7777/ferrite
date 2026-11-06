@@ -314,10 +314,11 @@
 
 ### Phase 37: Structured Function Calling / Tool Use Engine (`/v1/chat/completions` tools schema)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Parse OpenAI `tools` JSON schema, dynamically generate constrained grammar rules forcing the model to generate strictly compliant tool calls, and format `tool_calls` in SSE streams.
 - Files: `src/tools.rs`, `src/server.rs`, `tests/server.rs`
 - Acceptance: Support function calling schema in `/v1/chat/completions` with guaranteed valid argument JSON.
+- Completion evidence: Implemented zero-dependency `src/tools.rs` with `ToolDefinition`, `ToolChoice`, `ToolCall`, request `tools` and `tool_choice` extraction, system prompt synthesis, and output tool-call detection verified via `JsonGrammar`. Integrated tool calling into `src/server.rs` non-streaming and streaming handlers with OpenAI-compliant SSE deltas and `finish_reason: "tool_calls"`. Added integration tests in `tests/server.rs`. All compiler, clippy, formatting, and unit tests pass with 0 external dependencies.
 
 ### Phase 38: Context Compression & KV Cache Eviction (StreamingLLM / Heavy-Hitter Oracle H2O)
 - Priority: P2
