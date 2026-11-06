@@ -23,6 +23,7 @@ pub mod paged;
 pub mod prefix;
 pub mod quant;
 pub mod sample;
+pub mod scheduler;
 pub mod server;
 pub mod speculative;
 pub mod synth;
@@ -36,6 +37,9 @@ pub use map::Mmap;
 pub use model::ChunkedPrefill;
 pub use paged::{BlockId, PagedPool, PagedSequence, PhysicalBlock, DEFAULT_BLOCK_TOKENS};
 pub use prefix::{RadixCache, RadixNode};
+pub use scheduler::{
+    BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
+};
 pub use server::{Server, ServerConfig};
 pub use speculative::{SpeculativeEngine, SpeculativeStats};
 pub use tokenizer::Tokenizer;

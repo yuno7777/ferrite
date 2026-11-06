@@ -154,12 +154,18 @@
    - Wired `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--repeat-last-n` flags into CLI `src/main.rs`.
    - Wired penalty parameters and token sequence tracking into HTTP completions in `src/server.rs`.
    - Added unit tests in `src/sample.rs` verifying exact penalty behavior.
-29. Verification after Phase 23:
-   - `cargo test --all-targets` passes (148 tests).
+30. Phase 24 Continuous Batching & Multi-Sequence Scheduling:
+   - Created `src/scheduler.rs` with `BatchScheduler`, `Sequence`, `SequenceRequest`, `SchedulerConfig`, and `StepOutput`.
+   - Built continuous batching pipeline interleaving chunked prefill slices and decode steps in shared model passes.
+   - Integrated paged virtual memory (`PagedPool`, `PagedSequence`) and Radix prefix caching (`RadixCache`).
+   - Exposed `BatchScheduler`, `SchedulerConfig`, `SequenceRequest`, `StepOutput` in `src/lib.rs`.
+   - Created integration test suite `tests/scheduler.rs` validating concurrent multi-sequence generation, dynamic arrival of new sequences during ongoing execution, and complete memory reclamation upon LRU eviction.
+31. Verification after Phase 24:
+   - `cargo test --all-targets` passes (150 tests).
    - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
    - `cargo clippy --all-targets -- -D warnings` passes without warnings.
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 24: Continuous Batching & Multi-Sequence Scheduling (status QUEUED).
+- Phase 25: Pure-Rust In-Engine Quantization Tool (`ferrite quantize`; status QUEUED).

@@ -208,10 +208,11 @@
 
 ### Phase 24: Continuous Batching & Multi-Sequence Scheduling
 - Priority: P1
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Serving multiple concurrent user requests efficiently requires dynamic continuous batching where prefill chunks and decode steps from different requests are scheduled together in single forward passes.
-- Files: `src/server.rs`, `src/scheduler.rs`, `tests/server.rs`
+- Files: `src/scheduler.rs`, `src/lib.rs`, `tests/scheduler.rs`
 - Acceptance: Multi-sequence concurrency in HTTP daemon without blocking incoming requests during long generations.
+- Completion evidence: Created `src/scheduler.rs` implementing `BatchScheduler`, `Sequence`, `SequenceRequest`, and `StepOutput`. Built dynamic continuous batch execution interleaving chunked prefill slices and single-token decode passes over paged memory (`PagedPool` and `PagedSequence`), with transparent prefix reuse via `RadixCache`. Exposed in `src/lib.rs`. Created `tests/scheduler.rs` validating concurrent multi-sequence generation, dynamic arrival of new sequences during ongoing decode, and complete memory reclamation upon LRU eviction. All 150 tests pass.
 
 ### Phase 25: Pure-Rust In-Engine Quantization Tool (`ferrite quantize`)
 - Priority: P2
