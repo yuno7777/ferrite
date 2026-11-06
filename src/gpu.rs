@@ -10,6 +10,7 @@
 //! `vkCreateInstance`, etc.). When no GPU driver is installed, it cleanly
 //! falls back to [`GpuBackendKind::CpuAvx2`] with zero startup overhead.
 
+#[cfg(target_os = "linux")]
 use std::ffi::{c_char, c_int, c_uint, c_void};
 
 /// Compute backend selected by [`DynamicGpuRuntime`].
@@ -68,6 +69,7 @@ unsafe extern "C" {
 impl DynamicGpuRuntime {
     /// Dynamically probe the host OS for CUDA and Vulkan drivers, falling back
     /// seamlessly to CPU SIMD when no GPU driver is installed.
+    #[allow(unused_mut)]
     pub fn probe() -> Self {
         let mut devices = Vec::new();
         let mut cuda_available = false;
