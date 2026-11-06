@@ -96,6 +96,7 @@ impl MlaKvCache {
         out_latent_sum: &mut [f32],
     ) {
         assert!(layer < self.layers);
+        assert!(params.len <= self.context);
         let lat_start = layer * self.context * self.latent_dim;
         let rope_start = layer * self.context * self.rope_dim;
         crate::ops::attention_mla_latent(
@@ -1069,6 +1070,22 @@ mod tests {
         let w1 = (-2.0f32).exp() / (1.0f32 + (-2.0f32).exp());
         assert!((out[0] - (w0 * 1.0)).abs() < 1e-5);
         assert!((out[1] - (w1 * 2.0)).abs() < 1e-5);
+
+        // A partially filled cache must not attend to capacity beyond its live prefix.
+        cache.attention(
+            0,
+            &q_nope,
+            &q_rope,
+            crate::ops::MlaAttentionParams {
+                latent_dim: 2,
+                rope_dim: 2,
+                len: 1,
+                scale: 1.0,
+                logit_cap: None,
+            },
+            &mut out,
+        );
+        assert_eq!(out, [1.0, 0.0]);
     }
 
     #[test]
