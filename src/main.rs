@@ -18,8 +18,9 @@ usage:
                                     -t also dumps the tensor table
   ferrite tokenize <model> <text>   encode text, show ids and pieces
   ferrite run <model> <prompt>      generate, streaming to stdout
+  ferrite serve <model>             serve HTTP/SSE API daemon
 
-run options:
+run/serve options:
   -n <count>      tokens to generate (default 128)
   --temp <t>      sampling temperature, 0 for greedy (default 0)
   --top-k <k>     keep only the k most likely tokens (default 40)
@@ -27,6 +28,8 @@ run options:
   --seed <s>      sampling seed (default 1)
   --ctx <n>       KV cache size in tokens (default 2048)
   --threads <n>   workers per matvec (default: machine parallelism)
+  --host <host>   host interface to bind (default: 127.0.0.1)
+  --port <port>   port to bind (default: 8080)
   --draft <model> draft model for speculative decoding acceleration
   --spec-k <k>    speculative candidate count (default 3)
 
@@ -42,6 +45,7 @@ fn main() -> ExitCode {
         Some("info") => cmd_info(&args[1..]),
         Some("tokenize") => cmd_tokenize(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
+        Some("serve") => cmd_serve(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -448,4 +452,78 @@ fn si(n: u64) -> String {
         n if n >= 1_000 => format!("{:.0}K", n as f64 / 1e3),
         n => n.to_string(),
     }
+}
+
+fn cmd_serve(args: &[String]) -> std::io::Result<()> {
+    let mut host = "127.0.0.1".to_string();
+    let mut port = 8080u16;
+    let mut context = 2048usize;
+    let mut threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    let mut query = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                i += 1;
+                if let Some(h) = args.get(i) {
+                    host = h.clone();
+                }
+            }
+            "--port" => {
+                i += 1;
+                if let Some(p) = args.get(i).and_then(|s| s.parse().ok()) {
+                    port = p;
+                }
+            }
+            "--ctx" => {
+                i += 1;
+                if let Some(c) = args.get(i).and_then(|s| s.parse().ok()) {
+                    context = c;
+                }
+            }
+            "--threads" => {
+                i += 1;
+                if let Some(t) = args.get(i).and_then(|s| s.parse().ok()) {
+                    threads = t;
+                }
+            }
+            arg if !arg.starts_with('-') && query.is_none() => {
+                query = Some(arg.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let query = query.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "serve needs a model id or path",
+        )
+    })?;
+
+    let path = lmstudio::resolve(&query)?;
+    let gguf = Box::leak(Box::new(Gguf::open(&path)?));
+    let model = Box::leak(Box::new(Model::load(gguf)?));
+    let tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(gguf)?));
+
+    let config = ferrite::server::ServerConfig {
+        host: host.clone(),
+        port,
+        threads,
+        context,
+    };
+
+    let server = ferrite::server::Server::new(model, tokenizer, config);
+    let listener = server.listen()?;
+    eprintln!(
+        "ferrite HTTP inference daemon listening on http://{host}:{port} ({}, {} threads, ctx {context})",
+        model.config.arch, threads
+    );
+
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    server.serve_with_shutdown(&listener, shutdown)
 }
