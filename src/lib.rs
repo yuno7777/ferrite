@@ -49,6 +49,7 @@ pub use map::Mmap;
 pub use model::ChunkedPrefill;
 pub use paged::{BlockId, PagedPool, PagedSequence, PhysicalBlock, DEFAULT_BLOCK_TOKENS};
 pub use prefix::{RadixCache, RadixNode};
+pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, dot_gptq_int4};
 pub use quant::quantize::{quantize_file, quantize_model};
 pub use scheduler::{
     BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,

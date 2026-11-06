@@ -176,3 +176,45 @@ fn fp8_e4m3_tensor_survives_the_file_and_blockwise_scaling() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn test_awq_and_gptq_group_dequantization() {
+    let group_size = 32;
+    let _num_words = 8; // 8 * 8 = 64 weights = 2 groups of 32
+    let packed = vec![
+        0x12345678u32,
+        0x9abcdef0u32,
+        0x13579bdfu32,
+        0x2468ace0u32,
+        0x01234567u32,
+        0x89abcdefu32,
+        0xfedcba98u32,
+        0x76543210u32,
+    ];
+    let scales = vec![0.5f32, 0.25f32];
+    let zeros = vec![2.0f32, 1.0f32];
+
+    let mut out = vec![0.0f32; 64];
+    ferrite::dequantize_awq_int4(&packed, &scales, Some(&zeros), group_size, &mut out)
+        .expect("dequantize awq");
+
+    assert_eq!(out.len(), 64);
+    // Spot check first element:
+    // packed[0] low nibble = 0x8 = 8.0
+    // (8.0 - 2.0) * 0.5 = 3.0
+    assert_eq!(out[0], 3.0);
+
+    // Verify fused dot product agrees with unpacked dot product
+    let x: Vec<f32> = (0..64).map(|i| (i as f32 * 0.05).cos()).collect();
+    let expected: f32 = out.iter().zip(&x).map(|(w, xi)| w * xi).sum();
+    let fused_awq = ferrite::dot_awq_int4(&packed, &scales, Some(&zeros), group_size, &x);
+    assert!((fused_awq - expected).abs() < 1e-4);
+
+    let mut gptq_out = vec![0.0f32; 64];
+    ferrite::dequantize_gptq_int4(&packed, &scales, Some(&zeros), group_size, &mut gptq_out)
+        .expect("dequantize gptq");
+    assert_eq!(out, gptq_out);
+
+    let fused_gptq = ferrite::dot_gptq_int4(&packed, &scales, Some(&zeros), group_size, &x);
+    assert_eq!(fused_awq, fused_gptq);
+}

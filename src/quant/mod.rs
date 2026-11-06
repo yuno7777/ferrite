@@ -17,6 +17,7 @@ pub mod activation;
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx512;
+pub mod awq;
 pub mod dot;
 pub mod fp8;
 pub mod half;
