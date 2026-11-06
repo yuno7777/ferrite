@@ -22,17 +22,18 @@ Ferrite contains no third-party crate dependencies. Operating system memory mapp
   - `gemma`, `gemma2`: Gemma 2 with logit soft-capping, decoupled head dimensions, and 4-stage RMSNorms.
   - `mixtral`: Sparse Mixture-of-Experts with Top-2 softmax gating.
   - `deepseek`, `deepseek2`, `deepseek3`: Multi-Head Latent Attention (MLA), Multi-Token Prediction (MTP), auxiliary-loss-free MoE routing, and FP8 block-wise quantization.
-- **Quantization Coverage**: Decodes and computes `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, and `F8_E4M3`.
+- **Quantization Coverage**: Decodes and computes `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`, `F8_E4M3`, and `F8_E5M2`. Supports AWQ, GPTQ, SmoothQuant W8A8 scale migration, and outlier-aware mixed-precision W4A16.
 - **Compute Kernels**:
   - Unfused exact mathematical reference.
-  - Fused dequantize-and-dot kernels for `Q8_0`, `Q4_0`, `Q5_K`, `Q6_K`, and `F8_E4M3`.
+  - Fused dequantize-and-dot kernels for `Q8_0`, `Q4_0`, `Q5_K`, `Q6_K`, `F8_E4M3`, and `F8_E5M2`.
   - Integer dot products (iDot) against INT8 quantized activations with 32-bit accumulation for `Q8_0` and `Q4_K`.
+  - Vectorized FP8 GEMM with cache-friendly hardware auto-tuning.
   - SIMD vector acceleration using AVX2, AVX-512, and ARM NEON intrinsics.
-- **Prefill Engine**: Batched and chunked prefill transforming prompt evaluation from memory-bound GEMV into compute-bound GEMM.
-- **Tokenizers**: Byte-level BPE (Llama 3, Qwen) and SentencePiece (Llama 2, Mistral, Gemma) with byte fallback and exact special-token handling. Includes in-crate BPE vocabulary trainer.
-- **Speculative Acceleration**: Continuous draft-target speculative decoding, Speculative Tree search, and DeepSeek native Multi-Token Prediction (MTP).
-- **KV Cache Systems**: Contiguous caches (`F32`, `Q8_0`, `Q4_0`), non-contiguous PagedAttention, and LRU radix prefix caching.
-- **Tooling and Serving**: Built-in OpenAI-compatible HTTP/SSE streaming server, SafeTensors converter, GGUF re-quantizer, GGUF model merger (SLERP, TIES, DARE), dynamic LoRA merge/inference, dense vector embeddings, and multimodal vision projector.
+- **Prefill Engine**: Batched and chunked prefill, asynchronous background compute with streaming events, and dynamic micro-batching with padding elimination.
+- **Tokenizers**: Byte-level BPE (Llama 3, Qwen) and SentencePiece (Llama 2, Mistral, Gemma) with byte fallback, exact special-token handling, streaming UTF-8 boundary preservation, and in-crate BPE vocabulary trainer.
+- **Speculative Acceleration**: Continuous draft-target speculative decoding, Medusa/Eagle multi-head prediction, Speculative Tree search, DeepSeek native Multi-Token Prediction (MTP), draft KV-cache recycling, and adaptive temperature calibration.
+- **KV Cache Systems**: Contiguous caches (`F32`, `Q8_0`, `Q4_0`), PagedAttention v1 and v2 with hierarchical page tables and CoW isolation, and Radix tree prefix caching with binary disk persistence and memory-mapped page swapping.
+- **Tooling and Serving**: Built-in OpenAI-compatible HTTP/SSE streaming server with multi-tenant rate limiting and priority queuing, SafeTensors converter, GGUF re-quantizer, GGUF model merger (SLERP, TIES, DARE), native GGUF shard splitting, direct tensor editing, model pruning, dynamic LoRA merge/inference, dense vector embeddings, multimodal vision projector, multi-modal audio spectrogram projection (Whisper / Audio-LLM), and cryptographic token watermarking.
 
 ---
 
