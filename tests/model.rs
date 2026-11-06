@@ -1161,6 +1161,94 @@ fn chunked_prefill_runner_stateful_step_and_progress() {
 }
 
 #[test]
+fn async_chunked_prefill_background_compute_and_streaming() {
+    let path = write("async_chunked", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = vec![1u32, 2, 3, 0, 2, 1, 3];
+
+    // Reference sequential forward
+    let mut state_ref = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_ref, tok, pos).expect("forward");
+    }
+
+    // Spawn async background chunked prefill with chunk size 2
+    let state_init = State::new(&model.config);
+    let mut async_prefill =
+        ferrite::AsyncChunkedPrefill::spawn(&model, state_init, prompt.clone(), 0, 2)
+            .expect("spawn async prefill");
+
+    assert_eq!(async_prefill.total_tokens(), 7);
+
+    let mut events = Vec::new();
+    while let Some(event) = async_prefill.wait_next_event() {
+        events.push(event);
+        if async_prefill.is_finished() {
+            break;
+        }
+    }
+
+    // Expect: chunks 0..2, 2..4, 4..6, 6..7 -> 4 ChunkProcessed events + 1 Completed event
+    assert_eq!(events.len(), 5);
+    match events[0] {
+        ferrite::PrefillChunkEvent::ChunkProcessed {
+            chunk_index,
+            chunk_tokens,
+            total_processed,
+            ..
+        } => {
+            assert_eq!(chunk_index, 1);
+            assert_eq!(chunk_tokens, 2);
+            assert_eq!(total_processed, 2);
+        }
+        _ => panic!("unexpected event 0"),
+    }
+
+    match events[3] {
+        ferrite::PrefillChunkEvent::ChunkProcessed {
+            chunk_index,
+            chunk_tokens,
+            total_processed,
+            ..
+        } => {
+            assert_eq!(chunk_index, 4);
+            assert_eq!(chunk_tokens, 1);
+            assert_eq!(total_processed, 7);
+        }
+        _ => panic!("unexpected event 3"),
+    }
+
+    match events[4] {
+        ferrite::PrefillChunkEvent::Completed { total_tokens } => {
+            assert_eq!(total_tokens, 7);
+        }
+        _ => panic!("unexpected event 4"),
+    }
+
+    let final_state = async_prefill.join().expect("join");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&final_state.logits),
+        bits(&state_ref.logits),
+        "async background prefill logits must match reference sequential forward exactly"
+    );
+
+    // Test cooperative cancellation
+    let long_prompt = vec![1u32; 32];
+    let cancel_prefill =
+        ferrite::AsyncChunkedPrefill::spawn(&model, State::new(&model.config), long_prompt, 0, 1)
+            .expect("spawn cancel prefill");
+    cancel_prefill.cancel();
+    let final_cancel_state = cancel_prefill.join().expect("join cancel");
+    assert!(final_cancel_state.logits.len() == model.config.vocab);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn quantized_kv_cache_q8_0_forward_and_prefill_match() {
     let path = write("quantized_kv_q8_0", &fixture(2, true));
     let gguf = Gguf::open(&path).expect("open");

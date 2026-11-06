@@ -26,6 +26,7 @@ pub mod merge;
 pub mod model;
 pub mod ops;
 pub mod paged;
+pub mod prefill;
 pub mod prefix;
 pub mod quant;
 pub mod sample;
@@ -55,6 +56,7 @@ pub use paged::{
     BlockId, HierarchicalPageTable, PageTable, PagedPool, PagedSequence, PagedSequenceV2,
     PhysicalBlock, BLOCKS_PER_PAGE_TABLE, DEFAULT_BLOCK_TOKENS,
 };
+pub use prefill::{AsyncChunkedPrefill, PrefillChunkEvent};
 pub use prefix::{RadixCache, RadixNode};
 pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, dot_gptq_int4};
 pub use quant::outlier::{OutlierConfig, OutlierMatrix, OutlierQuantMode};
