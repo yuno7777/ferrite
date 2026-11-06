@@ -395,6 +395,11 @@ mod tests {
             expert_count: None,
             expert_used_count: None,
             expert_shared_count: None,
+            q_lora_rank: None,
+            kv_lora_rank: None,
+            qk_nope_head_dim: None,
+            qk_rope_head_dim: None,
+            v_head_dim: None,
         };
 
         let scheduler = BatchScheduler::new(&config, 32, SchedulerConfig::default());

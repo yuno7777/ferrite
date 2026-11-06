@@ -207,38 +207,54 @@ pub enum KvCache {
 impl KvCache {
     /// Allocate a KV cache buffer for `layers` layers, `context` positions, and `kv_dim` dimensions.
     pub fn new(layers: usize, context: usize, kv_dim: usize, cache_type: KvCacheType) -> Self {
+        Self::new_asymmetric(layers, context, kv_dim, kv_dim, cache_type)
+    }
+
+    /// Allocate a KV cache buffer for `layers` layers, `context` positions, with asymmetric `k_dim` and `v_dim`.
+    pub fn new_asymmetric(
+        layers: usize,
+        context: usize,
+        k_dim: usize,
+        v_dim: usize,
+        cache_type: KvCacheType,
+    ) -> Self {
         match cache_type {
-            KvCacheType::F32 => {
-                let total = layers * context * kv_dim;
-                Self::F32 {
-                    key: vec![0.0; total],
-                    value: vec![0.0; total],
-                    layers,
-                    context,
-                    kv_dim,
-                }
-            }
+            KvCacheType::F32 => Self::F32 {
+                key: vec![0.0; layers * context * k_dim],
+                value: vec![0.0; layers * context * v_dim],
+                layers,
+                context,
+                kv_dim: k_dim,
+            },
             KvCacheType::Q8_0 => {
-                let blocks_per_token = kv_dim.div_ceil(KV_BLOCK_SIZE);
+                assert_eq!(
+                    k_dim, v_dim,
+                    "quantized KV cache requires equal key/value widths"
+                );
+                let blocks_per_token = k_dim.div_ceil(KV_BLOCK_SIZE);
                 let total_blocks = layers * context * blocks_per_token;
                 Self::Q8_0 {
                     key: vec![BlockQ8_0::default(); total_blocks],
                     value: vec![BlockQ8_0::default(); total_blocks],
                     layers,
                     context,
-                    kv_dim,
+                    kv_dim: k_dim,
                     blocks_per_token,
                 }
             }
             KvCacheType::Q4_0 => {
-                let blocks_per_token = kv_dim.div_ceil(KV_BLOCK_SIZE);
+                assert_eq!(
+                    k_dim, v_dim,
+                    "quantized KV cache requires equal key/value widths"
+                );
+                let blocks_per_token = k_dim.div_ceil(KV_BLOCK_SIZE);
                 let total_blocks = layers * context * blocks_per_token;
                 Self::Q4_0 {
                     key: vec![BlockQ4_0::default(); total_blocks],
                     value: vec![BlockQ4_0::default(); total_blocks],
                     layers,
                     context,
-                    kv_dim,
+                    kv_dim: k_dim,
                     blocks_per_token,
                 }
             }
@@ -273,13 +289,17 @@ impl KvCache {
             Self::F32 {
                 key,
                 value,
+                layers,
                 context,
                 kv_dim,
-                ..
             } => {
-                let slot = (layer * *context + pos) * *kv_dim;
-                key[slot..slot + *kv_dim].copy_from_slice(k);
-                value[slot..slot + *kv_dim].copy_from_slice(v);
+                let v_dim = value.len() / (*layers * *context);
+                let slot_k = (layer * *context + pos) * *kv_dim;
+                let k_len = k.len().min(*kv_dim);
+                key[slot_k..slot_k + k_len].copy_from_slice(&k[..k_len]);
+                let slot_v = (layer * *context + pos) * v_dim;
+                let v_len = v.len().min(v_dim);
+                value[slot_v..slot_v + v_len].copy_from_slice(&v[..v_len]);
             }
             Self::Q8_0 {
                 key,
@@ -322,15 +342,17 @@ impl KvCache {
             Self::F32 {
                 key,
                 value,
+                layers,
                 context,
                 kv_dim,
-                ..
             } => {
-                let layer_offset = layer * *context * *kv_dim;
+                let v_dim = value.len() / (*layers * *context);
+                let layer_offset_k = layer * *context * *kv_dim;
+                let layer_offset_v = layer * *context * v_dim;
                 ops::attention_online(
                     query,
-                    &key[layer_offset..],
-                    &value[layer_offset..],
+                    &key[layer_offset_k..],
+                    &value[layer_offset_v..],
                     params,
                     out,
                 );
@@ -382,12 +404,14 @@ impl KvCache {
                 context,
                 kv_dim,
             } => {
+                let v_dim = value.len() / (*layers * *context);
                 let limit = end_pos.min(*context);
                 for layer in 0..*layers {
                     for pos in keep_pos..limit {
-                        let slot = (layer * *context + pos) * *kv_dim;
-                        key[slot..slot + *kv_dim].fill(0.0);
-                        value[slot..slot + *kv_dim].fill(0.0);
+                        let slot_k = (layer * *context + pos) * *kv_dim;
+                        key[slot_k..slot_k + *kv_dim].fill(0.0);
+                        let slot_v = (layer * *context + pos) * v_dim;
+                        value[slot_v..slot_v + v_dim].fill(0.0);
                     }
                 }
             }
@@ -906,6 +930,35 @@ fn attention_online_q4_0(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f32_cache_supports_distinct_key_and_value_widths() {
+        let mut cache = KvCache::new_asymmetric(1, 2, 4, 2, KvCacheType::F32);
+        cache.store(0, 0, &[1.0, 0.0, 0.0, 0.0], &[3.0, 5.0]);
+        let mut out = [0.0; 2];
+        cache.attention(
+            0,
+            &[1.0, 0.0],
+            &mut out,
+            ops::AttentionParams {
+                row_width: 4,
+                offset: 0,
+                len: 1,
+                scale: 1.0,
+                logit_cap: None,
+                window: None,
+                position: 0,
+                tile_size: 1,
+                v_row_width: Some(2),
+                v_offset: Some(0),
+            },
+        );
+        assert_eq!(out, [3.0, 5.0]);
+        assert_eq!(
+            cache.cache_bytes(),
+            (4 + 2) * std::mem::size_of::<f32>() * 2
+        );
+    }
 
     #[test]
     fn q8_0_quantize_dequantize_roundtrip() {

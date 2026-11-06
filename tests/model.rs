@@ -1606,3 +1606,205 @@ fn deepseek_moe_with_shared_experts_forward_and_prefill_match() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn deepseek_mla_forward_and_prefill_match() {
+    let q_rank = 4;
+    let kv_rank = 4;
+    let nope_dim = 2;
+    let rope_dim = 2;
+    let v_hdim = 2;
+    let heads = 2;
+    let head_dim = nope_dim + rope_dim; // 4
+    let q_dim = heads * head_dim; // 8
+    let kv_a_dim = kv_rank + rope_dim; // 6
+    let kv_b_dim = heads * (nope_dim + v_hdim); // 8
+    let v_dim = heads * v_hdim; // 4
+
+    let mut q_a = vec![0.0f32; q_rank * DIM];
+    for i in 0..q_rank.min(DIM) {
+        q_a[i * DIM + i] = 1.0;
+    }
+    let mut q_b = vec![0.0f32; q_dim * q_rank];
+    for i in 0..q_dim.min(q_rank) {
+        q_b[i * q_rank + i] = 1.0;
+    }
+    let mut kv_a = vec![0.0f32; kv_a_dim * DIM];
+    for i in 0..kv_a_dim.min(DIM) {
+        kv_a[i * DIM + i] = 1.0;
+    }
+    let mut kv_b = vec![0.0f32; kv_b_dim * kv_rank];
+    for i in 0..kv_b_dim.min(kv_rank) {
+        kv_b[i * kv_rank + i] = 1.0;
+    }
+    let mut wo = vec![0.0f32; DIM * v_dim];
+    for i in 0..DIM.min(v_dim) {
+        wo[i * v_dim + i] = 1.0;
+    }
+
+    let builder = Builder::new()
+        .meta("general.architecture", Value::String("deepseek2".into()))
+        .meta("deepseek2.block_count", Value::U32(1))
+        .meta("deepseek2.embedding_length", Value::U32(DIM as u32))
+        .meta("deepseek2.feed_forward_length", Value::U32(FFN as u32))
+        .meta("deepseek2.attention.head_count", Value::U32(heads as u32))
+        .meta(
+            "deepseek2.attention.head_count_kv",
+            Value::U32(heads as u32),
+        )
+        .meta(
+            "deepseek2.attention.key_length",
+            Value::U32(head_dim as u32),
+        )
+        .meta(
+            "deepseek2.attention.value_length",
+            Value::U32(v_hdim as u32),
+        )
+        .meta("deepseek2.attention.q_lora_rank", Value::U32(q_rank as u32))
+        .meta(
+            "deepseek2.attention.kv_lora_rank",
+            Value::U32(kv_rank as u32),
+        )
+        .meta(
+            "deepseek2.attention.qk_nope_head_dim",
+            Value::U32(nope_dim as u32),
+        )
+        .meta(
+            "deepseek2.attention.qk_rope_head_dim",
+            Value::U32(rope_dim as u32),
+        )
+        .meta("deepseek2.context_length", Value::U32(16))
+        .meta(
+            "deepseek2.attention.layer_norm_rms_epsilon",
+            Value::F32(EPS),
+        )
+        .meta("deepseek2.rope.freq_base", Value::F32(10000.0))
+        .meta("tokenizer.ggml.model", Value::String("gpt2".into()))
+        .meta(
+            "tokenizer.ggml.tokens",
+            Value::Array((0..VOCAB).map(|i| Value::String(format!("t{i}"))).collect()),
+        )
+        .tensor(
+            "token_embd.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&embeddings()),
+        )
+        .tensor(
+            "blk.0.attn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_q_a.weight",
+            &[DIM as u64, q_rank as u64],
+            GgmlType::F32,
+            bytes(&q_a),
+        )
+        .tensor(
+            "blk.0.attn_q_a_norm.weight",
+            &[q_rank as u64],
+            GgmlType::F32,
+            bytes(&vec![1.0; q_rank]),
+        )
+        .tensor(
+            "blk.0.attn_q_b.weight",
+            &[q_rank as u64, q_dim as u64],
+            GgmlType::F32,
+            bytes(&q_b),
+        )
+        .tensor(
+            "blk.0.attn_kv_a.weight",
+            &[DIM as u64, kv_a_dim as u64],
+            GgmlType::F32,
+            bytes(&kv_a),
+        )
+        .tensor(
+            "blk.0.attn_kv_a_norm.weight",
+            &[kv_rank as u64],
+            GgmlType::F32,
+            bytes(&vec![1.0; kv_rank]),
+        )
+        .tensor(
+            "blk.0.attn_kv_b.weight",
+            &[kv_rank as u64, kv_b_dim as u64],
+            GgmlType::F32,
+            bytes(&kv_b),
+        )
+        .tensor(
+            "blk.0.attn_output.weight",
+            &[v_dim as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&wo),
+        )
+        .tensor(
+            "blk.0.ffn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.ffn_gate.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.0; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_up.weight",
+            &[DIM as u64, FFN as u64],
+            GgmlType::F32,
+            bytes(&[0.0; DIM * FFN]),
+        )
+        .tensor(
+            "blk.0.ffn_down.weight",
+            &[FFN as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&[0.0; FFN * DIM]),
+        )
+        .tensor(
+            "output_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "output.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        );
+
+    let path = write("deepseek2_mla_test", &builder);
+    let gguf = Gguf::open(&path).expect("open fixture");
+    let model = Model::load(&gguf).expect("load model");
+
+    assert_eq!(model.config.q_lora_rank, Some(4));
+    assert_eq!(model.config.kv_lora_rank, Some(4));
+    assert_eq!(model.config.qk_nope_head_dim, Some(2));
+    assert_eq!(model.config.qk_rope_head_dim, Some(2));
+    assert_eq!(model.config.v_head_dim, Some(2));
+    assert!(model.layers[0].attn_kv_a.is_some());
+    assert!(model.layers[0].attn_kv_b.is_some());
+
+    let mut state_seq = State::new(&model.config);
+    let mut state_batch = State::new(&model.config);
+    let prompt = [0u32, 1u32, 2u32];
+
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_seq.logits),
+        bits(&state_batch.logits),
+        "DeepSeek MLA batched prefill logits must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}

@@ -51,6 +51,11 @@ pub struct Config {
     pub expert_count: Option<usize>,
     pub expert_used_count: Option<usize>,
     pub expert_shared_count: Option<usize>,
+    pub q_lora_rank: Option<usize>,
+    pub kv_lora_rank: Option<usize>,
+    pub qk_nope_head_dim: Option<usize>,
+    pub qk_rope_head_dim: Option<usize>,
+    pub v_head_dim: Option<usize>,
 }
 
 impl Config {
@@ -85,6 +90,11 @@ impl Config {
             .arch_u64("attention.key_length")
             .or_else(|| model.arch_u64("attention.head_dim"))
             .map(|v| v as usize)
+            .or_else(|| {
+                let nope = model.arch_u64("attention.qk_nope_head_dim")?;
+                let rope = model.arch_u64("attention.qk_rope_head_dim")?;
+                Some((nope + rope) as usize)
+            })
             .unwrap_or_else(|| embedding.checked_div(heads).unwrap_or(0));
 
         if heads == 0 || kv_heads == 0 || head_dim == 0 {
@@ -95,10 +105,12 @@ impl Config {
                 "{heads} heads is not a multiple of {kv_heads} kv heads"
             )));
         }
-        // In LLaMA and Qwen, heads * head_dim == embedding. In Gemma 2, head_dim is decoupled
-        // from embedding (e.g., 8 heads * 256 = 2048 != 2304 embedding) and wo projects from
-        // heads * head_dim to embedding.
-        if arch != "gemma" && arch != "gemma2" && heads * head_dim != embedding {
+        // In LLaMA and Qwen, heads * head_dim == embedding. In Gemma 2 and DeepSeek,
+        // head_dim is decoupled from embedding.
+        if !arch.starts_with("gemma")
+            && !arch.starts_with("deepseek")
+            && heads * head_dim != embedding
+        {
             return Err(bad(format!(
                 "{heads} heads of {head_dim} do not add up to an embedding of {embedding}"
             )));
@@ -221,6 +233,18 @@ impl Config {
             expert_shared_count: model
                 .arch_u64("expert_shared_count")
                 .or_else(|| model.meta_u64("expert_shared_count"))
+                .map(|v| v as usize),
+            q_lora_rank: model.arch_u64("attention.q_lora_rank").map(|v| v as usize),
+            kv_lora_rank: model.arch_u64("attention.kv_lora_rank").map(|v| v as usize),
+            qk_nope_head_dim: model
+                .arch_u64("attention.qk_nope_head_dim")
+                .map(|v| v as usize),
+            qk_rope_head_dim: model
+                .arch_u64("attention.qk_rope_head_dim")
+                .map(|v| v as usize),
+            v_head_dim: model
+                .arch_u64("attention.value_length")
+                .or_else(|| model.arch_u64("attention.v_head_dim"))
                 .map(|v| v as usize),
         })
     }
@@ -642,6 +666,12 @@ pub struct Layer<'a> {
     pub moe_gate_shexp: Option<Weight<'a>>,
     pub moe_up_shexp: Option<Weight<'a>>,
     pub moe_down_shexp: Option<Weight<'a>>,
+    pub attn_q_a: Option<Weight<'a>>,
+    pub attn_q_a_norm: Option<Vec<f32>>,
+    pub attn_q_b: Option<Weight<'a>>,
+    pub attn_kv_a: Option<Weight<'a>>,
+    pub attn_kv_a_norm: Option<Vec<f32>>,
+    pub attn_kv_b: Option<Weight<'a>>,
 }
 
 impl<'a> Layer<'a> {
@@ -816,13 +846,16 @@ impl<'a> Model<'a> {
                     gguf,
                     &format!("blk.{index}.post_attention_norm.weight"),
                 )?,
-                wq: Weight::bind(gguf, &format!("blk.{index}.attn_q.weight"))?,
+                wq: Weight::bind(gguf, &format!("blk.{index}.attn_q.weight"))
+                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
                 bq: load_vector_optional(gguf, &format!("blk.{index}.attn_q.bias"))?,
                 lora_wq: None,
-                wk: Weight::bind(gguf, &format!("blk.{index}.attn_k.weight"))?,
+                wk: Weight::bind(gguf, &format!("blk.{index}.attn_k.weight"))
+                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
                 bk: load_vector_optional(gguf, &format!("blk.{index}.attn_k.bias"))?,
                 lora_wk: None,
-                wv: Weight::bind(gguf, &format!("blk.{index}.attn_v.weight"))?,
+                wv: Weight::bind(gguf, &format!("blk.{index}.attn_v.weight"))
+                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
                 bv: load_vector_optional(gguf, &format!("blk.{index}.attn_v.bias"))?,
                 lora_wv: None,
                 wo: Weight::bind(gguf, &format!("blk.{index}.attn_output.weight"))?,
@@ -914,6 +947,18 @@ impl<'a> Model<'a> {
                 moe_down_shexp: Weight::bind(gguf, &format!("blk.{index}.ffn_down_shexp.weight"))
                     .or_else(|_| Weight::bind(gguf, &format!("blk.{index}.ffn_down.shexp.weight")))
                     .ok(),
+                attn_q_a: Weight::bind(gguf, &format!("blk.{index}.attn_q_a.weight")).ok(),
+                attn_q_a_norm: load_vector_optional(
+                    gguf,
+                    &format!("blk.{index}.attn_q_a_norm.weight"),
+                )?,
+                attn_q_b: Weight::bind(gguf, &format!("blk.{index}.attn_q_b.weight")).ok(),
+                attn_kv_a: Weight::bind(gguf, &format!("blk.{index}.attn_kv_a.weight")).ok(),
+                attn_kv_a_norm: load_vector_optional(
+                    gguf,
+                    &format!("blk.{index}.attn_kv_a_norm.weight"),
+                )?,
+                attn_kv_b: Weight::bind(gguf, &format!("blk.{index}.attn_kv_b.weight")).ok(),
             });
         }
 
@@ -1027,97 +1072,237 @@ impl<'a> Model<'a> {
 
         for (index, layer) in self.layers.iter().enumerate() {
             ops::rms_norm(x, &layer.attn_norm, c.eps, &mut xb[..c.embedding]);
-            layer
-                .wq
-                .matvec_threaded(&xb[..c.embedding], q, *threads, workspace)?;
-            if let Some(bq) = &layer.bq {
-                for (slot, b) in q.iter_mut().zip(bq) {
-                    *slot += b;
+            let is_mla = layer.attn_kv_a.is_some() && layer.attn_kv_b.is_some();
+            if is_mla {
+                let d_nope = c.qk_nope_head_dim.unwrap_or(head_dim);
+                let d_rope = c.qk_rope_head_dim.unwrap_or(0);
+                let v_hd = c.v_head_dim.unwrap_or(head_dim);
+                let kv_lora_rank = c.kv_lora_rank.unwrap_or(512);
+
+                if let (Some(attn_q_a), Some(attn_q_b)) = (&layer.attn_q_a, &layer.attn_q_b) {
+                    let mut q_lora = vec![0.0f32; attn_q_a.rows];
+                    attn_q_a.matvec_threaded(
+                        &xb[..c.embedding],
+                        &mut q_lora,
+                        *threads,
+                        workspace,
+                    )?;
+                    if let Some(norm) = &layer.attn_q_a_norm {
+                        let mut normed = vec![0.0f32; q_lora.len()];
+                        ops::rms_norm(&q_lora, norm, c.eps, &mut normed);
+                        q_lora = normed;
+                    }
+                    attn_q_b.matvec_threaded(&q_lora, q, *threads, workspace)?;
+                } else {
+                    layer
+                        .wq
+                        .matvec_threaded(&xb[..c.embedding], q, *threads, workspace)?;
+                    if let Some(bq) = &layer.bq {
+                        for (slot, b) in q.iter_mut().zip(bq) {
+                            *slot += b;
+                        }
+                    }
                 }
-            }
-            if let Some(l) = &layer.lora_wq {
-                l.apply(&xb[..c.embedding], q)?;
-            }
 
-            layer
-                .wk
-                .matvec_threaded(&xb[..c.embedding], k, *threads, workspace)?;
-            if let Some(bk) = &layer.bk {
-                for (slot, b) in k.iter_mut().zip(bk) {
-                    *slot += b;
+                for head in 0..c.heads {
+                    let head_slice = &mut q[head * head_dim..(head + 1) * head_dim];
+                    if d_rope > 0 && d_nope + d_rope <= head_slice.len() {
+                        let rope_slice = &mut head_slice[d_nope..d_nope + d_rope];
+                        ops::rope_scaled(
+                            rope_slice,
+                            position,
+                            c.rope_base,
+                            c.rope_dim.min(d_rope),
+                            c.rope_scaling.as_ref(),
+                        );
+                    }
                 }
-            }
-            if let Some(l) = &layer.lora_wk {
-                l.apply(&xb[..c.embedding], k)?;
-            }
 
-            layer
-                .wv
-                .matvec_threaded(&xb[..c.embedding], v, *threads, workspace)?;
-            if let Some(bv) = &layer.bv {
-                for (slot, b) in v.iter_mut().zip(bv) {
-                    *slot += b;
+                let attn_kv_a = layer.attn_kv_a.as_ref().unwrap();
+                let attn_kv_b = layer.attn_kv_b.as_ref().unwrap();
+                let mut kv_a_out = vec![0.0f32; attn_kv_a.rows];
+                attn_kv_a.matvec_threaded(
+                    &xb[..c.embedding],
+                    &mut kv_a_out,
+                    *threads,
+                    workspace,
+                )?;
+
+                let c_kv = &kv_a_out[..kv_lora_rank];
+                let mut c_kv_normed = vec![0.0f32; kv_lora_rank];
+                if let Some(norm) = &layer.attn_kv_a_norm {
+                    ops::rms_norm(c_kv, norm, c.eps, &mut c_kv_normed);
+                } else {
+                    c_kv_normed.copy_from_slice(c_kv);
                 }
-            }
-            if let Some(l) = &layer.lora_wv {
-                l.apply(&xb[..c.embedding], v)?;
-            }
 
-            // Position is baked into the query and key, never into the value.
-            for head in 0..c.heads {
-                ops::rope_scaled(
-                    &mut q[head * head_dim..(head + 1) * head_dim],
-                    position,
-                    c.rope_base,
-                    c.rope_dim,
-                    c.rope_scaling.as_ref(),
-                );
-            }
-            for head in 0..c.kv_heads {
-                ops::rope_scaled(
-                    &mut k[head * head_dim..(head + 1) * head_dim],
-                    position,
-                    c.rope_base,
-                    c.rope_dim,
-                    c.rope_scaling.as_ref(),
-                );
-            }
-
-            kv_cache.store(index, position, k, v);
-
-            let scale = 1.0 / (head_dim as f32).sqrt();
-            let is_sliding = is_sliding_layer(index);
-            for head in 0..c.heads {
-                // Grouped-query attention: several query heads share one KV head.
-                let kv_head = head / group;
-                let query = &q[head * head_dim..(head + 1) * head_dim];
-
-                let out = &mut xb[head * head_dim..(head + 1) * head_dim];
-                kv_cache.attention(
-                    index,
-                    query,
-                    out,
-                    ops::AttentionParams {
-                        row_width: kv_dim,
-                        offset: kv_head * head_dim,
-                        len: position + 1,
-                        scale,
-                        logit_cap: c.attn_logit_softcapping,
-                        window: is_sliding.then_some(window),
+                let mut k_rope = if d_rope > 0 && kv_a_out.len() >= kv_lora_rank + d_rope {
+                    kv_a_out[kv_lora_rank..kv_lora_rank + d_rope].to_vec()
+                } else {
+                    Vec::new()
+                };
+                if !k_rope.is_empty() {
+                    ops::rope_scaled(
+                        &mut k_rope,
                         position,
-                        tile_size: 64,
-                    },
-                );
-            }
+                        c.rope_base,
+                        c.rope_dim.min(d_rope),
+                        c.rope_scaling.as_ref(),
+                    );
+                }
 
-            layer.wo.matvec_threaded(
-                &xb[..att_dim],
-                &mut xb2[..c.embedding],
-                *threads,
-                workspace,
-            )?;
-            if let Some(l) = &layer.lora_wo {
-                l.apply(&xb[..att_dim], &mut xb2[..c.embedding])?;
+                let mut kv_b_out = vec![0.0f32; attn_kv_b.rows];
+                attn_kv_b.matvec_threaded(&c_kv_normed, &mut kv_b_out, *threads, workspace)?;
+
+                let head_kv_b_dim = d_nope + v_hd;
+                for head in 0..c.heads {
+                    let kv_b_head = &kv_b_out[head * head_kv_b_dim..(head + 1) * head_kv_b_dim];
+                    let k_nope_part = &kv_b_head[..d_nope];
+                    let v_part = &kv_b_head[d_nope..d_nope + v_hd];
+
+                    let k_dest = &mut k[head * head_dim..(head + 1) * head_dim];
+                    k_dest[..d_nope].copy_from_slice(k_nope_part);
+                    if !k_rope.is_empty() {
+                        k_dest[d_nope..d_nope + d_rope].copy_from_slice(&k_rope);
+                    }
+
+                    let v_dest = &mut v[head * v_hd..(head + 1) * v_hd];
+                    v_dest.copy_from_slice(v_part);
+                }
+
+                kv_cache.store(index, position, k, v);
+
+                let scale = 1.0 / (head_dim as f32).sqrt();
+                let is_sliding = is_sliding_layer(index);
+                let v_dim = c.heads * v_hd;
+                let k_dim = c.heads * head_dim;
+
+                for head in 0..c.heads {
+                    let query = &q[head * head_dim..(head + 1) * head_dim];
+                    let out = &mut xb[head * v_hd..(head + 1) * v_hd];
+                    kv_cache.attention(
+                        index,
+                        query,
+                        out,
+                        ops::AttentionParams {
+                            row_width: k_dim,
+                            offset: head * head_dim,
+                            len: position + 1,
+                            scale,
+                            logit_cap: c.attn_logit_softcapping,
+                            window: is_sliding.then_some(window),
+                            position,
+                            tile_size: 64,
+                            v_row_width: Some(v_dim),
+                            v_offset: Some(head * v_hd),
+                        },
+                    );
+                }
+
+                layer.wo.matvec_threaded(
+                    &xb[..v_dim],
+                    &mut xb2[..c.embedding],
+                    *threads,
+                    workspace,
+                )?;
+                if let Some(l) = &layer.lora_wo {
+                    l.apply(&xb[..v_dim], &mut xb2[..c.embedding])?;
+                }
+            } else {
+                layer
+                    .wq
+                    .matvec_threaded(&xb[..c.embedding], q, *threads, workspace)?;
+                if let Some(bq) = &layer.bq {
+                    for (slot, b) in q.iter_mut().zip(bq) {
+                        *slot += b;
+                    }
+                }
+                if let Some(l) = &layer.lora_wq {
+                    l.apply(&xb[..c.embedding], q)?;
+                }
+
+                layer
+                    .wk
+                    .matvec_threaded(&xb[..c.embedding], k, *threads, workspace)?;
+                if let Some(bk) = &layer.bk {
+                    for (slot, b) in k.iter_mut().zip(bk) {
+                        *slot += b;
+                    }
+                }
+                if let Some(l) = &layer.lora_wk {
+                    l.apply(&xb[..c.embedding], k)?;
+                }
+
+                layer
+                    .wv
+                    .matvec_threaded(&xb[..c.embedding], v, *threads, workspace)?;
+                if let Some(bv) = &layer.bv {
+                    for (slot, b) in v.iter_mut().zip(bv) {
+                        *slot += b;
+                    }
+                }
+                if let Some(l) = &layer.lora_wv {
+                    l.apply(&xb[..c.embedding], v)?;
+                }
+
+                // Position is baked into the query and key, never into the value.
+                for head in 0..c.heads {
+                    ops::rope_scaled(
+                        &mut q[head * head_dim..(head + 1) * head_dim],
+                        position,
+                        c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
+                    );
+                }
+                for head in 0..c.kv_heads {
+                    ops::rope_scaled(
+                        &mut k[head * head_dim..(head + 1) * head_dim],
+                        position,
+                        c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
+                    );
+                }
+
+                kv_cache.store(index, position, k, v);
+
+                let scale = 1.0 / (head_dim as f32).sqrt();
+                let is_sliding = is_sliding_layer(index);
+                for head in 0..c.heads {
+                    // Grouped-query attention: several query heads share one KV head.
+                    let kv_head = head / group;
+                    let query = &q[head * head_dim..(head + 1) * head_dim];
+
+                    let out = &mut xb[head * head_dim..(head + 1) * head_dim];
+                    kv_cache.attention(
+                        index,
+                        query,
+                        out,
+                        ops::AttentionParams {
+                            row_width: kv_dim,
+                            offset: kv_head * head_dim,
+                            len: position + 1,
+                            scale,
+                            logit_cap: c.attn_logit_softcapping,
+                            window: is_sliding.then_some(window),
+                            position,
+                            tile_size: 64,
+                            v_row_width: None,
+                            v_offset: None,
+                        },
+                    );
+                }
+
+                layer.wo.matvec_threaded(
+                    &xb[..att_dim],
+                    &mut xb2[..c.embedding],
+                    *threads,
+                    workspace,
+                )?;
+                if let Some(l) = &layer.lora_wo {
+                    l.apply(&xb[..att_dim], &mut xb2[..c.embedding])?;
+                }
             }
             if let Some(post_attn_norm) = &layer.post_attn_norm {
                 ops::rms_norm(
@@ -1302,13 +1487,26 @@ impl<'a> Model<'a> {
         let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
         let att_dim = c.heads * head_dim;
 
+        let is_deepseek_mla = c.arch.starts_with("deepseek") && c.kv_lora_rank.is_some();
+        let eff_k_dim = if is_deepseek_mla {
+            c.heads * head_dim
+        } else {
+            kv_dim
+        };
+        let v_hd = c.v_head_dim.unwrap_or(head_dim);
+        let eff_v_dim = if let Some(v_h) = c.v_head_dim {
+            c.heads * v_h
+        } else {
+            eff_k_dim
+        };
+
         let mut x_batch = embeddings.to_vec();
         let mut xb_batch = vec![0.0f32; n * c.embedding];
         let mut xb2_batch = vec![0.0f32; n * c.embedding];
-        let mut att_batch = vec![0.0f32; n * att_dim];
+        let mut att_batch = vec![0.0f32; n * eff_v_dim.max(att_dim)];
         let mut q_batch = vec![0.0f32; n * att_dim];
-        let mut k_batch = vec![0.0f32; n * kv_dim];
-        let mut v_batch = vec![0.0f32; n * kv_dim];
+        let mut k_batch = vec![0.0f32; n * eff_k_dim];
+        let mut v_batch = vec![0.0f32; n * eff_v_dim];
         let mut hb_batch = vec![0.0f32; n * c.ffn];
         let mut hb2_batch = vec![0.0f32; n * c.ffn];
 
@@ -1330,114 +1528,309 @@ impl<'a> Model<'a> {
                 ops::rms_norm(x_tok, &layer.attn_norm, c.eps, xb_tok);
             }
 
-            layer
-                .wq
-                .matmul_threaded(&xb_batch, &mut q_batch, n, *threads, workspace)?;
-            if let Some(bq) = &layer.bq {
+            let is_mla = layer.attn_kv_a.is_some() && layer.attn_kv_b.is_some();
+            if is_mla {
+                let d_nope = c.qk_nope_head_dim.unwrap_or(head_dim);
+                let d_rope = c.qk_rope_head_dim.unwrap_or(0);
+                let kv_lora_rank = c.kv_lora_rank.unwrap_or(512);
+
+                if let (Some(attn_q_a), Some(attn_q_b)) = (&layer.attn_q_a, &layer.attn_q_b) {
+                    let mut q_lora_batch = vec![0.0f32; n * attn_q_a.rows];
+                    attn_q_a.matmul_threaded(
+                        &xb_batch,
+                        &mut q_lora_batch,
+                        n,
+                        *threads,
+                        workspace,
+                    )?;
+                    if let Some(norm) = &layer.attn_q_a_norm {
+                        for b in 0..n {
+                            let in_tok = &q_lora_batch[b * attn_q_a.rows..(b + 1) * attn_q_a.rows];
+                            let mut normed = vec![0.0f32; attn_q_a.rows];
+                            ops::rms_norm(in_tok, norm, c.eps, &mut normed);
+                            q_lora_batch[b * attn_q_a.rows..(b + 1) * attn_q_a.rows]
+                                .copy_from_slice(&normed);
+                        }
+                    }
+                    attn_q_b.matmul_threaded(
+                        &q_lora_batch,
+                        &mut q_batch,
+                        n,
+                        *threads,
+                        workspace,
+                    )?;
+                } else {
+                    layer
+                        .wq
+                        .matmul_threaded(&xb_batch, &mut q_batch, n, *threads, workspace)?;
+                    if let Some(bq) = &layer.bq {
+                        for b in 0..n {
+                            let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
+                            for (slot, val) in q_tok.iter_mut().zip(bq) {
+                                *slot += val;
+                            }
+                        }
+                    }
+                }
+
+                // RoPE on Q
                 for b in 0..n {
+                    let pos = start_pos + b;
                     let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
-                    for (slot, val) in q_tok.iter_mut().zip(bq) {
-                        *slot += val;
+                    for head in 0..c.heads {
+                        let head_slice = &mut q_tok[head * head_dim..(head + 1) * head_dim];
+                        if d_rope > 0 && d_nope + d_rope <= head_slice.len() {
+                            let rope_slice = &mut head_slice[d_nope..d_nope + d_rope];
+                            ops::rope_scaled(
+                                rope_slice,
+                                pos,
+                                c.rope_base,
+                                c.rope_dim.min(d_rope),
+                                c.rope_scaling.as_ref(),
+                            );
+                        }
                     }
                 }
-            }
-            if let Some(l) = &layer.lora_wq {
-                l.apply_batched_threaded(&xb_batch, n, &mut q_batch, *threads)?;
-            }
 
-            layer
-                .wk
-                .matmul_threaded(&xb_batch, &mut k_batch, n, *threads, workspace)?;
-            if let Some(bk) = &layer.bk {
+                // KV down projection
+                let attn_kv_a = layer.attn_kv_a.as_ref().unwrap();
+                let attn_kv_b = layer.attn_kv_b.as_ref().unwrap();
+                let mut kv_a_batch = vec![0.0f32; n * attn_kv_a.rows];
+                attn_kv_a.matmul_threaded(&xb_batch, &mut kv_a_batch, n, *threads, workspace)?;
+
+                let mut c_kv_normed_batch = vec![0.0f32; n * kv_lora_rank];
+                let mut k_rope_batch = vec![0.0f32; n * d_rope];
+
                 for b in 0..n {
+                    let pos = start_pos + b;
+                    let kv_a_tok = &kv_a_batch[b * attn_kv_a.rows..(b + 1) * attn_kv_a.rows];
+                    let c_kv = &kv_a_tok[..kv_lora_rank];
+                    let c_normed_dest =
+                        &mut c_kv_normed_batch[b * kv_lora_rank..(b + 1) * kv_lora_rank];
+                    if let Some(norm) = &layer.attn_kv_a_norm {
+                        ops::rms_norm(c_kv, norm, c.eps, c_normed_dest);
+                    } else {
+                        c_normed_dest.copy_from_slice(c_kv);
+                    }
+
+                    if d_rope > 0 && kv_a_tok.len() >= kv_lora_rank + d_rope {
+                        let k_rope_dest = &mut k_rope_batch[b * d_rope..(b + 1) * d_rope];
+                        k_rope_dest.copy_from_slice(&kv_a_tok[kv_lora_rank..kv_lora_rank + d_rope]);
+                        ops::rope_scaled(
+                            k_rope_dest,
+                            pos,
+                            c.rope_base,
+                            c.rope_dim.min(d_rope),
+                            c.rope_scaling.as_ref(),
+                        );
+                    }
+                }
+
+                let mut kv_b_batch = vec![0.0f32; n * attn_kv_b.rows];
+                attn_kv_b.matmul_threaded(
+                    &c_kv_normed_batch,
+                    &mut kv_b_batch,
+                    n,
+                    *threads,
+                    workspace,
+                )?;
+
+                let head_kv_b_dim = d_nope + v_hd;
+                for b in 0..n {
+                    let pos = start_pos + b;
+                    let k_tok = &mut k_batch[b * eff_k_dim..(b + 1) * eff_k_dim];
+                    let v_tok = &mut v_batch[b * eff_v_dim..(b + 1) * eff_v_dim];
+                    let kv_b_tok = &kv_b_batch[b * attn_kv_b.rows..(b + 1) * attn_kv_b.rows];
+                    let k_rope_tok = if d_rope > 0 {
+                        &k_rope_batch[b * d_rope..(b + 1) * d_rope]
+                    } else {
+                        &[]
+                    };
+
+                    for head in 0..c.heads {
+                        let kv_b_head = &kv_b_tok[head * head_kv_b_dim..(head + 1) * head_kv_b_dim];
+                        let k_nope_part = &kv_b_head[..d_nope];
+                        let v_part = &kv_b_head[d_nope..d_nope + v_hd];
+
+                        let k_dest = &mut k_tok[head * head_dim..(head + 1) * head_dim];
+                        k_dest[..d_nope].copy_from_slice(k_nope_part);
+                        if !k_rope_tok.is_empty() {
+                            k_dest[d_nope..d_nope + d_rope].copy_from_slice(k_rope_tok);
+                        }
+
+                        let v_dest = &mut v_tok[head * v_hd..(head + 1) * v_hd];
+                        v_dest.copy_from_slice(v_part);
+                    }
+
+                    kv_cache.store(index, pos, k_tok, v_tok);
+                }
+
+                let scale = 1.0 / (head_dim as f32).sqrt();
+                let is_sliding = is_sliding_layer(index);
+                for b in 0..n {
+                    let pos = start_pos + b;
+                    let q_tok = &q_batch[b * att_dim..(b + 1) * att_dim];
+                    let att_tok = &mut att_batch[b * eff_v_dim..(b + 1) * eff_v_dim];
+
+                    for head in 0..c.heads {
+                        let query = &q_tok[head * head_dim..(head + 1) * head_dim];
+                        let out = &mut att_tok[head * v_hd..(head + 1) * v_hd];
+                        kv_cache.attention(
+                            index,
+                            query,
+                            out,
+                            ops::AttentionParams {
+                                row_width: eff_k_dim,
+                                offset: head * head_dim,
+                                len: pos + 1,
+                                scale,
+                                logit_cap: c.attn_logit_softcapping,
+                                window: is_sliding.then_some(window),
+                                position: pos,
+                                tile_size: 64,
+                                v_row_width: Some(eff_v_dim),
+                                v_offset: Some(head * v_hd),
+                            },
+                        );
+                    }
+                }
+
+                layer.wo.matmul_threaded(
+                    &att_batch[..n * eff_v_dim],
+                    &mut xb2_batch,
+                    n,
+                    *threads,
+                    workspace,
+                )?;
+                if let Some(l) = &layer.lora_wo {
+                    l.apply_batched_threaded(
+                        &att_batch[..n * eff_v_dim],
+                        n,
+                        &mut xb2_batch,
+                        *threads,
+                    )?;
+                }
+            } else {
+                layer
+                    .wq
+                    .matmul_threaded(&xb_batch, &mut q_batch, n, *threads, workspace)?;
+                if let Some(bq) = &layer.bq {
+                    for b in 0..n {
+                        let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
+                        for (slot, val) in q_tok.iter_mut().zip(bq) {
+                            *slot += val;
+                        }
+                    }
+                }
+                if let Some(l) = &layer.lora_wq {
+                    l.apply_batched_threaded(&xb_batch, n, &mut q_batch, *threads)?;
+                }
+
+                layer
+                    .wk
+                    .matmul_threaded(&xb_batch, &mut k_batch, n, *threads, workspace)?;
+                if let Some(bk) = &layer.bk {
+                    for b in 0..n {
+                        let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
+                        for (slot, val) in k_tok.iter_mut().zip(bk) {
+                            *slot += val;
+                        }
+                    }
+                }
+                if let Some(l) = &layer.lora_wk {
+                    l.apply_batched_threaded(&xb_batch, n, &mut k_batch, *threads)?;
+                }
+
+                layer
+                    .wv
+                    .matmul_threaded(&xb_batch, &mut v_batch, n, *threads, workspace)?;
+                if let Some(bv) = &layer.bv {
+                    for b in 0..n {
+                        let v_tok = &mut v_batch[b * kv_dim..(b + 1) * kv_dim];
+                        for (slot, val) in v_tok.iter_mut().zip(bv) {
+                            *slot += val;
+                        }
+                    }
+                }
+                if let Some(l) = &layer.lora_wv {
+                    l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
+                }
+
+                for b in 0..n {
+                    let pos = start_pos + b;
+                    let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
                     let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
-                    for (slot, val) in k_tok.iter_mut().zip(bk) {
-                        *slot += val;
-                    }
-                }
-            }
-            if let Some(l) = &layer.lora_wk {
-                l.apply_batched_threaded(&xb_batch, n, &mut k_batch, *threads)?;
-            }
+                    let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
 
-            layer
-                .wv
-                .matmul_threaded(&xb_batch, &mut v_batch, n, *threads, workspace)?;
-            if let Some(bv) = &layer.bv {
+                    for head in 0..c.heads {
+                        ops::rope_scaled(
+                            &mut q_tok[head * head_dim..(head + 1) * head_dim],
+                            pos,
+                            c.rope_base,
+                            c.rope_dim,
+                            c.rope_scaling.as_ref(),
+                        );
+                    }
+                    for head in 0..c.kv_heads {
+                        ops::rope_scaled(
+                            &mut k_tok[head * head_dim..(head + 1) * head_dim],
+                            pos,
+                            c.rope_base,
+                            c.rope_dim,
+                            c.rope_scaling.as_ref(),
+                        );
+                    }
+
+                    kv_cache.store(index, pos, k_tok, v_tok);
+                }
+
+                let scale = 1.0 / (head_dim as f32).sqrt();
+                let is_sliding = is_sliding_layer(index);
                 for b in 0..n {
-                    let v_tok = &mut v_batch[b * kv_dim..(b + 1) * kv_dim];
-                    for (slot, val) in v_tok.iter_mut().zip(bv) {
-                        *slot += val;
+                    let pos = start_pos + b;
+                    let q_tok = &q_batch[b * att_dim..(b + 1) * att_dim];
+                    let att_tok = &mut att_batch[b * att_dim..(b + 1) * att_dim];
+
+                    for head in 0..c.heads {
+                        let kv_head = head / group;
+                        let query = &q_tok[head * head_dim..(head + 1) * head_dim];
+
+                        let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
+                        kv_cache.attention(
+                            index,
+                            query,
+                            out,
+                            ops::AttentionParams {
+                                row_width: kv_dim,
+                                offset: kv_head * head_dim,
+                                len: pos + 1,
+                                scale,
+                                logit_cap: c.attn_logit_softcapping,
+                                window: is_sliding.then_some(window),
+                                position: pos,
+                                tile_size: 64,
+                                v_row_width: None,
+                                v_offset: None,
+                            },
+                        );
                     }
                 }
-            }
-            if let Some(l) = &layer.lora_wv {
-                l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
-            }
 
-            for b in 0..n {
-                let pos = start_pos + b;
-                let q_tok = &mut q_batch[b * att_dim..(b + 1) * att_dim];
-                let k_tok = &mut k_batch[b * kv_dim..(b + 1) * kv_dim];
-                let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
-
-                for head in 0..c.heads {
-                    ops::rope_scaled(
-                        &mut q_tok[head * head_dim..(head + 1) * head_dim],
-                        pos,
-                        c.rope_base,
-                        c.rope_dim,
-                        c.rope_scaling.as_ref(),
-                    );
+                layer.wo.matmul_threaded(
+                    &att_batch[..n * att_dim],
+                    &mut xb2_batch,
+                    n,
+                    *threads,
+                    workspace,
+                )?;
+                if let Some(l) = &layer.lora_wo {
+                    l.apply_batched_threaded(
+                        &att_batch[..n * att_dim],
+                        n,
+                        &mut xb2_batch,
+                        *threads,
+                    )?;
                 }
-                for head in 0..c.kv_heads {
-                    ops::rope_scaled(
-                        &mut k_tok[head * head_dim..(head + 1) * head_dim],
-                        pos,
-                        c.rope_base,
-                        c.rope_dim,
-                        c.rope_scaling.as_ref(),
-                    );
-                }
-
-                kv_cache.store(index, pos, k_tok, v_tok);
-            }
-
-            let scale = 1.0 / (head_dim as f32).sqrt();
-            let is_sliding = is_sliding_layer(index);
-            for b in 0..n {
-                let pos = start_pos + b;
-                let q_tok = &q_batch[b * att_dim..(b + 1) * att_dim];
-                let att_tok = &mut att_batch[b * att_dim..(b + 1) * att_dim];
-
-                for head in 0..c.heads {
-                    let kv_head = head / group;
-                    let query = &q_tok[head * head_dim..(head + 1) * head_dim];
-
-                    let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
-                    kv_cache.attention(
-                        index,
-                        query,
-                        out,
-                        ops::AttentionParams {
-                            row_width: kv_dim,
-                            offset: kv_head * head_dim,
-                            len: pos + 1,
-                            scale,
-                            logit_cap: c.attn_logit_softcapping,
-                            window: is_sliding.then_some(window),
-                            position: pos,
-                            tile_size: 64,
-                        },
-                    );
-                }
-            }
-
-            layer
-                .wo
-                .matmul_threaded(&att_batch, &mut xb2_batch, n, *threads, workspace)?;
-            if let Some(l) = &layer.lora_wo {
-                l.apply_batched_threaded(&att_batch, n, &mut xb2_batch, *threads)?;
             }
             if let Some(post_attn_norm) = &layer.post_attn_norm {
                 for b in 0..n {
@@ -1664,6 +2057,8 @@ impl<'a> Model<'a> {
                             window: is_sliding.then_some(window),
                             position: pos,
                             tile_size: 64,
+                            v_row_width: None,
+                            v_offset: None,
                         },
                     );
                 }
@@ -1909,6 +2304,8 @@ impl<'a> Model<'a> {
                             window: is_sliding.then_some(window),
                             position: pos,
                             tile_size: 64,
+                            v_row_width: None,
+                            v_offset: None,
                         },
                     );
                 }
@@ -2189,10 +2586,26 @@ impl State {
     /// Allocate state with explicit context window and KV cache quantization format.
     pub fn with_kv_cache(config: &Config, context: usize, cache_type: KvCacheType) -> Self {
         let context = context.clamp(1, config.context);
+        let k_dim = if config.arch.starts_with("deepseek") && config.kv_lora_rank.is_some() {
+            config.heads * config.head_dim
+        } else {
+            config.kv_dim()
+        };
+        let v_dim = if let Some(v_hd) = config.v_head_dim {
+            config.heads * v_hd
+        } else {
+            k_dim
+        };
+        let mla_latent_dim =
+            config.kv_lora_rank.unwrap_or(0) + config.qk_rope_head_dim.unwrap_or(0);
+        let q_latent_dim = config.q_lora_rank.unwrap_or(0);
         let widest = config
             .embedding
             .max(config.ffn)
-            .max(config.heads * config.head_dim);
+            .max(config.heads * config.head_dim)
+            .max(v_dim)
+            .max(mla_latent_dim)
+            .max(q_latent_dim);
         Self {
             x: vec![0.0; config.embedding],
             xb: vec![0.0; widest],
@@ -2200,11 +2613,11 @@ impl State {
             hb: vec![0.0; config.ffn],
             hb2: vec![0.0; config.ffn],
             q: vec![0.0; config.heads * config.head_dim],
-            k: vec![0.0; config.kv_dim()],
-            v: vec![0.0; config.kv_dim()],
+            k: vec![0.0; k_dim],
+            v: vec![0.0; v_dim],
             logits: vec![0.0; config.vocab],
             workspace: Workspace::new(widest),
-            kv_cache: KvCache::new(config.layers, context, config.kv_dim(), cache_type),
+            kv_cache: KvCache::new_asymmetric(config.layers, context, k_dim, v_dim, cache_type),
             context,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }

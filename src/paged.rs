@@ -511,6 +511,8 @@ impl crate::model::Model<'_> {
                         window: is_sliding.then_some(window),
                         position,
                         tile_size: 64,
+                        v_row_width: None,
+                        v_offset: None,
                     },
                 )?;
             }
@@ -763,6 +765,8 @@ impl crate::model::Model<'_> {
                             window: is_sliding.then_some(window),
                             position: pos,
                             tile_size: 64,
+                            v_row_width: None,
+                            v_offset: None,
                         },
                     )?;
                 }

@@ -1,5 +1,15 @@
 # Recovery Checkpoint
 
+## Maintenance Run — Phase 42 — 2026-11-06
+- Implemented Phase 42: DeepSeek Multi-Head Latent Attention (MLA) Architecture.
+- Updated `ops::AttentionParams` with `v_row_width` and `v_offset` to support asymmetric query/value head projections ($d_q \ne d_v$).
+- Extended `KvCache` with `new_asymmetric` and updated F32 cache storage, online attention, and truncation for distinct key ($d_k$) and value ($d_v$) dimensions.
+- Extended `Config` with MLA fields (`q_lora_rank`, `kv_lora_rank`, `qk_nope_head_dim`, `qk_rope_head_dim`, `v_head_dim`) and updated GGUF loader to allow decoupled `heads * head_dim != embedding` for DeepSeek.
+- Added MLA projection weights (`attn_q_a`, `attn_q_a_norm`, `attn_q_b`, `attn_kv_a`, `attn_kv_a_norm`, `attn_kv_b`) to `Layer`.
+- Implemented low-rank compressed KV latent projection and decoupled rotary positional key ($k_t^R$) in `Model::forward` and `Model::prefill_embeddings`.
+- Added integration test `deepseek_mla_forward_and_prefill_match` in `tests/model.rs` confirming bit-exact parity between sequential decode and batched prefill under MLA.
+- Quality gates passed: `cargo tree` = 1 line (0 external deps), `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings` clean, 100% test pass rate across all 16 test targets.
+
 ## Maintenance Run — Phase 41 — 2026-11-06
 - Implemented Phase 41: Multi-Modal Vision-Language Projection Engine (CLIP / SigLIP / ViT).
 - Created `src/vision.rs` with zero-dependency PPM (P3/P6) and BMP (24/32-bit) image decoders, bilinear image resampling, normalization, patch embeddings, bidirectional self-attention, LayerNorm, GELU MLP, and MultiModalProjector (Linear and 2-layer MLP).
@@ -370,3 +380,11 @@
   - `cargo clippy --all-targets -- -D warnings` passes without warnings.
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` prints exactly 1 line (0 external dependencies).
+## Autonomous Maintenance — 2026-11-06
+- Selected Phase 42 (P2, highest-priority queued task): DeepSeek MLA and compressed KV projection. Marked `IN_PROGRESS`.
+- Preserved the pre-existing edits in `src/distributed.rs`, `src/ops.rs`, and `src/paged.rs`, and continued the pre-existing asymmetric KV edits in `src/kv.rs`.
+- Added DeepSeek MLA configuration fields (`q_lora_rank`, `kv_lora_rank`, `qk_nope_head_dim`, `qk_rope_head_dim`, `v_head_dim`), GGUF metadata parsing, and optional MLA projection tensor bindings in `src/model.rs`.
+- Added F32 KV-cache allocation, storage, and attention support for independent key and value row widths, with regression test `f32_cache_supports_distinct_key_and_value_widths`.
+- MLA itself remains incomplete: projection tensor binding, compressed latent cache representation, and execution-path integration (decode/prefill/paged and quantized caches) are still required. The queue remains `IN_PROGRESS` for that reason.
+- Validation passed: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+- Existing `.agent/maintenance.log` modifications were left untouched.

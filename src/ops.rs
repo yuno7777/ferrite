@@ -51,6 +51,8 @@ pub struct AttentionParams {
     pub window: Option<usize>,
     pub position: usize,
     pub tile_size: usize,
+    pub v_row_width: Option<usize>,
+    pub v_offset: Option<usize>,
 }
 
 /// Attention over strided KV-cache rows using tiled online softmax.
@@ -72,10 +74,14 @@ pub fn attention_online(
         window,
         position,
         tile_size,
+        v_row_width,
+        v_offset,
     } = params;
-    debug_assert_eq!(query.len(), out.len());
+    let val_row_width = v_row_width.unwrap_or(row_width);
+    let val_offset = v_offset.unwrap_or(offset);
     debug_assert!(tile_size > 0 && offset + query.len() <= row_width);
-    debug_assert!(keys.len() >= len * row_width && values.len() >= len * row_width);
+    debug_assert!(keys.len() >= len * row_width && values.len() >= len * val_row_width);
+    debug_assert!(val_offset + out.len() <= val_row_width);
     out.fill(0.0);
     let mut max_score = f32::NEG_INFINITY;
     let mut denominator = 0.0f32;
@@ -121,14 +127,15 @@ pub fn attention_online(
         for v in out.iter_mut() {
             *v *= old_scale;
         }
+        let out_len = out.len();
         for (i, past) in (start..end).enumerate() {
             if !scores[i].is_finite() {
                 continue;
             }
             let weight = (scores[i] - next_max).exp();
             denominator += weight;
-            let row = past * row_width + offset;
-            for (slot, value) in out.iter_mut().zip(&values[row..row + query.len()]) {
+            let row = past * val_row_width + val_offset;
+            for (slot, value) in out.iter_mut().zip(&values[row..row + out_len]) {
                 *slot += weight * value;
             }
         }
@@ -408,6 +415,8 @@ mod tests {
                 window: None,
                 position: 12,
                 tile_size: 4,
+                v_row_width: None,
+                v_offset: None,
             },
             &mut actual,
         );
