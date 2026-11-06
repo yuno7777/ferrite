@@ -29,6 +29,8 @@ pub struct Config {
     pub vocab: usize,
     pub eps: f32,
     pub rope_base: f32,
+    pub rope_dim: usize,
+    pub rope_scaling: Option<ops::RopeScaling>,
     pub attn_logit_softcapping: Option<f32>,
     pub final_logit_softcapping: Option<f32>,
     pub sliding_window: Option<usize>,
@@ -66,7 +68,6 @@ impl Config {
         let head_dim = model
             .arch_u64("attention.key_length")
             .or_else(|| model.arch_u64("attention.head_dim"))
-            .or_else(|| model.arch_u64("rope.dimension_count"))
             .map(|v| v as usize)
             .unwrap_or_else(|| embedding.checked_div(heads).unwrap_or(0));
 
@@ -112,6 +113,58 @@ impl Config {
             None
         };
 
+        let rope_dim = model
+            .arch_u64("rope.dimension_count")
+            .map(|v| v as usize)
+            .unwrap_or(head_dim);
+
+        let rope_scaling = if let Some(scale_type) = model
+            .arch_str("rope.scaling.type")
+            .or_else(|| model.meta_str("rope.scaling.type"))
+        {
+            let factor = model
+                .arch_f32("rope.scaling.factor")
+                .or_else(|| model.meta_f32("rope.scaling.factor"))
+                .unwrap_or(1.0);
+            match scale_type {
+                "linear" => Some(ops::RopeScaling::Linear { factor }),
+                "yarn" => {
+                    let orig_ctx = model
+                        .arch_u64("rope.scaling.original_context_length")
+                        .or_else(|| model.meta_u64("rope.scaling.original_context_length"))
+                        .map(|v| v as usize)
+                        .unwrap_or(4096);
+                    let ext_factor = model
+                        .arch_f32("rope.scaling.ext_factor")
+                        .or_else(|| model.meta_f32("rope.scaling.ext_factor"))
+                        .unwrap_or(0.0);
+                    let attn_factor = model
+                        .arch_f32("rope.scaling.attn_factor")
+                        .or_else(|| model.meta_f32("rope.scaling.attn_factor"))
+                        .unwrap_or(0.0);
+                    let beta_fast = model
+                        .arch_f32("rope.scaling.beta_fast")
+                        .or_else(|| model.meta_f32("rope.scaling.beta_fast"))
+                        .unwrap_or(32.0);
+                    let beta_slow = model
+                        .arch_f32("rope.scaling.beta_slow")
+                        .or_else(|| model.meta_f32("rope.scaling.beta_slow"))
+                        .unwrap_or(1.0);
+                    Some(ops::RopeScaling::Yarn {
+                        factor,
+                        orig_ctx,
+                        ext_factor,
+                        attn_factor,
+                        beta_fast,
+                        beta_slow,
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             arch: arch.clone(),
             layers,
@@ -135,6 +188,8 @@ impl Config {
                     10000.0
                 }
             }),
+            rope_dim,
+            rope_scaling,
             attn_logit_softcapping,
             final_logit_softcapping,
             sliding_window,
@@ -641,7 +696,6 @@ impl<'a> Model<'a> {
             q,
             k,
             v,
-            att,
             logits,
             workspace,
             key_cache,
@@ -691,17 +745,21 @@ impl<'a> Model<'a> {
 
             // Position is baked into the query and key, never into the value.
             for head in 0..c.heads {
-                ops::rope(
+                ops::rope_scaled(
                     &mut q[head * head_dim..(head + 1) * head_dim],
                     position,
                     c.rope_base,
+                    c.rope_dim,
+                    c.rope_scaling.as_ref(),
                 );
             }
             for head in 0..c.kv_heads {
-                ops::rope(
+                ops::rope_scaled(
                     &mut k[head * head_dim..(head + 1) * head_dim],
                     position,
                     c.rope_base,
+                    c.rope_dim,
+                    c.rope_scaling.as_ref(),
                 );
             }
 
@@ -716,28 +774,23 @@ impl<'a> Model<'a> {
                 let kv_head = head / group;
                 let query = &q[head * head_dim..(head + 1) * head_dim];
 
-                for (past, score) in att[..=position].iter_mut().enumerate() {
-                    if is_sliding && position.saturating_sub(past) >= window {
-                        *score = f32::NEG_INFINITY;
-                        continue;
-                    }
-                    let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                    let mut raw = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
-                    if let Some(cap) = c.attn_logit_softcapping {
-                        raw = cap * (raw / cap).tanh();
-                    }
-                    *score = raw;
-                }
-                ops::softmax(&mut att[..=position]);
-
                 let out = &mut xb[head * head_dim..(head + 1) * head_dim];
-                out.fill(0.0);
-                for (past, weight) in att[..=position].iter().enumerate() {
-                    let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                    for (slot, value) in out.iter_mut().zip(&value_cache[at..at + head_dim]) {
-                        *slot += weight * value;
-                    }
-                }
+                ops::attention_online(
+                    query,
+                    &key_cache[index * *context * kv_dim..],
+                    &value_cache[index * *context * kv_dim..],
+                    ops::AttentionParams {
+                        row_width: kv_dim,
+                        offset: kv_head * head_dim,
+                        len: position + 1,
+                        scale,
+                        logit_cap: c.attn_logit_softcapping,
+                        window: is_sliding.then_some(window),
+                        position,
+                        tile_size: 64,
+                    },
+                    out,
+                );
             }
 
             layer.wo.matvec_threaded(
@@ -856,7 +909,6 @@ impl<'a> Model<'a> {
         let mut hb2_batch = vec![0.0f32; n * c.ffn];
 
         let State {
-            att,
             logits,
             workspace,
             key_cache,
@@ -917,17 +969,21 @@ impl<'a> Model<'a> {
                 let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
 
                 for head in 0..c.heads {
-                    ops::rope(
+                    ops::rope_scaled(
                         &mut q_tok[head * head_dim..(head + 1) * head_dim],
                         pos,
                         c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
                     );
                 }
                 for head in 0..c.kv_heads {
-                    ops::rope(
+                    ops::rope_scaled(
                         &mut k_tok[head * head_dim..(head + 1) * head_dim],
                         pos,
                         c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
                     );
                 }
 
@@ -947,28 +1003,23 @@ impl<'a> Model<'a> {
                     let kv_head = head / group;
                     let query = &q_tok[head * head_dim..(head + 1) * head_dim];
 
-                    for (past, score) in att[..=pos].iter_mut().enumerate() {
-                        if is_sliding && pos.saturating_sub(past) >= window {
-                            *score = f32::NEG_INFINITY;
-                            continue;
-                        }
-                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                        let mut raw = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
-                        if let Some(cap) = c.attn_logit_softcapping {
-                            raw = cap * (raw / cap).tanh();
-                        }
-                        *score = raw;
-                    }
-                    ops::softmax(&mut att[..=pos]);
-
                     let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
-                    out.fill(0.0);
-                    for (past, weight) in att[..=pos].iter().enumerate() {
-                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                        for (slot, value) in out.iter_mut().zip(&value_cache[at..at + head_dim]) {
-                            *slot += weight * value;
-                        }
-                    }
+                    ops::attention_online(
+                        query,
+                        &key_cache[index * *context * kv_dim..],
+                        &value_cache[index * *context * kv_dim..],
+                        ops::AttentionParams {
+                            row_width: kv_dim,
+                            offset: kv_head * head_dim,
+                            len: pos + 1,
+                            scale,
+                            logit_cap: c.attn_logit_softcapping,
+                            window: is_sliding.then_some(window),
+                            position: pos,
+                            tile_size: 64,
+                        },
+                        out,
+                    );
                 }
             }
 
@@ -1105,7 +1156,6 @@ impl<'a> Model<'a> {
         let mut hb2_batch = vec![0.0f32; n * c.ffn];
 
         let State {
-            att,
             logits,
             workspace,
             key_cache,
@@ -1166,17 +1216,21 @@ impl<'a> Model<'a> {
                 let v_tok = &v_batch[b * kv_dim..(b + 1) * kv_dim];
 
                 for head in 0..c.heads {
-                    ops::rope(
+                    ops::rope_scaled(
                         &mut q_tok[head * head_dim..(head + 1) * head_dim],
                         pos,
                         c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
                     );
                 }
                 for head in 0..c.kv_heads {
-                    ops::rope(
+                    ops::rope_scaled(
                         &mut k_tok[head * head_dim..(head + 1) * head_dim],
                         pos,
                         c.rope_base,
+                        c.rope_dim,
+                        c.rope_scaling.as_ref(),
                     );
                 }
 
@@ -1196,28 +1250,23 @@ impl<'a> Model<'a> {
                     let kv_head = head / group;
                     let query = &q_tok[head * head_dim..(head + 1) * head_dim];
 
-                    for (past, score) in att[..=pos].iter_mut().enumerate() {
-                        if is_sliding && pos.saturating_sub(past) >= window {
-                            *score = f32::NEG_INFINITY;
-                            continue;
-                        }
-                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                        let mut raw = ops::dot(query, &key_cache[at..at + head_dim]) * scale;
-                        if let Some(cap) = c.attn_logit_softcapping {
-                            raw = cap * (raw / cap).tanh();
-                        }
-                        *score = raw;
-                    }
-                    ops::softmax(&mut att[..=pos]);
-
                     let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
-                    out.fill(0.0);
-                    for (past, weight) in att[..=pos].iter().enumerate() {
-                        let at = (index * *context + past) * kv_dim + kv_head * head_dim;
-                        for (slot, value) in out.iter_mut().zip(&value_cache[at..at + head_dim]) {
-                            *slot += weight * value;
-                        }
-                    }
+                    ops::attention_online(
+                        query,
+                        &key_cache[index * *context * kv_dim..],
+                        &value_cache[index * *context * kv_dim..],
+                        ops::AttentionParams {
+                            row_width: kv_dim,
+                            offset: kv_head * head_dim,
+                            len: pos + 1,
+                            scale,
+                            logit_cap: c.attn_logit_softcapping,
+                            window: is_sliding.then_some(window),
+                            position: pos,
+                            tile_size: 64,
+                        },
+                        out,
+                    );
                 }
             }
 
@@ -1308,7 +1357,6 @@ pub struct State {
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
-    att: Vec<f32>,
     /// Scores for the last token processed, one per vocabulary entry.
     pub logits: Vec<f32>,
     workspace: Workspace,
@@ -1348,7 +1396,6 @@ impl State {
             q: vec![0.0; config.heads * config.head_dim],
             k: vec![0.0; config.kv_dim()],
             v: vec![0.0; config.kv_dim()],
-            att: vec![0.0; context],
             logits: vec![0.0; config.vocab],
             workspace: Workspace::new(widest),
             key_cache: vec![0.0; kv],

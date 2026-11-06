@@ -915,3 +915,110 @@ fn threaded_prefill_matches_single_thread() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn linear_rope_scaling_prefill_matches_forward() {
+    let mut builder = fixture(2, true);
+    builder = builder
+        .meta("llama.rope.scaling.type", Value::String("linear".into()))
+        .meta("llama.rope.scaling.factor", Value::F32(2.5));
+    let path = write("linear_rope", &builder);
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    assert_eq!(
+        model.config.rope_scaling,
+        Some(ops::RopeScaling::Linear { factor: 2.5 })
+    );
+
+    let prompt = [1u32, 2, 3, 0];
+    let mut state_seq = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    let mut state_batch = State::new(&model.config);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_batch.logits),
+        bits(&state_seq.logits),
+        "linear rope prefill logits must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn yarn_rope_scaling_prefill_matches_forward() {
+    let mut builder = fixture(2, true);
+    builder = builder
+        .meta("llama.rope.scaling.type", Value::String("yarn".into()))
+        .meta("llama.rope.scaling.factor", Value::F32(4.0))
+        .meta("llama.rope.scaling.original_context_length", Value::U32(8));
+    let path = write("yarn_rope", &builder);
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    assert!(matches!(
+        model.config.rope_scaling,
+        Some(ops::RopeScaling::Yarn {
+            factor,
+            orig_ctx: 8,
+            ..
+        }) if (factor - 4.0).abs() < 1e-6
+    ));
+
+    let prompt = [1u32, 2, 3, 0];
+    let mut state_seq = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    let mut state_batch = State::new(&model.config);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_batch.logits),
+        bits(&state_seq.logits),
+        "yarn rope prefill logits must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn partial_rotary_dim_prefill_matches_forward() {
+    let mut builder = fixture(2, true);
+    builder = builder.meta("llama.rope.dimension_count", Value::U32(0));
+    let path = write("partial_rope", &builder);
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+    assert_eq!(model.config.rope_dim, 0);
+
+    let prompt = [1u32, 2, 3, 0];
+    let mut state_seq = State::new(&model.config);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    let mut state_batch = State::new(&model.config);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_batch.logits),
+        bits(&state_seq.logits),
+        "partial rope prefill logits must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}

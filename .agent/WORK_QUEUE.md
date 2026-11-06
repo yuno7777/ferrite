@@ -119,27 +119,29 @@
 - Tests: Integration test suite in `tests/server.rs` testing live TCP connections, health endpoint, models endpoint, non-streaming chat completions, and real-time SSE streaming. All 117 tests pass.
 - Completion evidence: Full OpenAI-compatible chat completion and SSE streaming verified with integration tests; committed in `f2af227`.
 
-## Backlog
-
 ### Phase 14: Dynamic RoPE Scaling & Extended Context (Linear, NTK-Aware, and YaRN)
 - Priority: P1
-- Status: READY TO IMPLEMENT
+- Status: COMPLETED
 - Rationale: Long context models (32k to 128k tokens) require frequency scaling (NTK-aware / YaRN / linear RoPE scaling) based on GGUF metadata `rope.scaling.type` and `rope.scaling.factor`.
 - Files: `src/ops.rs`, `src/model.rs`, `tests/model.rs`
-- Acceptance: Compute scaled RoPE inv_freq with wavelength adjustments for long contexts; bit-identical output for base lengths.
+- Acceptance: Compute scaled RoPE inv_freq with wavelength adjustments for long contexts; support partial rotary dimensions (`rotary_dim <= head_dim`); bit-identical output for base lengths and matching sequential forward vs prefill.
+- Tests: `ops::tests::rope_scaled_linear_at_double_pos_matches_unscaled`, `ops::tests::rope_scaled_partial_dim_preserves_tail`, `tests/model.rs::linear_rope_scaling_prefill_matches_forward`, `tests/model.rs::yarn_rope_scaling_prefill_matches_forward`, `tests/model.rs::partial_rotary_dim_prefill_matches_forward`. All 125 tests pass.
+- Completion evidence: Full Linear and YaRN RoPE frequency calculations implemented and verified bit-identical between sequential decode and batched prefill.
 
 ### Phase 15: Flash-Attention Tile-Based KV Kernel (Online Softmax)
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Standard attention materializes the full attention score vector `O(context)`. Online softmax tiling computes attention incrementally in block tiles `O(tile_size)` with running max and sum, reducing peak memory traffic and L1/L2 cache misses during long-context generation.
 - Files: `src/ops.rs`, `src/model.rs`, `examples/bench.rs`
-- Acceptance: Tile-based online softmax attention kernel agreeing bit-for-bit with baseline attention.
+- Acceptance: Tile-based online softmax attention kernel agrees with materialized attention within floating-point tolerance; applies causal, sliding-window, and logit-softcap rules.
+- Tests: `ops::tests::tiled_online_attention_matches_materialized_reference`; full decode, prefill, and model suites pass.
+- Completion evidence: Online softmax is active in decode, batched prefill, and all-logits prefill. It holds only one 64-position score tile at a time.
+
+## Backlog
 
 ### Phase 16: Zero-Copy LoRA Adapter Application
-- Priority: P2
-- Status: QUEUED
+- Priority: P1
+- Status: READY TO IMPLEMENT
 - Rationale: Load and blend GGUF LoRA adapter tensors (`lora_a`, `lora_b`) at runtime with scaling alpha, either dynamically fusing into activations or into weights without duplicating model storage.
 - Files: `src/lora.rs`, `src/model.rs`, `tests/lora.rs`
 - Acceptance: Load LoRA GGUF, compute low-rank additive delta `(A * B) * (alpha / rank)`, verify output against reference adapter forward pass.
-
-

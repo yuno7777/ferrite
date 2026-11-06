@@ -41,6 +41,96 @@ pub fn softmax(x: &mut [f32]) {
     }
 }
 
+/// Parameters for [`attention_online`].
+pub struct AttentionParams {
+    pub row_width: usize,
+    pub offset: usize,
+    pub len: usize,
+    pub scale: f32,
+    pub logit_cap: Option<f32>,
+    pub window: Option<usize>,
+    pub position: usize,
+    pub tile_size: usize,
+}
+
+/// Attention over strided KV-cache rows using tiled online softmax.
+/// `keys` and `values` contain rows of `row_width` elements; `offset..offset+dim`
+/// selects one KV head from each row. Only one tile of scores is held at once.
+pub fn attention_online(
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    params: AttentionParams,
+    out: &mut [f32],
+) {
+    let AttentionParams {
+        row_width,
+        offset,
+        len,
+        scale,
+        logit_cap,
+        window,
+        position,
+        tile_size,
+    } = params;
+    debug_assert_eq!(query.len(), out.len());
+    debug_assert!(tile_size > 0 && offset + query.len() <= row_width);
+    debug_assert!(keys.len() >= len * row_width && values.len() >= len * row_width);
+    out.fill(0.0);
+    let mut max_score = f32::NEG_INFINITY;
+    let mut denominator = 0.0f32;
+    let mut scores = vec![0.0f32; tile_size];
+    for start in (0..len).step_by(tile_size) {
+        let end = (start + tile_size).min(len);
+        for (i, past) in (start..end).enumerate() {
+            if window.is_some_and(|w| position.saturating_sub(past) >= w) {
+                scores[i] = f32::NEG_INFINITY;
+                continue;
+            }
+            let row = past * row_width + offset;
+            let mut score = dot(query, &keys[row..row + query.len()]) * scale;
+            if let Some(cap) = logit_cap {
+                score = cap * (score / cap).tanh();
+            }
+            scores[i] = score;
+        }
+        let tile_max = scores[..end - start]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !tile_max.is_finite() {
+            continue;
+        }
+        let next_max = max_score.max(tile_max);
+        let old_scale = if max_score.is_finite() {
+            (max_score - next_max).exp()
+        } else {
+            0.0
+        };
+        denominator *= old_scale;
+        for v in out.iter_mut() {
+            *v *= old_scale;
+        }
+        for (i, past) in (start..end).enumerate() {
+            if !scores[i].is_finite() {
+                continue;
+            }
+            let weight = (scores[i] - next_max).exp();
+            denominator += weight;
+            let row = past * row_width + offset;
+            for (slot, value) in out.iter_mut().zip(&values[row..row + query.len()]) {
+                *slot += weight * value;
+            }
+        }
+        max_score = next_max;
+    }
+    if denominator > 0.0 {
+        for value in out {
+            *value /= denominator;
+        }
+    }
+}
+
 /// `out[r] = dot(matrix row r, x)`, row-major with rows contiguous.
 ///
 /// Rows are contiguous because that is how GGUF stores them, and walking them
@@ -124,6 +214,94 @@ pub fn rope(vector: &mut [f32], position: usize, base: f32) {
     }
 }
 
+/// RoPE scaling configuration for extended context windows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RopeScaling {
+    Linear {
+        factor: f32,
+    },
+    Yarn {
+        factor: f32,
+        orig_ctx: usize,
+        ext_factor: f32,
+        attn_factor: f32,
+        beta_fast: f32,
+        beta_slow: f32,
+    },
+}
+
+/// Dynamic and scaled RoPE for extended context lengths.
+///
+/// Applies frequency adjustments (Linear or YaRN) and restricts rotation to
+/// `rotary_dim` (dimensions beyond `rotary_dim` pass through unrotated).
+pub fn rope_scaled(
+    vector: &mut [f32],
+    position: usize,
+    base: f32,
+    rotary_dim: usize,
+    scaling: Option<&RopeScaling>,
+) {
+    let rot_dim = rotary_dim.min(vector.len());
+    let sub = &mut vector[..rot_dim];
+
+    match scaling {
+        None => {
+            rope(sub, position, base);
+        }
+        Some(RopeScaling::Linear { factor }) => {
+            let eff_factor = if *factor > 0.0 { *factor } else { 1.0 };
+            let dim = sub.len();
+            for pair in 0..dim / 2 {
+                let frequency = (1.0 / eff_factor) / base.powf(2.0 * pair as f32 / dim as f32);
+                let angle = position as f32 * frequency;
+                let (sin, cos) = angle.sin_cos();
+                let (x, y) = (sub[pair * 2], sub[pair * 2 + 1]);
+                sub[pair * 2] = x * cos - y * sin;
+                sub[pair * 2 + 1] = x * sin + y * cos;
+            }
+        }
+        Some(RopeScaling::Yarn {
+            factor,
+            orig_ctx,
+            ext_factor: _,
+            attn_factor,
+            beta_fast,
+            beta_slow,
+        }) => {
+            let eff_factor = if *factor > 0.0 { *factor } else { 1.0 };
+            let dim = sub.len();
+            let orig_ctx = *orig_ctx as f32;
+            let (b_fast, b_slow) = (*beta_fast, *beta_slow);
+
+            let mscale = if *attn_factor > 0.0 {
+                *attn_factor
+            } else {
+                0.1 * eff_factor.ln() + 1.0
+            };
+
+            for pair in 0..dim / 2 {
+                let base_freq = 1.0 / base.powf(2.0 * pair as f32 / dim as f32);
+                let wavelength = 2.0 * std::f32::consts::PI / base_freq;
+                let r = orig_ctx / wavelength;
+                let gamma = if b_fast == b_slow {
+                    0.0
+                } else {
+                    ((r - b_slow) / (b_fast - b_slow)).clamp(0.0, 1.0)
+                };
+
+                let interp_freq = base_freq / eff_factor;
+                let freq = (1.0 - gamma) * interp_freq + gamma * base_freq;
+
+                let angle = position as f32 * freq;
+                let (sin, cos) = angle.sin_cos();
+                let (x, y) = (sub[pair * 2] * mscale, sub[pair * 2 + 1] * mscale);
+                sub[pair * 2] = x * cos - y * sin;
+                sub[pair * 2 + 1] = x * sin + y * cos;
+            }
+        }
+    }
+}
+
 /// The GPT-NeoX pairing: element `i` rotates against `i + dim/2` rather than
 /// its neighbour. Some architectures store weights expecting this.
 pub fn rope_neox(vector: &mut [f32], position: usize, base: f32) {
@@ -188,6 +366,44 @@ mod tests {
         let mut x = [5.0; 8];
         softmax(&mut x);
         assert!(x.iter().all(|v| close(*v, 0.125)), "{x:?}");
+    }
+
+    #[test]
+    fn tiled_online_attention_matches_materialized_reference() {
+        let q = [0.2, -0.7, 1.1];
+        let keys: Vec<f32> = (0..39).map(|i| (i as f32 * 0.17).sin()).collect();
+        let values: Vec<f32> = (0..39).map(|i| (i as f32 * 0.31).cos()).collect();
+        let mut scores: Vec<f32> = keys
+            .chunks_exact(3)
+            .map(|k| dot(&q, k) / 3.0f32.sqrt())
+            .collect();
+        softmax(&mut scores);
+        let mut expected = [0.0; 3];
+        for (w, v) in scores.iter().zip(values.chunks_exact(3)) {
+            for (o, value) in expected.iter_mut().zip(v) {
+                *o += w * value;
+            }
+        }
+        let mut actual = [0.0; 3];
+        attention_online(
+            &q,
+            &keys,
+            &values,
+            AttentionParams {
+                row_width: 3,
+                offset: 0,
+                len: 13,
+                scale: 1.0 / 3.0f32.sqrt(),
+                logit_cap: None,
+                window: None,
+                position: 12,
+                tile_size: 4,
+            },
+            &mut actual,
+        );
+        for (a, b) in actual.iter().zip(expected) {
+            assert!((a - b).abs() < 1e-6, "{actual:?} != {expected:?}");
+        }
     }
 
     #[test]
@@ -268,5 +484,40 @@ mod tests {
         // Saturates toward the identity for large positive input.
         assert!(close(silu(20.0), 20.0));
         assert!(silu(-20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rope_scaled_none_matches_unscaled() {
+        let mut v1 = [0.6, 0.8, -1.0, 2.0];
+        let mut v2 = v1;
+        rope(&mut v1, 5, 10000.0);
+        rope_scaled(&mut v2, 5, 10000.0, 4, None);
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn rope_scaled_linear_at_double_pos_matches_unscaled() {
+        let mut v1 = [0.6, 0.8, -1.0, 2.0];
+        let mut v2 = v1;
+        rope(&mut v1, 5, 10000.0);
+        rope_scaled(
+            &mut v2,
+            10,
+            10000.0,
+            4,
+            Some(&RopeScaling::Linear { factor: 2.0 }),
+        );
+        for (a, b) in v1.iter().zip(v2.iter()) {
+            assert!(close(*a, *b), "{v1:?} != {v2:?}");
+        }
+    }
+
+    #[test]
+    fn rope_scaled_partial_dim_preserves_tail() {
+        let mut v = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        rope_scaled(&mut v, 3, 10000.0, 4, None);
+        assert_eq!(v[4], 5.0);
+        assert_eq!(v[5], 6.0);
+        assert!(v[0] != 1.0 || v[1] != 2.0);
     }
 }

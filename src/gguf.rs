@@ -587,6 +587,11 @@ impl Gguf {
         self.meta_f32(&format!("{arch}.{suffix}"))
     }
 
+    pub fn arch_str(&self, suffix: &str) -> Option<&str> {
+        let arch = self.arch()?;
+        self.meta_str(&format!("{arch}.{suffix}"))
+    }
+
     pub fn tensor(&self, name: &str) -> Option<&TensorInfo> {
         Some(&self.tensors[*self.index.get(name)?])
     }

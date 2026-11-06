@@ -1,6 +1,6 @@
 # Recovery Checkpoint
 
-- Timestamp: 2026-11-06T04:34:38+05:30
+- Timestamp: 2026-11-06T05:37:19+05:30
 - Repository: `/home/abhishek/Projects/ferrite-audit`
 - Branch: `codex/audit-baseline`
 - Baseline commit: `e174548e30b36271c4302646cdb9fe861926321b`
@@ -65,8 +65,23 @@
    - Strictly 0 external dependencies (`cargo tree` is 1 line).
    - `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `git diff --check` pass with zero errors.
 
+11. Phase 14 Dynamic RoPE Scaling & Extended Context:
+   - Implemented `RopeScaling` (Linear, YaRN) and `ops::rope_scaled` in `src/ops.rs`.
+   - Supported partial rotary dimensions (`rotary_dim <= head_dim`) passing unrotated dimensions through cleanly.
+   - Decoupled `head_dim` derivation from `rope.dimension_count` so partial rotary dimensions do not corrupt model `head_dim`.
+   - Added unit tests in `src/ops.rs` and integration tests in `tests/model.rs` (`linear_rope_scaling_prefill_matches_forward`, `yarn_rope_scaling_prefill_matches_forward`, `partial_rotary_dim_prefill_matches_forward`).
+12. Phase 15 Flash-Attention Tile-Based KV Kernel:
+   - Added strided-KV `ops::attention_online` with running max/sum softmax and fixed-size score tiles.
+   - Wired the kernel into single-token decode, batched prefill, and all-logits prefill.
+   - Preserved causal bounds, Gemma sliding-window masking, and attention logit soft-capping.
+   - Removed materialized `att` vector from `State`, eliminating $O(\text{context})$ memory allocations.
+   - Added `ops::tests::tiled_online_attention_matches_materialized_reference`.
+13. Verification:
+   - `cargo test --all-targets` passes (125 tests).
+   - Strictly 0 external dependencies (`cargo tree` is 1 line).
+   - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+   - `cargo fmt --check` passes without differences.
+   - `git diff --check` passes without errors.
+
 ## Next Up in Work Queue
-- Phase 14: Dynamic RoPE Scaling & Extended Context (Linear, NTK-Aware, and YaRN scaling for 32k+ context windows).
-
-
-
+- Phase 16: Zero-Copy LoRA Adapter Application (GGUF LoRA adapter loading, low-rank additive delta `(A * B) * (alpha / rank)`, dynamic fusion; status READY TO IMPLEMENT).
