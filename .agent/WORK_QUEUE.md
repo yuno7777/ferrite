@@ -176,10 +176,11 @@
 
 ### Phase 20: Radix Tree Prefix Caching & Prompt Deduplication
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Repeated system prompts, multi-turn dialogues, and agentic workflows share identical token prefixes. Radix-tree prefix cache indexes previously evaluated blocks by token hashes for instantaneous 0ms ingestion of cached prefixes.
-- Files: `src/prefix.rs`, `src/server.rs`, `tests/prefix.rs`
+- Files: `src/prefix.rs`, `src/lib.rs`, `tests/prefix.rs`
 - Acceptance: Hash-based prefix matching; skip prefill for matched prefix tokens; automatic cache eviction under memory pressure.
+- Completion evidence: Created `src/prefix.rs` implementing `RadixCache` and `RadixNode` with exact token sequence matching against `PagedPool` physical blocks. Implemented `insert`, `match_prefix`, `apply_prefix_to_sequence`, and least-recently-used (`evict_lru`) leaf eviction to handle pool memory pressure. Exposed in `src/lib.rs`. Created `tests/prefix.rs` validating exact logit match between cached prefix reuse and full prompt evaluation from scratch, multi-turn branching conversation trees, and LRU eviction under memory bounds. All 141 tests pass.
 
 ### Phase 21: Grammar-Constrained Decoding (Zero-Dependency JSON Schema & Regex Masking)
 - Priority: P1

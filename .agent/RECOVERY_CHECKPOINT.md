@@ -128,12 +128,17 @@
    - Built online attention over physical blocks and implemented `Model::forward_paged` and `Model::prefill_paged`.
    - Supported instantaneous zero-copy sequence forking (`PagedSequence::fork`) with reference-counted Copy-on-Write (`prepare_for_write`) page duplication.
    - Created comprehensive integration test suite `tests/paged.rs` verifying allocation, deallocation, CoW data isolation, and bit-identical parity against contiguous execution.
-21. Verification after Phase 19:
-   - `cargo test --all-targets` passes (138 tests).
+22. Phase 20 Radix Tree Prefix Caching & Prompt Deduplication:
+   - Created `src/prefix.rs` with `RadixCache` and `RadixNode` indexing token sequences to `PagedPool` physical blocks.
+   - Implemented `match_prefix`, `insert`, `apply_prefix_to_sequence`, and `evict_lru` leaf eviction.
+   - Exposed `RadixCache` and `RadixNode` in `src/lib.rs`.
+   - Added integration test suite in `tests/prefix.rs` validating exact bit-level logit equivalence for cached prefix prompt reuse, multi-turn dialogue branching, and LRU eviction under memory bounds.
+23. Verification after Phase 20:
+   - `cargo test --all-targets` passes (141 tests).
    - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
    - `cargo clippy --all-targets -- -D warnings` passes without warnings.
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 20: Radix Tree Prefix Caching & Prompt Deduplication (hash-based block prefix indexing for 0ms prompt ingestion and multi-turn KV reuse; status QUEUED).
+- Phase 21: Grammar-Constrained Decoding (Zero-Dependency JSON Schema & Regex Masking; status QUEUED).
