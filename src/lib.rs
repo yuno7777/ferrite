@@ -43,6 +43,6 @@ pub use scheduler::{
     BatchScheduler, FinishReason, SchedulerConfig, SequenceId, SequenceRequest, StepOutput,
 };
 pub use server::{Server, ServerConfig};
-pub use speculative::{SpeculativeEngine, SpeculativeStats};
+pub use speculative::{SpeculativeEngine, SpeculativeStats, SpeculativeTreeEngine};
 pub use template::{ChatMessage, ChatTemplate};
 pub use tokenizer::Tokenizer;

@@ -168,13 +168,14 @@
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 28: Speculative Tree Drafting (Medusa / Multi-Candidate Branching) (status QUEUED).
+- Phase 29: Perplexity & Cross-Entropy Evaluation Tool (`ferrite perplexity`) (status QUEUED).
+- Phase 30: SafeTensors to GGUF Zero-Dependency Model Transpiler (`ferrite convert`) (status QUEUED).
 
 ## Completed in This Execution
-- Phase 25: Added `ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>` and `src/quant/quantize.rs`. The writer preserves GGUF metadata, tensor names/shapes/order, and already-quantized tensor bytes while quantizing F32/F16 tensors. Added quantization round-trip and full GGUF readback coverage for all three target formats.
-- Phase 26: GGUF Multi-File Sharded Model Loader. Added `Gguf::open_sharded` and auto-shard discovery in `Gguf::open` resolving `-<idx>-of-<total>.gguf` filenames with zero-copy per-shard memory mappings. Added `shard_index` to `TensorInfo` and mapped tensor bytes dynamically to owning shard files. Added comprehensive test suite `tests/sharded.rs` validating explicit sharded paths, automatic shard discovery from any shard index, duplicate tensor rejection, and bit-identical inference output against single-file models.
-- Phase 27: Tokenizer Jinja/Mini-Template Chat Engine. Created `src/template.rs` with `ChatTemplate` and `ChatMessage`, zero-dependency Jinja parser and AST executor supporting loops, conditionals, filter trims, and whitespace trimming tags. Added architecture defaults (ChatML, LLaMA-3, LLaMA-2, Gemma) and integrated with HTTP server `/v1/chat/completions`. Added test suite `tests/template.rs`.
-- Verification: `cargo test --all-targets` passes (177 tests); `cargo clippy --all-targets -- -D warnings` passes; `cargo fmt --check` passes.
-- Working tree note: `.agent/maintenance.log` has unrelated concurrent log changes with whitespace errors; `git diff --check` passes when excluding the pre-existing/concurrently appended maintenance log.
+- Phase 25: Added `ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>` and `src/quant/quantize.rs`.
+- Phase 26: GGUF Multi-File Sharded Model Loader (`Gguf::open_sharded` and auto-shard discovery).
+- Phase 27: Tokenizer Jinja/Mini-Template Chat Engine (`src/template.rs` and `/v1/chat/completions`).
+- Phase 28: Speculative Tree Drafting (`SpeculativeTreeEngine`, `--spec-tree <b>` in CLI, integration test `speculative_tree_drafting_matches_target_baseline`).
+- Verification: `cargo test --all-targets` passes; `cargo clippy --all-targets -- -D warnings` passes; `cargo fmt --check` passes. Zero external dependencies (`cargo tree` is 1 line).
 
 

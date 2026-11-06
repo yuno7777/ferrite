@@ -213,6 +213,7 @@ impl Config {
 /// Reusable buffers for a matvec, so a decode step allocates nothing.
 ///
 /// Held by [`State`]. Sized for the widest matrix in the model.
+#[derive(Clone)]
 pub struct Workspace {
     /// Expanded row, for weight types with no faster path.
     scratch: Vec<f32>,
@@ -1613,6 +1614,7 @@ impl<'a, 'm> ChunkedPrefill<'a, 'm> {
 ///
 /// Separate from `Model` so the weights stay shareable: two sequences decoding
 /// at once want two of these and one of those.
+#[derive(Clone)]
 pub struct State {
     pub(crate) x: Vec<f32>,
     pub(crate) xb: Vec<f32>,

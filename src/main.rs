@@ -32,7 +32,8 @@ run/serve options:
   --host <host>   host interface to bind (default: 127.0.0.1)
   --port <port>   port to bind (default: 8080)
   --draft <model> draft model for speculative decoding acceleration
-  --spec-k <k>    speculative candidate count (default 3)
+  --spec-k <k>    speculative candidate count / depth (default 3)
+  --spec-tree <b> speculative candidate branch count (default 0, disabled)
   --lora <adapter> apply GGUF LoRA adapter dynamically
   --chunk-size <n> chunk size for prompt prefill (default 512)
   --kv-cache <t>  KV cache quantization: f32, q8_0, q4_0 (default f32)
@@ -298,6 +299,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         at.and_then(|i| args.get(i + 1).cloned())
     };
     let spec_k: usize = flag(args, "--spec-k", 3)?;
+    let spec_tree: usize = flag(args, "--spec-tree", 0)?;
     let chunk_size: usize = flag(args, "--chunk-size", 512)?;
     let kv_cache: ferrite::kv::KvCacheType =
         flag(args, "--kv-cache", ferrite::kv::KvCacheType::F32)?;
@@ -324,6 +326,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--threads",
         "--draft",
         "--spec-k",
+        "--spec-tree",
         "--lora",
         "--chunk-size",
         "--kv-cache",
@@ -405,8 +408,13 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         ));
     }
     if let Some((draft_model, _)) = &draft_bundle {
+        let tree_info = if spec_tree > 0 {
+            format!(" (tree branches={spec_tree})")
+        } else {
+            String::new()
+        };
         eprintln!(
-            "target: {} · draft: {} (k={spec_k}) · {} prompt tokens · {} kv cache · {} threads",
+            "target: {} · draft: {} (k={spec_k}{tree_info}) · {} prompt tokens · {} kv cache · {} threads",
             model.config.arch,
             draft_model.config.arch,
             prompt_tokens.len(),
@@ -449,32 +457,75 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     let decode_start = Instant::now();
 
     if let Some((draft_model, draft_state)) = &mut draft_bundle {
-        let mut engine = ferrite::speculative::SpeculativeEngine::new(&model, draft_model, spec_k);
-        while generated < limit && position < state.context() {
-            let emitted = engine.step(&mut state, draft_state, position, &mut sampler)?;
-            let mut stopped = false;
-            for token in emitted {
-                if Some(token) == tokenizer.eos {
-                    stopped = true;
-                    break;
+        let (acc_rate, tok_per_batch) = if spec_tree > 0 {
+            let mut engine = ferrite::speculative::SpeculativeTreeEngine::new(
+                &model,
+                draft_model,
+                spec_k,
+                spec_tree,
+            );
+            while generated < limit && position < state.context() {
+                let emitted = engine.step(&mut state, draft_state, position, &mut sampler)?;
+                let mut stopped = false;
+                for token in emitted {
+                    if Some(token) == tokenizer.eos {
+                        stopped = true;
+                        break;
+                    }
+                    pending.extend(tokenizer.piece(token));
+                    if let Ok(text) = std::str::from_utf8(&pending) {
+                        print!("{text}");
+                        stdout.flush().ok();
+                        pending.clear();
+                    }
+                    position += 1;
+                    generated += 1;
+                    if generated >= limit || position >= state.context() {
+                        stopped = true;
+                        break;
+                    }
                 }
-                pending.extend(tokenizer.piece(token));
-                if let Ok(text) = std::str::from_utf8(&pending) {
-                    print!("{text}");
-                    stdout.flush().ok();
-                    pending.clear();
-                }
-                position += 1;
-                generated += 1;
-                if generated >= limit || position >= state.context() {
-                    stopped = true;
+                if stopped {
                     break;
                 }
             }
-            if stopped {
-                break;
+            (
+                engine.stats.acceptance_rate(),
+                engine.stats.tokens_per_batch(),
+            )
+        } else {
+            let mut engine =
+                ferrite::speculative::SpeculativeEngine::new(&model, draft_model, spec_k);
+            while generated < limit && position < state.context() {
+                let emitted = engine.step(&mut state, draft_state, position, &mut sampler)?;
+                let mut stopped = false;
+                for token in emitted {
+                    if Some(token) == tokenizer.eos {
+                        stopped = true;
+                        break;
+                    }
+                    pending.extend(tokenizer.piece(token));
+                    if let Ok(text) = std::str::from_utf8(&pending) {
+                        print!("{text}");
+                        stdout.flush().ok();
+                        pending.clear();
+                    }
+                    position += 1;
+                    generated += 1;
+                    if generated >= limit || position >= state.context() {
+                        stopped = true;
+                        break;
+                    }
+                }
+                if stopped {
+                    break;
+                }
             }
-        }
+            (
+                engine.stats.acceptance_rate(),
+                engine.stats.tokens_per_batch(),
+            )
+        };
         println!();
         let decode = decode_start.elapsed();
         eprintln!(
@@ -483,8 +534,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
             prompt_tokens.len() as f64 / prefill.as_secs_f64().max(1e-9),
             decode.as_secs_f64(),
             generated as f64 / decode.as_secs_f64().max(1e-9),
-            engine.stats.acceptance_rate() * 100.0,
-            engine.stats.tokens_per_batch(),
+            acc_rate * 100.0,
+            tok_per_batch,
         );
     } else {
         let mut token_history = prompt_tokens.clone();

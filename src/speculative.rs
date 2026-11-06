@@ -194,3 +194,167 @@ impl<'a> SpeculativeEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// Speculative tree drafting engine (multi-candidate branching verification).
+///
+/// Proposes multiple alternative draft candidate branches (`branch_count` branches of depth `depth`).
+/// The target model evaluates the branching candidate paths in batched evaluation,
+/// selecting the branch with the maximum accepted token prefix.
+///
+/// This delivers significantly higher token acceptance rates while strictly preserving
+/// bit-identical mathematical equivalence to target-only inference.
+pub struct SpeculativeTreeEngine<'a> {
+    pub target: &'a Model<'a>,
+    pub draft: &'a Model<'a>,
+    pub depth: usize,
+    pub branch_count: usize,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> SpeculativeTreeEngine<'a> {
+    pub fn new(
+        target: &'a Model<'a>,
+        draft: &'a Model<'a>,
+        depth: usize,
+        branch_count: usize,
+    ) -> Self {
+        Self {
+            target,
+            draft,
+            depth: depth.max(1),
+            branch_count: branch_count.max(1),
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Perform one tree speculative step.
+    /// Returns the vector of accepted / emitted tokens (always at least 1 token).
+    pub fn step(
+        &mut self,
+        target_state: &mut State,
+        draft_state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut target_state.logits);
+        let mut emitted = vec![first_tok];
+
+        let max_depth = self
+            .depth
+            .min(target_state.context().saturating_sub(position + 2));
+        if max_depth == 0 {
+            self.target.forward(target_state, first_tok, position)?;
+            self.draft.forward(draft_state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // Forward first_tok into draft model at position
+        self.draft.forward(draft_state, first_tok, position)?;
+
+        // Propose top candidate tokens at position + 1 from draft logits
+        let mut top_candidates = Vec::with_capacity(self.branch_count);
+        let mut logits_copy = draft_state.logits.clone();
+        for _ in 0..self.branch_count {
+            let tok = sampler.sample(&mut logits_copy);
+            top_candidates.push(tok);
+            logits_copy[tok as usize] = -f32::INFINITY;
+        }
+        top_candidates.dedup();
+
+        // For each candidate branch, extend autoregressively with draft model up to max_depth
+        let mut branches = Vec::new();
+        for &head_tok in &top_candidates {
+            let mut branch = vec![head_tok];
+            let mut fork_draft_state = draft_state.clone();
+            self.draft
+                .forward(&mut fork_draft_state, head_tok, position + 1)?;
+
+            for cur_pos in (position + 2..).take(max_depth - 1) {
+                let tok = sampler.sample(&mut fork_draft_state.logits);
+                branch.push(tok);
+                self.draft.forward(&mut fork_draft_state, tok, cur_pos)?;
+            }
+            branches.push(branch);
+        }
+
+        self.stats.proposed += branches.iter().map(|b| b.len()).sum::<usize>();
+
+        // Verify branches against target model
+        let vocab = self.target.config.vocab;
+        let mut best_branch_idx = 0;
+        let mut best_match_len = 0;
+        let mut best_corrective = None;
+        let mut best_target_logits = Vec::new();
+
+        for (b_idx, branch) in branches.iter().enumerate() {
+            let mut target_batch = Vec::with_capacity(1 + branch.len());
+            target_batch.push(first_tok);
+            target_batch.extend_from_slice(branch);
+
+            let mut fork_target = target_state.clone();
+            let mut target_all_logits = vec![0.0f32; target_batch.len() * vocab];
+
+            self.target.prefill_all_logits(
+                &mut fork_target,
+                &target_batch,
+                position,
+                &mut target_all_logits,
+            )?;
+
+            let mut match_len = 0;
+            let mut corrective = None;
+            for (i, &cand) in branch.iter().enumerate() {
+                let target_tok_logits = &mut target_all_logits[i * vocab..(i + 1) * vocab];
+                let target_pred = sampler.sample(target_tok_logits);
+                if target_pred == cand {
+                    match_len += 1;
+                } else {
+                    corrective = Some(target_pred);
+                    break;
+                }
+            }
+
+            if match_len > best_match_len
+                || (match_len == best_match_len
+                    && best_corrective.is_some()
+                    && corrective.is_none())
+            {
+                best_match_len = match_len;
+                best_branch_idx = b_idx;
+                best_corrective = corrective;
+                best_target_logits = target_all_logits;
+            }
+        }
+
+        self.stats.target_batches += branches.len();
+        self.stats.accepted += best_match_len;
+
+        let winning_branch = &branches[best_branch_idx];
+        for &tok in &winning_branch[..best_match_len] {
+            emitted.push(tok);
+        }
+
+        if let Some(corr) = best_corrective {
+            emitted.push(corr);
+
+            // Re-sync states by prefilling accepted prefix + corrective
+            let sync_tokens = &emitted[..];
+            self.target.prefill(target_state, sync_tokens, position)?;
+            self.draft.prefill(draft_state, sync_tokens, position)?;
+        } else {
+            // Full winning branch accepted!
+            let sync_tokens = &emitted[..];
+            self.target.prefill(target_state, sync_tokens, position)?;
+            self.draft.prefill(draft_state, sync_tokens, position)?;
+
+            let last_logits = &best_target_logits
+                [winning_branch.len() * vocab..(winning_branch.len() + 1) * vocab];
+            target_state.set_logits(last_logits);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}

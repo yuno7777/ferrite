@@ -287,3 +287,82 @@ fn speculative_divergent_draft_model_corrects_and_matches_target() {
     fs::remove_file(target_path).ok();
     fs::remove_file(draft_path).ok();
 }
+
+#[test]
+fn speculative_tree_drafting_matches_target_baseline() {
+    let target_path = make_model_fixture("tree_tgt", 0.0);
+    let draft_path = make_model_fixture("tree_dft", 0.3); // Divergent draft weights
+
+    let target_gguf = Gguf::open(&target_path).expect("open target");
+    let draft_gguf = Gguf::open(&draft_path).expect("open draft");
+
+    let target_model = Model::load(&target_gguf).expect("load target");
+    let draft_model = Model::load(&draft_gguf).expect("load draft");
+
+    let prompt = vec![0u32, 1];
+    let total_to_generate = 6;
+
+    // 1. Direct autoregressive baseline from target model
+    let mut baseline_state = State::new(&target_model.config);
+    target_model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill target");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        target_model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. Tree speculative decoding with 2 candidate branches of depth 2
+    let mut target_state = State::new(&target_model.config);
+    let mut draft_state = State::new(&draft_model.config);
+
+    target_model
+        .prefill(&mut target_state, &prompt, 0)
+        .expect("prefill target");
+    draft_model
+        .prefill(&mut draft_state, &prompt, 0)
+        .expect("prefill draft");
+
+    let mut tree_engine = ferrite::speculative::SpeculativeTreeEngine::new(
+        &target_model,
+        &draft_model,
+        2, // depth
+        2, // branch_count
+    );
+    let mut spec_tokens = Vec::new();
+    let mut spec_sampler = Sampler::greedy();
+    let mut spec_pos = prompt.len();
+
+    while spec_tokens.len() < total_to_generate {
+        let emitted = tree_engine
+            .step(
+                &mut target_state,
+                &mut draft_state,
+                spec_pos,
+                &mut spec_sampler,
+            )
+            .expect("tree step");
+        spec_pos += emitted.len();
+        spec_tokens.extend(emitted);
+    }
+    spec_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        spec_tokens, baseline_tokens,
+        "speculative tree output must strictly match target model baseline"
+    );
+    assert!(tree_engine.stats.proposed > 0);
+    assert!(tree_engine.stats.total_emitted >= total_to_generate);
+
+    fs::remove_file(target_path).ok();
+    fs::remove_file(draft_path).ok();
+}
