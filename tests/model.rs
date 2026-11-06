@@ -1159,3 +1159,101 @@ fn chunked_prefill_runner_stateful_step_and_progress() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn quantized_kv_cache_q8_0_forward_and_prefill_match() {
+    let path = write("quantized_kv_q8_0", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = vec![1u32, 2, 3, 0, 2];
+
+    // Q8_0 sequential forward
+    let mut state_seq =
+        ferrite::model::State::with_kv_cache(&model.config, 64, ferrite::kv::KvCacheType::Q8_0);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    // Q8_0 batched prefill
+    let mut state_batch =
+        ferrite::model::State::with_kv_cache(&model.config, 64, ferrite::kv::KvCacheType::Q8_0);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    // Sequential forward and batched prefill must produce identical logits on Q8_0 cache
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_seq.logits),
+        bits(&state_batch.logits),
+        "Q8_0 batched prefill logits must match sequential forward"
+    );
+
+    // Compare with F32 baseline to verify bounded numerical tolerance
+    let mut state_f32 =
+        ferrite::model::State::with_kv_cache(&model.config, 64, ferrite::kv::KvCacheType::F32);
+    model.prefill(&mut state_f32, &prompt, 0).expect("prefill");
+
+    let max_diff = state_batch
+        .logits
+        .iter()
+        .zip(&state_f32.logits)
+        .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+
+    assert!(
+        max_diff < 0.05,
+        "Q8_0 logit diff {max_diff} exceeds bounded tolerance against F32 baseline"
+    );
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn quantized_kv_cache_q4_0_forward_and_prefill_match() {
+    let path = write("quantized_kv_q4_0", &fixture(2, true));
+    let gguf = Gguf::open(&path).expect("open");
+    let model = Model::load(&gguf).expect("load");
+
+    let prompt = vec![1u32, 2, 3, 0, 2];
+
+    // Q4_0 sequential forward
+    let mut state_seq =
+        ferrite::model::State::with_kv_cache(&model.config, 64, ferrite::kv::KvCacheType::Q4_0);
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    // Q4_0 batched prefill
+    let mut state_batch =
+        ferrite::model::State::with_kv_cache(&model.config, 64, ferrite::kv::KvCacheType::Q4_0);
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    // Sequential forward and batched prefill must produce identical logits on Q4_0 cache
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_seq.logits),
+        bits(&state_batch.logits),
+        "Q4_0 batched prefill logits must match sequential forward"
+    );
+
+    // Compare with F32 baseline to verify bounded numerical tolerance
+    let mut state_f32 =
+        ferrite::model::State::with_kv_cache(&model.config, 64, ferrite::kv::KvCacheType::F32);
+    model.prefill(&mut state_f32, &prompt, 0).expect("prefill");
+
+    let max_diff = state_batch
+        .logits
+        .iter()
+        .zip(&state_f32.logits)
+        .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+
+    assert!(
+        max_diff < 0.15,
+        "Q4_0 logit diff {max_diff} exceeds bounded tolerance against F32 baseline"
+    );
+
+    fs::remove_file(path).ok();
+}

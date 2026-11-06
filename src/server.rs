@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::kv::KvCacheType;
 use crate::model::{Model, State};
 use crate::sample::Sampler;
 use crate::tokenizer::Tokenizer;
@@ -19,6 +20,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub threads: usize,
     pub context: usize,
+    pub kv_cache: KvCacheType,
 }
 
 impl Default for ServerConfig {
@@ -30,6 +32,7 @@ impl Default for ServerConfig {
                 .map(|p| p.get())
                 .unwrap_or(4),
             context: 2048,
+            kv_cache: KvCacheType::F32,
         }
     }
 }
@@ -161,7 +164,11 @@ impl<'a> Server<'a> {
             return self.write_error(stream, 400, "Prompt encoded to 0 tokens");
         }
 
-        let mut state = State::with_context(&self.model.config, self.config.context);
+        let mut state = State::with_kv_cache(
+            &self.model.config,
+            self.config.context,
+            self.config.kv_cache,
+        );
         state.threads = self.config.threads;
 
         self.model.prefill(&mut state, &tokens, 0)?;
@@ -218,7 +225,11 @@ impl<'a> Server<'a> {
             return self.write_error(stream, 400, "Prompt encoded to 0 tokens");
         }
 
-        let mut state = State::with_context(&self.model.config, self.config.context);
+        let mut state = State::with_kv_cache(
+            &self.model.config,
+            self.config.context,
+            self.config.kv_cache,
+        );
         state.threads = self.config.threads;
 
         self.model.prefill(&mut state, &tokens, 0)?;

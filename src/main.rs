@@ -34,6 +34,7 @@ run/serve options:
   --spec-k <k>    speculative candidate count (default 3)
   --lora <adapter> apply GGUF LoRA adapter dynamically
   --chunk-size <n> chunk size for prompt prefill (default 512)
+  --kv-cache <t>  KV cache quantization: f32, q8_0, q4_0 (default f32)
 
 <model> is a path to a .gguf, or any substring of an id from `ferrite list`.
 Override the search root with FERRITE_MODELS_DIR.
@@ -259,6 +260,8 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
     };
     let spec_k: usize = flag(args, "--spec-k", 3)?;
     let chunk_size: usize = flag(args, "--chunk-size", 512)?;
+    let kv_cache: ferrite::kv::KvCacheType =
+        flag(args, "--kv-cache", ferrite::kv::KvCacheType::F32)?;
 
     let lora_query: Option<String> = {
         let at = args.iter().position(|a| a == "--lora");
@@ -278,6 +281,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         "--spec-k",
         "--lora",
         "--chunk-size",
+        "--kv-cache",
     ];
     let mut positional = Vec::new();
     let mut index = 0;
@@ -314,7 +318,7 @@ fn cmd_run(args: &[String]) -> std::io::Result<()> {
         let adapter = ferrite::lora::LoraAdapter::load(lgguf, None)?;
         model.apply_lora(adapter);
     }
-    let mut state = State::with_context(&model.config, context);
+    let mut state = State::with_kv_cache(&model.config, context, kv_cache);
     if threads > 0 {
         state.threads = threads;
     }
@@ -491,6 +495,7 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
         .unwrap_or(4);
     let mut query = None;
     let mut lora: Option<String> = None;
+    let mut kv_cache = ferrite::kv::KvCacheType::F32;
 
     let mut i = 0;
     while i < args.len() {
@@ -525,6 +530,12 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
                     lora = Some(l.clone());
                 }
             }
+            "--kv-cache" => {
+                i += 1;
+                if let Some(k) = args.get(i).and_then(|s| s.parse().ok()) {
+                    kv_cache = k;
+                }
+            }
             arg if !arg.starts_with('-') && query.is_none() => {
                 query = Some(arg.to_string());
             }
@@ -556,6 +567,7 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
         port,
         threads,
         context,
+        kv_cache,
     };
 
     let server = ferrite::server::Server::new(model, tokenizer, config);

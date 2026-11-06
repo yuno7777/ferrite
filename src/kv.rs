@@ -1,0 +1,717 @@
+//! Quantized and full-precision KV cache storage and attention kernels.
+//!
+//! Storing past keys and values in 32-bit floating point dominates memory usage
+//! on long contexts (e.g., 2 GB for 2048 tokens on 8B models). Quantizing the KV
+//! cache to 8-bit (`Q8_0`) or 4-bit (`Q4_0`) cuts memory by 3.5x to 6.4x with
+//! negligible impact on generation perplexity.
+
+use crate::ops::{self, AttentionParams};
+
+/// Size in elements of each quantized KV block.
+pub const KV_BLOCK_SIZE: usize = 32;
+
+/// Supported KV cache quantization formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KvCacheType {
+    /// Full 32-bit floating point precision (default).
+    #[default]
+    F32,
+    /// 8-bit symmetric block quantization (32 elements + f32 scale; 36 bytes/block).
+    Q8_0,
+    /// 4-bit packed block quantization (32 elements + f32 scale; 20 bytes/block).
+    Q4_0,
+}
+
+impl std::str::FromStr for KvCacheType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "f32" | "fp32" => Ok(Self::F32),
+            "q8_0" | "q8" => Ok(Self::Q8_0),
+            "q4_0" | "q4" => Ok(Self::Q4_0),
+            other => Err(format!(
+                "unknown KV cache type '{other}', expected f32, q8_0, or q4_0"
+            )),
+        }
+    }
+}
+
+/// A 32-element Q8_0 KV cache block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockQ8_0 {
+    pub scale: f32,
+    pub qs: [i8; KV_BLOCK_SIZE],
+}
+
+impl Default for BlockQ8_0 {
+    fn default() -> Self {
+        Self {
+            scale: 0.0,
+            qs: [0; KV_BLOCK_SIZE],
+        }
+    }
+}
+
+impl BlockQ8_0 {
+    /// Quantize up to 32 elements of `src` into signed 8-bit quants.
+    pub fn quantize(src: &[f32]) -> Self {
+        let amax = src.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+        let scale = amax / 127.0;
+        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        let mut qs = [0i8; KV_BLOCK_SIZE];
+        for (slot, &val) in qs.iter_mut().zip(src) {
+            *slot = (val * inv).round().clamp(-127.0, 127.0) as i8;
+        }
+        Self { scale, qs }
+    }
+
+    /// Dequantize element at index `0..32`.
+    #[inline]
+    pub fn dequantize(&self, index: usize) -> f32 {
+        self.scale * (self.qs[index] as f32)
+    }
+}
+
+/// A 32-element Q4_0 KV cache block (16 bytes packed nibbles + 4 byte f32 scale).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockQ4_0 {
+    pub scale: f32,
+    pub qs: [u8; KV_BLOCK_SIZE / 2],
+}
+
+impl Default for BlockQ4_0 {
+    fn default() -> Self {
+        Self {
+            scale: 0.0,
+            qs: [0x88; KV_BLOCK_SIZE / 2], // 8 - 8 = 0.0
+        }
+    }
+}
+
+impl BlockQ4_0 {
+    /// Quantize up to 32 elements of `src` into 4-bit nibbles centred on 8.
+    pub fn quantize(src: &[f32]) -> Self {
+        let amax = src.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+        let scale = amax / 8.0;
+        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        let mut qs = [0u8; KV_BLOCK_SIZE / 2];
+        for j in 0..16 {
+            let v0 = if j < src.len() {
+                (src[j] * inv).round().clamp(-8.0, 7.0) as i32 + 8
+            } else {
+                8
+            };
+            let v1 = if j + 16 < src.len() {
+                (src[j + 16] * inv).round().clamp(-8.0, 7.0) as i32 + 8
+            } else {
+                8
+            };
+            qs[j] = (v0 as u8 & 0x0F) | (((v1 as u8) & 0x0F) << 4);
+        }
+        Self { scale, qs }
+    }
+
+    /// Dequantize element at index `0..32`.
+    #[inline]
+    pub fn dequantize(&self, index: usize) -> f32 {
+        let nibble = if index < 16 {
+            (self.qs[index] & 0x0F) as f32 - 8.0
+        } else {
+            (self.qs[index - 16] >> 4) as f32 - 8.0
+        };
+        self.scale * nibble
+    }
+}
+
+#[inline]
+fn dot_block_q8_0(q: &[f32], block: &BlockQ8_0) -> f32 {
+    let mut sum = 0.0f32;
+    for (x, &w) in q.iter().zip(&block.qs) {
+        sum += x * (w as f32);
+    }
+    block.scale * sum
+}
+
+#[inline]
+fn add_weighted_block_q8_0(out: &mut [f32], weight: f32, block: &BlockQ8_0) {
+    let scaled = weight * block.scale;
+    for (o, &w) in out.iter_mut().zip(&block.qs) {
+        *o += scaled * (w as f32);
+    }
+}
+
+#[inline]
+fn dot_block_q4_0(q: &[f32], block: &BlockQ4_0) -> f32 {
+    let mut sum = 0.0f32;
+    let len = q.len().min(KV_BLOCK_SIZE);
+    let n_low = 16.min(len);
+    for (j, item) in q.iter().enumerate().take(n_low) {
+        let n0 = (block.qs[j] & 0x0F) as f32 - 8.0;
+        sum += *item * n0;
+    }
+    if len > 16 {
+        for j in 0..(len - 16) {
+            let n1 = (block.qs[j] >> 4) as f32 - 8.0;
+            sum += q[j + 16] * n1;
+        }
+    }
+    block.scale * sum
+}
+
+#[inline]
+fn add_weighted_block_q4_0(out: &mut [f32], weight: f32, block: &BlockQ4_0) {
+    let scaled = weight * block.scale;
+    let len = out.len().min(KV_BLOCK_SIZE);
+    let n_low = 16.min(len);
+    for (j, item) in out.iter_mut().enumerate().take(n_low) {
+        let n0 = (block.qs[j] & 0x0F) as f32 - 8.0;
+        *item += scaled * n0;
+    }
+    if len > 16 {
+        for j in 0..(len - 16) {
+            let n1 = (block.qs[j] >> 4) as f32 - 8.0;
+            out[j + 16] += scaled * n1;
+        }
+    }
+}
+
+/// KV cache memory storage supporting F32, Q8_0, and Q4_0 formats.
+#[derive(Clone, Debug)]
+pub enum KvCache {
+    F32 {
+        key: Vec<f32>,
+        value: Vec<f32>,
+        layers: usize,
+        context: usize,
+        kv_dim: usize,
+    },
+    Q8_0 {
+        key: Vec<BlockQ8_0>,
+        value: Vec<BlockQ8_0>,
+        layers: usize,
+        context: usize,
+        kv_dim: usize,
+        blocks_per_token: usize,
+    },
+    Q4_0 {
+        key: Vec<BlockQ4_0>,
+        value: Vec<BlockQ4_0>,
+        layers: usize,
+        context: usize,
+        kv_dim: usize,
+        blocks_per_token: usize,
+    },
+}
+
+impl KvCache {
+    /// Allocate a KV cache buffer for `layers` layers, `context` positions, and `kv_dim` dimensions.
+    pub fn new(layers: usize, context: usize, kv_dim: usize, cache_type: KvCacheType) -> Self {
+        match cache_type {
+            KvCacheType::F32 => {
+                let total = layers * context * kv_dim;
+                Self::F32 {
+                    key: vec![0.0; total],
+                    value: vec![0.0; total],
+                    layers,
+                    context,
+                    kv_dim,
+                }
+            }
+            KvCacheType::Q8_0 => {
+                let blocks_per_token = kv_dim.div_ceil(KV_BLOCK_SIZE);
+                let total_blocks = layers * context * blocks_per_token;
+                Self::Q8_0 {
+                    key: vec![BlockQ8_0::default(); total_blocks],
+                    value: vec![BlockQ8_0::default(); total_blocks],
+                    layers,
+                    context,
+                    kv_dim,
+                    blocks_per_token,
+                }
+            }
+            KvCacheType::Q4_0 => {
+                let blocks_per_token = kv_dim.div_ceil(KV_BLOCK_SIZE);
+                let total_blocks = layers * context * blocks_per_token;
+                Self::Q4_0 {
+                    key: vec![BlockQ4_0::default(); total_blocks],
+                    value: vec![BlockQ4_0::default(); total_blocks],
+                    layers,
+                    context,
+                    kv_dim,
+                    blocks_per_token,
+                }
+            }
+        }
+    }
+
+    /// The quantization format of this cache.
+    pub fn cache_type(&self) -> KvCacheType {
+        match self {
+            Self::F32 { .. } => KvCacheType::F32,
+            Self::Q8_0 { .. } => KvCacheType::Q8_0,
+            Self::Q4_0 { .. } => KvCacheType::Q4_0,
+        }
+    }
+
+    /// Approximate total bytes occupied by keys and values in memory.
+    pub fn cache_bytes(&self) -> usize {
+        match self {
+            Self::F32 { key, value, .. } => (key.len() + value.len()) * std::mem::size_of::<f32>(),
+            Self::Q8_0 { key, value, .. } => {
+                (key.len() + value.len()) * std::mem::size_of::<BlockQ8_0>()
+            }
+            Self::Q4_0 { key, value, .. } => {
+                (key.len() + value.len()) * std::mem::size_of::<BlockQ4_0>()
+            }
+        }
+    }
+
+    /// Store a key vector and value vector at `(layer, pos)`.
+    pub fn store(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) {
+        match self {
+            Self::F32 {
+                key,
+                value,
+                context,
+                kv_dim,
+                ..
+            } => {
+                let slot = (layer * *context + pos) * *kv_dim;
+                key[slot..slot + *kv_dim].copy_from_slice(k);
+                value[slot..slot + *kv_dim].copy_from_slice(v);
+            }
+            Self::Q8_0 {
+                key,
+                value,
+                context,
+                kv_dim,
+                blocks_per_token,
+                ..
+            } => {
+                let base_block = (layer * *context + pos) * *blocks_per_token;
+                for b in 0..*blocks_per_token {
+                    let start = b * KV_BLOCK_SIZE;
+                    let end = (start + KV_BLOCK_SIZE).min(*kv_dim);
+                    key[base_block + b] = BlockQ8_0::quantize(&k[start..end]);
+                    value[base_block + b] = BlockQ8_0::quantize(&v[start..end]);
+                }
+            }
+            Self::Q4_0 {
+                key,
+                value,
+                context,
+                kv_dim,
+                blocks_per_token,
+                ..
+            } => {
+                let base_block = (layer * *context + pos) * *blocks_per_token;
+                for b in 0..*blocks_per_token {
+                    let start = b * KV_BLOCK_SIZE;
+                    let end = (start + KV_BLOCK_SIZE).min(*kv_dim);
+                    key[base_block + b] = BlockQ4_0::quantize(&k[start..end]);
+                    value[base_block + b] = BlockQ4_0::quantize(&v[start..end]);
+                }
+            }
+        }
+    }
+
+    /// Compute tiled online attention for one query head over the stored KV history.
+    pub fn attention(&self, layer: usize, query: &[f32], out: &mut [f32], params: AttentionParams) {
+        match self {
+            Self::F32 {
+                key,
+                value,
+                context,
+                kv_dim,
+                ..
+            } => {
+                let layer_offset = layer * *context * *kv_dim;
+                ops::attention_online(
+                    query,
+                    &key[layer_offset..],
+                    &value[layer_offset..],
+                    params,
+                    out,
+                );
+            }
+            Self::Q8_0 {
+                key,
+                value,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                let layer_offset = layer * *context * *blocks_per_token;
+                attention_online_q8_0(
+                    query,
+                    &key[layer_offset..],
+                    &value[layer_offset..],
+                    *blocks_per_token,
+                    params,
+                    out,
+                );
+            }
+            Self::Q4_0 {
+                key,
+                value,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                let layer_offset = layer * *context * *blocks_per_token;
+                attention_online_q4_0(
+                    query,
+                    &key[layer_offset..],
+                    &value[layer_offset..],
+                    *blocks_per_token,
+                    params,
+                    out,
+                );
+            }
+        }
+    }
+
+    /// Zero out KV-cache slots from `keep_pos` up to `end_pos`.
+    pub fn truncate(&mut self, keep_pos: usize, end_pos: usize) {
+        match self {
+            Self::F32 {
+                key,
+                value,
+                layers,
+                context,
+                kv_dim,
+            } => {
+                let limit = end_pos.min(*context);
+                for layer in 0..*layers {
+                    for pos in keep_pos..limit {
+                        let slot = (layer * *context + pos) * *kv_dim;
+                        key[slot..slot + *kv_dim].fill(0.0);
+                        value[slot..slot + *kv_dim].fill(0.0);
+                    }
+                }
+            }
+            Self::Q8_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                let limit = end_pos.min(*context);
+                for layer in 0..*layers {
+                    for pos in keep_pos..limit {
+                        let slot = (layer * *context + pos) * *blocks_per_token;
+                        key[slot..slot + *blocks_per_token].fill(BlockQ8_0::default());
+                        value[slot..slot + *blocks_per_token].fill(BlockQ8_0::default());
+                    }
+                }
+            }
+            Self::Q4_0 {
+                key,
+                value,
+                layers,
+                context,
+                blocks_per_token,
+                ..
+            } => {
+                let limit = end_pos.min(*context);
+                for layer in 0..*layers {
+                    for pos in keep_pos..limit {
+                        let slot = (layer * *context + pos) * *blocks_per_token;
+                        key[slot..slot + *blocks_per_token].fill(BlockQ4_0::default());
+                        value[slot..slot + *blocks_per_token].fill(BlockQ4_0::default());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Access raw f32 key/value slices if this cache is in F32 format.
+    pub fn as_f32_slices(&self) -> Option<(&[f32], &[f32])> {
+        match self {
+            Self::F32 { key, value, .. } => Some((key, value)),
+            _ => None,
+        }
+    }
+}
+
+fn attention_online_q8_0(
+    query: &[f32],
+    keys: &[BlockQ8_0],
+    values: &[BlockQ8_0],
+    blocks_per_token: usize,
+    params: AttentionParams,
+    out: &mut [f32],
+) {
+    let AttentionParams {
+        offset,
+        len,
+        scale,
+        logit_cap,
+        window,
+        position,
+        tile_size,
+        ..
+    } = params;
+    out.fill(0.0);
+    let mut max_score = f32::NEG_INFINITY;
+    let mut denominator = 0.0f32;
+    let mut scores = vec![0.0f32; tile_size];
+
+    let aligned = offset % KV_BLOCK_SIZE == 0 && query.len() % KV_BLOCK_SIZE == 0;
+    let block_start = offset / KV_BLOCK_SIZE;
+    let num_blocks = query.len() / KV_BLOCK_SIZE;
+
+    for start in (0..len).step_by(tile_size) {
+        let end = (start + tile_size).min(len);
+        for (i, past) in (start..end).enumerate() {
+            if window.is_some_and(|w| position.saturating_sub(past) >= w) {
+                scores[i] = f32::NEG_INFINITY;
+                continue;
+            }
+            let tok_base = past * blocks_per_token;
+            let tok_keys = &keys[tok_base..tok_base + blocks_per_token];
+
+            let dot_val = if aligned {
+                let mut sum = 0.0f32;
+                for b in 0..num_blocks {
+                    let q_chunk = &query[b * KV_BLOCK_SIZE..(b + 1) * KV_BLOCK_SIZE];
+                    sum += dot_block_q8_0(q_chunk, &tok_keys[block_start + b]);
+                }
+                sum
+            } else {
+                let mut sum = 0.0f32;
+                for (k, &q_val) in query.iter().enumerate() {
+                    let elem = offset + k;
+                    let b = elem / KV_BLOCK_SIZE;
+                    let j = elem % KV_BLOCK_SIZE;
+                    sum += q_val * tok_keys[b].dequantize(j);
+                }
+                sum
+            };
+
+            let mut score = dot_val * scale;
+            if let Some(cap) = logit_cap {
+                score = cap * (score / cap).tanh();
+            }
+            scores[i] = score;
+        }
+
+        let tile_max = scores[..end - start]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !tile_max.is_finite() {
+            continue;
+        }
+        let next_max = max_score.max(tile_max);
+        let old_scale = if max_score.is_finite() {
+            (max_score - next_max).exp()
+        } else {
+            0.0
+        };
+        denominator *= old_scale;
+        for v in out.iter_mut() {
+            *v *= old_scale;
+        }
+
+        for (i, past) in (start..end).enumerate() {
+            if !scores[i].is_finite() {
+                continue;
+            }
+            let weight = (scores[i] - next_max).exp();
+            denominator += weight;
+            let tok_base = past * blocks_per_token;
+            let tok_vals = &values[tok_base..tok_base + blocks_per_token];
+
+            if aligned {
+                for b in 0..num_blocks {
+                    let out_chunk = &mut out[b * KV_BLOCK_SIZE..(b + 1) * KV_BLOCK_SIZE];
+                    add_weighted_block_q8_0(out_chunk, weight, &tok_vals[block_start + b]);
+                }
+            } else {
+                for (k, out_slot) in out.iter_mut().enumerate() {
+                    let elem = offset + k;
+                    let b = elem / KV_BLOCK_SIZE;
+                    let j = elem % KV_BLOCK_SIZE;
+                    *out_slot += weight * tok_vals[b].dequantize(j);
+                }
+            }
+        }
+        max_score = next_max;
+    }
+
+    if denominator > 0.0 {
+        for value in out {
+            *value /= denominator;
+        }
+    }
+}
+
+fn attention_online_q4_0(
+    query: &[f32],
+    keys: &[BlockQ4_0],
+    values: &[BlockQ4_0],
+    blocks_per_token: usize,
+    params: AttentionParams,
+    out: &mut [f32],
+) {
+    let AttentionParams {
+        offset,
+        len,
+        scale,
+        logit_cap,
+        window,
+        position,
+        tile_size,
+        ..
+    } = params;
+    out.fill(0.0);
+    let mut max_score = f32::NEG_INFINITY;
+    let mut denominator = 0.0f32;
+    let mut scores = vec![0.0f32; tile_size];
+
+    let aligned = offset % KV_BLOCK_SIZE == 0 && query.len() % KV_BLOCK_SIZE == 0;
+    let block_start = offset / KV_BLOCK_SIZE;
+    let num_blocks = query.len() / KV_BLOCK_SIZE;
+
+    for start in (0..len).step_by(tile_size) {
+        let end = (start + tile_size).min(len);
+        for (i, past) in (start..end).enumerate() {
+            if window.is_some_and(|w| position.saturating_sub(past) >= w) {
+                scores[i] = f32::NEG_INFINITY;
+                continue;
+            }
+            let tok_base = past * blocks_per_token;
+            let tok_keys = &keys[tok_base..tok_base + blocks_per_token];
+
+            let dot_val = if aligned {
+                let mut sum = 0.0f32;
+                for b in 0..num_blocks {
+                    let q_chunk = &query[b * KV_BLOCK_SIZE..(b + 1) * KV_BLOCK_SIZE];
+                    sum += dot_block_q4_0(q_chunk, &tok_keys[block_start + b]);
+                }
+                sum
+            } else {
+                let mut sum = 0.0f32;
+                for (k, &q_val) in query.iter().enumerate() {
+                    let elem = offset + k;
+                    let b = elem / KV_BLOCK_SIZE;
+                    let j = elem % KV_BLOCK_SIZE;
+                    sum += q_val * tok_keys[b].dequantize(j);
+                }
+                sum
+            };
+
+            let mut score = dot_val * scale;
+            if let Some(cap) = logit_cap {
+                score = cap * (score / cap).tanh();
+            }
+            scores[i] = score;
+        }
+
+        let tile_max = scores[..end - start]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !tile_max.is_finite() {
+            continue;
+        }
+        let next_max = max_score.max(tile_max);
+        let old_scale = if max_score.is_finite() {
+            (max_score - next_max).exp()
+        } else {
+            0.0
+        };
+        denominator *= old_scale;
+        for v in out.iter_mut() {
+            *v *= old_scale;
+        }
+
+        for (i, past) in (start..end).enumerate() {
+            if !scores[i].is_finite() {
+                continue;
+            }
+            let weight = (scores[i] - next_max).exp();
+            denominator += weight;
+            let tok_base = past * blocks_per_token;
+            let tok_vals = &values[tok_base..tok_base + blocks_per_token];
+
+            if aligned {
+                for b in 0..num_blocks {
+                    let out_chunk = &mut out[b * KV_BLOCK_SIZE..(b + 1) * KV_BLOCK_SIZE];
+                    add_weighted_block_q4_0(out_chunk, weight, &tok_vals[block_start + b]);
+                }
+            } else {
+                for (k, out_slot) in out.iter_mut().enumerate() {
+                    let elem = offset + k;
+                    let b = elem / KV_BLOCK_SIZE;
+                    let j = elem % KV_BLOCK_SIZE;
+                    *out_slot += weight * tok_vals[b].dequantize(j);
+                }
+            }
+        }
+        max_score = next_max;
+    }
+
+    if denominator > 0.0 {
+        for value in out {
+            *value /= denominator;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn q8_0_quantize_dequantize_roundtrip() {
+        let original: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.125).collect();
+        let block = BlockQ8_0::quantize(&original);
+        assert!(block.scale > 0.0);
+        for (i, &orig) in original.iter().enumerate() {
+            let recovered = block.dequantize(i);
+            assert!(
+                (orig - recovered).abs() <= block.scale * 0.5 + 1e-6,
+                "diff too large at index {i}: {orig} vs {recovered}"
+            );
+        }
+    }
+
+    #[test]
+    fn q4_0_quantize_dequantize_roundtrip() {
+        let original: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.125).collect();
+        let block = BlockQ4_0::quantize(&original);
+        assert!(block.scale > 0.0);
+        for (i, &orig) in original.iter().enumerate() {
+            let recovered = block.dequantize(i);
+            assert!(
+                (orig - recovered).abs() <= block.scale * 0.5 + 1e-6,
+                "diff too large at index {i}: {orig} vs {recovered}"
+            );
+        }
+    }
+
+    #[test]
+    fn q8_0_cache_memory_reduction() {
+        let f32_cache = KvCache::new(4, 512, 128, KvCacheType::F32);
+        let q8_cache = KvCache::new(4, 512, 128, KvCacheType::Q8_0);
+        let q4_cache = KvCache::new(4, 512, 128, KvCacheType::Q4_0);
+
+        let f32_bytes = f32_cache.cache_bytes();
+        let q8_bytes = q8_cache.cache_bytes();
+        let q4_bytes = q4_cache.cache_bytes();
+
+        assert!(
+            q8_bytes * 3 < f32_bytes,
+            "q8_bytes {q8_bytes} should be ~3.5x smaller than f32_bytes {f32_bytes}"
+        );
+        assert!(
+            q4_bytes * 5 < f32_bytes,
+            "q4_bytes {q4_bytes} should be ~6.4x smaller than f32_bytes {f32_bytes}"
+        );
+    }
+}

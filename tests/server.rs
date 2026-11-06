@@ -151,6 +151,7 @@ fn setup_server(
         port: 0, // OS assigns available ephemeral port
         threads: 2,
         context: 16,
+        kv_cache: ferrite::kv::KvCacheType::F32,
     };
 
     let server = Server::new(model, tokenizer, config);

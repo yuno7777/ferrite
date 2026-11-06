@@ -3,6 +3,7 @@
 use std::io::{Error, ErrorKind, Result};
 
 use crate::gguf::{GgmlType, Gguf};
+use crate::kv::{KvCache, KvCacheType};
 use crate::ops;
 use crate::quant;
 
@@ -762,10 +763,9 @@ impl<'a> Model<'a> {
             v,
             logits,
             workspace,
-            key_cache,
-            value_cache,
-            context,
+            kv_cache,
             threads,
+            ..
         } = state;
 
         let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
@@ -838,9 +838,7 @@ impl<'a> Model<'a> {
                 );
             }
 
-            let slot = (index * *context + position) * kv_dim;
-            key_cache[slot..slot + kv_dim].copy_from_slice(k);
-            value_cache[slot..slot + kv_dim].copy_from_slice(v);
+            kv_cache.store(index, position, k, v);
 
             let scale = 1.0 / (head_dim as f32).sqrt();
             let is_sliding = is_sliding_layer(index);
@@ -850,10 +848,10 @@ impl<'a> Model<'a> {
                 let query = &q[head * head_dim..(head + 1) * head_dim];
 
                 let out = &mut xb[head * head_dim..(head + 1) * head_dim];
-                ops::attention_online(
+                kv_cache.attention(
+                    index,
                     query,
-                    &key_cache[index * *context * kv_dim..],
-                    &value_cache[index * *context * kv_dim..],
+                    out,
                     ops::AttentionParams {
                         row_width: kv_dim,
                         offset: kv_head * head_dim,
@@ -864,7 +862,6 @@ impl<'a> Model<'a> {
                         position,
                         tile_size: 64,
                     },
-                    out,
                 );
             }
 
@@ -1001,9 +998,7 @@ impl<'a> Model<'a> {
         let State {
             logits,
             workspace,
-            key_cache,
-            value_cache,
-            context,
+            kv_cache,
             threads,
             ..
         } = state;
@@ -1088,9 +1083,7 @@ impl<'a> Model<'a> {
                     );
                 }
 
-                let slot = (index * *context + pos) * kv_dim;
-                key_cache[slot..slot + kv_dim].copy_from_slice(k_tok);
-                value_cache[slot..slot + kv_dim].copy_from_slice(v_tok);
+                kv_cache.store(index, pos, k_tok, v_tok);
             }
 
             let scale = 1.0 / (head_dim as f32).sqrt();
@@ -1105,10 +1098,10 @@ impl<'a> Model<'a> {
                     let query = &q_tok[head * head_dim..(head + 1) * head_dim];
 
                     let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
-                    ops::attention_online(
+                    kv_cache.attention(
+                        index,
                         query,
-                        &key_cache[index * *context * kv_dim..],
-                        &value_cache[index * *context * kv_dim..],
+                        out,
                         ops::AttentionParams {
                             row_width: kv_dim,
                             offset: kv_head * head_dim,
@@ -1119,7 +1112,6 @@ impl<'a> Model<'a> {
                             position: pos,
                             tile_size: 64,
                         },
-                        out,
                     );
                 }
             }
@@ -1274,9 +1266,7 @@ impl<'a> Model<'a> {
         let State {
             logits,
             workspace,
-            key_cache,
-            value_cache,
-            context,
+            kv_cache,
             threads,
             ..
         } = state;
@@ -1330,15 +1320,6 @@ impl<'a> Model<'a> {
                     }
                 }
             }
-            if let Some(l) = &layer.lora_wq {
-                l.apply_batched_threaded(&xb_batch, n, &mut q_batch, *threads)?;
-            }
-            if let Some(l) = &layer.lora_wk {
-                l.apply_batched_threaded(&xb_batch, n, &mut k_batch, *threads)?;
-            }
-            if let Some(l) = &layer.lora_wv {
-                l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
-            }
             if let Some(l) = &layer.lora_wv {
                 l.apply_batched_threaded(&xb_batch, n, &mut v_batch, *threads)?;
             }
@@ -1368,9 +1349,7 @@ impl<'a> Model<'a> {
                     );
                 }
 
-                let slot = (index * *context + pos) * kv_dim;
-                key_cache[slot..slot + kv_dim].copy_from_slice(k_tok);
-                value_cache[slot..slot + kv_dim].copy_from_slice(v_tok);
+                kv_cache.store(index, pos, k_tok, v_tok);
             }
 
             let scale = 1.0 / (head_dim as f32).sqrt();
@@ -1385,10 +1364,10 @@ impl<'a> Model<'a> {
                     let query = &q_tok[head * head_dim..(head + 1) * head_dim];
 
                     let out = &mut att_tok[head * head_dim..(head + 1) * head_dim];
-                    ops::attention_online(
+                    kv_cache.attention(
+                        index,
                         query,
-                        &key_cache[index * *context * kv_dim..],
-                        &value_cache[index * *context * kv_dim..],
+                        out,
                         ops::AttentionParams {
                             row_width: kv_dim,
                             offset: kv_head * head_dim,
@@ -1399,7 +1378,6 @@ impl<'a> Model<'a> {
                             position: pos,
                             tile_size: 64,
                         },
-                        out,
                     );
                 }
             }
@@ -1647,8 +1625,7 @@ pub struct State {
     /// Scores for the last token processed, one per vocabulary entry.
     pub logits: Vec<f32>,
     workspace: Workspace,
-    key_cache: Vec<f32>,
-    value_cache: Vec<f32>,
+    pub kv_cache: KvCache,
     context: usize,
     /// Workers per matvec. Defaults to the machine's parallelism.
     pub threads: usize,
@@ -1664,12 +1641,20 @@ pub const DEFAULT_CONTEXT: usize = 2048;
 
 impl State {
     pub fn new(config: &Config) -> Self {
-        Self::with_context(config, config.context.min(DEFAULT_CONTEXT))
+        Self::with_kv_cache(
+            config,
+            config.context.min(DEFAULT_CONTEXT),
+            KvCacheType::F32,
+        )
     }
 
     pub fn with_context(config: &Config, context: usize) -> Self {
+        Self::with_kv_cache(config, context, KvCacheType::F32)
+    }
+
+    /// Allocate state with explicit context window and KV cache quantization format.
+    pub fn with_kv_cache(config: &Config, context: usize, cache_type: KvCacheType) -> Self {
         let context = context.clamp(1, config.context);
-        let kv = config.layers * context * config.kv_dim();
         let widest = config
             .embedding
             .max(config.ffn)
@@ -1685,8 +1670,7 @@ impl State {
             v: vec![0.0; config.kv_dim()],
             logits: vec![0.0; config.vocab],
             workspace: Workspace::new(widest),
-            key_cache: vec![0.0; kv],
-            value_cache: vec![0.0; kv],
+            kv_cache: KvCache::new(config.layers, context, config.kv_dim(), cache_type),
             context,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
@@ -1708,30 +1692,35 @@ impl State {
 
     /// Bytes held by the KV cache, which dominates everything else here.
     pub fn cache_bytes(&self) -> usize {
-        (self.key_cache.len() + self.value_cache.len()) * std::mem::size_of::<f32>()
+        self.kv_cache.cache_bytes()
     }
 
     pub fn key_cache(&self) -> &[f32] {
-        &self.key_cache
+        self.kv_cache.as_f32_slices().map_or(&[], |(k, _)| k)
     }
 
     pub fn value_cache(&self) -> &[f32] {
-        &self.value_cache
+        self.kv_cache.as_f32_slices().map_or(&[], |(_, v)| v)
+    }
+
+    pub fn kv_cache(&self) -> &KvCache {
+        &self.kv_cache
+    }
+
+    pub fn kv_cache_mut(&mut self) -> &mut KvCache {
+        &mut self.kv_cache
+    }
+
+    pub fn kv_cache_type(&self) -> KvCacheType {
+        self.kv_cache.cache_type()
     }
 
     /// Zero out KV-cache slots from `keep_pos` up to `end_pos`.
     ///
     /// Used by speculative decoding to roll back candidate KV-cache entries when
     /// speculative tokens are rejected by the target model.
-    pub fn truncate_cache(&mut self, config: &Config, keep_pos: usize, end_pos: usize) {
-        let kv_dim = config.kv_dim();
-        for layer in 0..config.layers {
-            for pos in keep_pos..end_pos.min(self.context) {
-                let slot = (layer * self.context + pos) * kv_dim;
-                self.key_cache[slot..slot + kv_dim].fill(0.0);
-                self.value_cache[slot..slot + kv_dim].fill(0.0);
-            }
-        }
+    pub fn truncate_cache(&mut self, _config: &Config, keep_pos: usize, end_pos: usize) {
+        self.kv_cache.truncate(keep_pos, end_pos);
     }
 
     /// Set `logits` buffer to the given slice.

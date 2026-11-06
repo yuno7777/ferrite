@@ -110,5 +110,18 @@
    - `cargo fmt --check` passes without differences.
    - `git diff --check` passes without errors.
 
+18. Phase 18 Quantized KV Cache (Q8_0 and Q4_0 Paged/Continuous Cache):
+   - Created `src/kv.rs` with `BlockQ8_0` (32 elements, 36 bytes/block) and `BlockQ4_0` (32 elements, 20 bytes/block).
+   - Implemented `KvCache` enum (`F32`, `Q8_0`, `Q4_0`) cutting KV cache memory footprint by 3.5x to 6.4x.
+   - Built tiled online attention kernels for Q8_0 and Q4_0 with block-aligned fast-paths and element-level fallback.
+   - Integrated into `Model::forward`, `Model::prefill`, `Model::prefill_all_logits`, `State::with_kv_cache`, `ServerConfig`, and CLI `--kv-cache`.
+   - Added unit tests in `src/kv.rs` and integration tests in `tests/model.rs` (`quantized_kv_cache_q8_0_forward_and_prefill_match`, `quantized_kv_cache_q4_0_forward_and_prefill_match`).
+19. Verification after Phase 18:
+   - `cargo test --all-targets` passes (135 tests).
+   - Strictly 0 external dependencies (`cargo tree` is 1 line: `ferrite v0.1.0`).
+   - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+   - `cargo fmt --check` passes without differences.
+   - `git diff --check` passes without errors.
+
 ## Next Up in Work Queue
-- Phase 18: Quantized KV Cache (Q8_0 and Q4_0 Paged/Continuous Cache) (cutting KV memory footprint by 2x-4x with near-zero perplexity loss; status QUEUED).
+- Phase 19: Paged KV-Cache & Block Table Allocator (dynamic non-contiguous block allocation, copy-on-write fork support, and block table attention; status QUEUED).

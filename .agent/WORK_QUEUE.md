@@ -160,10 +160,11 @@
 
 ### Phase 18: Quantized KV Cache (Q8_0 and Q4_0 Paged/Continuous Cache)
 - Priority: P1
-- Status: QUEUED
-- Rationale: Storing KV activations in full FP32 consumes excessive RAM on large context lengths. Quantizing KV-cache vectors to Q8_0 or Q4_0 cuts KV memory footprint by 2x-4x with near-zero perplexity impact.
-- Files: `src/model.rs`, `src/quant/mod.rs`, `src/ops.rs`, `tests/model.rs`
-- Acceptance: Provide configurable KV cache quantization (f32, q8_0); online attention dynamically reads quantized scales/quants; bit-accurate verification with bounded quantization tolerance.
+- Status: COMPLETED
+- Rationale: Storing KV activations in full FP32 consumes excessive RAM on large context lengths. Quantizing KV-cache vectors to Q8_0 or Q4_0 cuts KV memory footprint by 3.5x to 6.4x with near-zero perplexity impact.
+- Files: `src/kv.rs`, `src/model.rs`, `src/lib.rs`, `src/main.rs`, `src/server.rs`, `tests/model.rs`
+- Acceptance: Provide configurable KV cache quantization (f32, q8_0, q4_0); online attention dynamically reads quantized scales/quants; bit-accurate verification with bounded quantization tolerance.
+- Completion evidence: Created `src/kv.rs` with `BlockQ8_0` (36 bytes/block), `BlockQ4_0` (20 bytes/block), and enum `KvCache` supporting `F32`, `Q8_0`, and `Q4_0`. Added tiled online attention kernels reading quantized blocks dynamically with alignment fast-paths and element-level fallback. Integrated into `Model::forward`, `Model::prefill`, `Model::prefill_all_logits`, `State::with_kv_cache`, `ServerConfig`, and CLI `--kv-cache`. Added unit tests for roundtrip quantization, memory footprint reduction (~3.5x and ~6.4x), and integration tests in `tests/model.rs` showing forward/prefill parity and bounded tolerance against F32. All 135 tests pass.
 
 ### Phase 19: Paged KV-Cache & Block Table Allocator
 - Priority: P1
