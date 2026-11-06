@@ -11,6 +11,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+pub mod eval;
 pub mod gguf;
 pub mod grammar;
 pub mod kv;
@@ -30,6 +31,7 @@ pub mod synth;
 pub mod template;
 pub mod tokenizer;
 
+pub use eval::{cross_entropy_loss, ChunkPerplexity, PerplexityEvaluator, PerplexityReport};
 pub use gguf::{discover_shards, GgmlType, Gguf, TensorInfo, Value};
 pub use grammar::{ChoiceGrammar, Grammar, JsonGrammar, RegexMatcher};
 pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType};

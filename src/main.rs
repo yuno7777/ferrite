@@ -20,6 +20,7 @@ usage:
   ferrite run <model> <prompt>      generate, streaming to stdout
   ferrite serve <model>             serve HTTP/SSE API daemon
   ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
+  ferrite perplexity <model> <file> evaluate text perplexity and loss
 
 run/serve options:
   -n <count>      tokens to generate (default 128)
@@ -58,6 +59,7 @@ fn main() -> ExitCode {
         Some("run") => cmd_run(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
         Some("quantize") => cmd_quantize(&args[1..]),
+        Some("perplexity") => cmd_perplexity(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -100,6 +102,97 @@ fn cmd_quantize(args: &[String]) -> std::io::Result<()> {
         std::path::Path::new(&args[1]),
         target,
     )
+}
+
+fn cmd_perplexity(args: &[String]) -> std::io::Result<()> {
+    let context: usize = flag(args, "--ctx", 512)?;
+    let stride: usize = flag(args, "--stride", context)?;
+    let threads: usize = flag(args, "--threads", 0)?;
+
+    let flags = ["--ctx", "--stride", "--threads"];
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if flags.contains(&args[index].as_str()) {
+            index += 2;
+            continue;
+        }
+        positional.push(args[index].clone());
+        index += 1;
+    }
+
+    let (query, file_path) = match positional.as_slice() {
+        [q, f] => (q, f),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: ferrite perplexity <model> <text_file> [--ctx <n>] [--stride <n>] [--threads <n>]",
+            ));
+        }
+    };
+
+    let text = std::fs::read_to_string(file_path)?;
+    let path = lmstudio::resolve(query)?;
+    let gguf = Gguf::open(&path)?;
+    let tokenizer = Tokenizer::from_gguf(&gguf)?;
+    let model = Model::load(&gguf)?;
+
+    let tokens = tokenizer.encode(&text, false);
+    if tokens.len() < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "file encoded to {} tokens, but at least 2 tokens are required",
+                tokens.len()
+            ),
+        ));
+    }
+
+    let worker_count = if threads > 0 {
+        threads
+    } else {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4)
+    };
+
+    eprintln!(
+        "model: {} · {} tokens · ctx: {context} · stride: {stride} · threads: {worker_count}",
+        model.config.arch,
+        tokens.len(),
+    );
+
+    let start = Instant::now();
+    let evaluator =
+        ferrite::eval::PerplexityEvaluator::new(&model, context, stride).with_threads(threads);
+
+    let report = evaluator.evaluate_with_callback(&tokens, |chunk| {
+        let chunk_tokens = chunk.count;
+        let nll = chunk.chunk_nll / chunk_tokens as f64;
+        eprintln!(
+            "  chunk {:>3} [{:>6}..{:>6}] · {:>4} tokens · nll: {:>7.4} · ppl: {:>8.4}",
+            chunk.chunk_index + 1,
+            chunk.start_token,
+            chunk.start_token + chunk_tokens,
+            chunk_tokens,
+            nll,
+            chunk.chunk_ppl,
+        );
+    })?;
+
+    let elapsed = start.elapsed();
+    println!("\nPerplexity evaluation results:");
+    println!("  Total tokens:      {}", report.total_tokens);
+    println!("  Evaluated tokens:  {}", report.evaluated_tokens);
+    println!("  Mean loss (NLL):   {:.4}", report.mean_loss);
+    println!("  Perplexity (PPL):  {:.4}", report.perplexity);
+    println!(
+        "  Speed:             {:.1} tok/s ({:.2}s)",
+        report.evaluated_tokens as f64 / elapsed.as_secs_f64().max(1e-9),
+        elapsed.as_secs_f64()
+    );
+
+    Ok(())
 }
 
 fn cmd_where() -> std::io::Result<()> {

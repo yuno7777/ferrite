@@ -168,7 +168,6 @@
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 29: Perplexity & Cross-Entropy Evaluation Tool (`ferrite perplexity`) (status QUEUED).
 - Phase 30: SafeTensors to GGUF Zero-Dependency Model Transpiler (`ferrite convert`) (status QUEUED).
 
 ## Completed in This Execution
@@ -177,5 +176,11 @@
 - Phase 27: Tokenizer Jinja/Mini-Template Chat Engine (`src/template.rs` and `/v1/chat/completions`).
 - Phase 28: Speculative Tree Drafting (`SpeculativeTreeEngine`, `--spec-tree <b>` in CLI, integration test `speculative_tree_drafting_matches_target_baseline`).
 - Verification: `cargo test --all-targets` passes; `cargo clippy --all-targets -- -D warnings` passes; `cargo fmt --check` passes. Zero external dependencies (`cargo tree` is 1 line).
+
+## Completed in This Execution
+- Phase 29: Added stable cross-entropy calculation and `PerplexityEvaluator` with bounded context windows, configurable stride and worker threads, per-chunk NLL/perplexity, and aggregate mean loss/perplexity. Added the `ferrite perplexity <model> <text_file>` CLI command with `--ctx`, `--stride`, and `--threads` options.
+- Correctness: Fixed target-window accounting so disjoint and overlapping strides score each next-token target exactly once, including chunk boundaries. Added regression assertions for full target coverage.
+- Verification: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` pass.
+- Next task: Phase 30 SafeTensors to GGUF transpiler remains QUEUED (P3).
 
 

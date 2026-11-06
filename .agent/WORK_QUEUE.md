@@ -248,10 +248,11 @@
 
 ### Phase 29: Perplexity & Cross-Entropy Evaluation Tool (`ferrite perplexity`)
 - Priority: P3
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Standard tool for benchmarking model quantization accuracy and RoPE scaling perplexity across standard datasets (e.g. wikitext).
 - Files: `src/eval.rs`, `src/main.rs`, `tests/eval.rs`
 - Acceptance: CLI `ferrite perplexity <model> <text_file>`; compute exact cross-entropy loss, negative log likelihood, and perplexity per chunk.
+- Completion evidence: Added numerically stable log-sum-exp cross-entropy, context-bounded chunk evaluation with each next-token target scored exactly once, aggregate/per-chunk NLL and perplexity reports, and CLI options `--ctx`, `--stride`, and `--threads`. Regression tests cover disjoint and overlapping strides, exact target coverage, and invalid inputs. `cargo test --all-targets`, strict Clippy, and formatting checks pass.
 
 ### Phase 30: SafeTensors to GGUF Zero-Dependency Model Transpiler (`ferrite convert`)
 - Priority: P3
