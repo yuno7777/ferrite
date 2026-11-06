@@ -232,10 +232,11 @@
 
 ### Phase 27: Tokenizer Jinja/Mini-Template Chat Engine
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Read GGUF `tokenizer.chat_template` and format OpenAI-style message arrays (`system`, `user`, `assistant`) into exact model prompts (LLaMA-3, ChatML, Mistral, Qwen) without external template crates.
-- Files: `src/template.rs`, `src/server.rs`, `tests/template.rs`
+- Files: `src/template.rs`, `src/server.rs`, `src/lib.rs`, `tests/template.rs`
 - Acceptance: Support standard template macros (`{% for message in messages %}`, `{{ message.content }}`); render valid conversation prompts.
+- Completion evidence: Created `src/template.rs` implementing `ChatTemplate`, `ChatMessage`, zero-dependency Jinja tokenization, AST evaluation with loops (`{% for ... %}` with `loop.first`, `loop.last`, `loop.index`), conditionals (`{% if ... %}`, `{% elif ... %}`, `{% else %}`, `is defined`, `is not defined`), filters (`| trim`), whitespace trim tags (`{{-`, `-}}`, `{%-`, `-%}`), and architecture defaults (ChatML, LLaMA-3, LLaMA-2, Gemma). Integrated into `src/server.rs` OpenAI-compatible `/v1/chat/completions`. Added comprehensive integration test suite `tests/template.rs`. All 177 tests pass.
 
 ### Phase 28: Speculative Tree Drafting (Medusa / Multi-Candidate Branching)
 - Priority: P2

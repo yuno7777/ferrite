@@ -27,6 +27,7 @@ pub mod scheduler;
 pub mod server;
 pub mod speculative;
 pub mod synth;
+pub mod template;
 pub mod tokenizer;
 
 pub use gguf::{discover_shards, GgmlType, Gguf, TensorInfo, Value};
@@ -43,4 +44,5 @@ pub use scheduler::{
 };
 pub use server::{Server, ServerConfig};
 pub use speculative::{SpeculativeEngine, SpeculativeStats};
+pub use template::{ChatMessage, ChatTemplate};
 pub use tokenizer::Tokenizer;

@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::kv::KvCacheType;
 use crate::model::{Model, State};
 use crate::sample::Sampler;
+use crate::template::{ChatMessage, ChatTemplate};
 use crate::tokenizer::Tokenizer;
 
 #[derive(Clone, Debug)]
@@ -41,6 +42,7 @@ pub struct Server<'a> {
     pub model: &'a Model<'a>,
     pub tokenizer: &'a Tokenizer,
     pub config: ServerConfig,
+    pub template: ChatTemplate,
 }
 
 #[derive(Debug)]
@@ -80,11 +82,18 @@ impl Default for RequestParams {
 
 impl<'a> Server<'a> {
     pub fn new(model: &'a Model<'a>, tokenizer: &'a Tokenizer, config: ServerConfig) -> Self {
+        let template = ChatTemplate::default_for_arch(&model.config.arch);
         Self {
             model,
             tokenizer,
             config,
+            template,
         }
+    }
+
+    pub fn with_template(mut self, template: ChatTemplate) -> Self {
+        self.template = template;
+        self
     }
 
     /// Bind to configured address and start listening.
@@ -170,7 +179,15 @@ impl<'a> Server<'a> {
                 );
                 self.write_json(stream, 200, &json)
             }
-            ("POST", "/v1/chat/completions") | ("POST", "/v1/completions") => {
+            ("POST", "/v1/chat/completions") => {
+                let params = parse_request_json_with_template(&body_str, &self.template);
+                if params.stream {
+                    self.handle_streaming(stream, &params)
+                } else {
+                    self.handle_non_streaming(stream, &params)
+                }
+            }
+            ("POST", "/v1/completions") => {
                 let params = parse_request_json(&body_str);
                 if params.stream {
                     self.handle_streaming(stream, &params)
@@ -453,6 +470,20 @@ pub fn parse_request_json(json: &str) -> RequestParams {
         }
     }
 
+    params
+}
+
+/// Extract request parameters and format chat messages using a specified chat template.
+pub fn parse_request_json_with_template(json: &str, template: &ChatTemplate) -> RequestParams {
+    let mut params = parse_request_json(json);
+    let messages = extract_messages(json);
+    if !messages.is_empty() {
+        let chat_msgs: Vec<ChatMessage> = messages
+            .into_iter()
+            .map(|(r, c)| ChatMessage::new(r, c))
+            .collect();
+        params.prompt = template.render(&chat_msgs, true, None, None);
+    }
     params
 }
 
