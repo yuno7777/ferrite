@@ -13,6 +13,7 @@
 
 pub mod convert;
 pub mod distributed;
+pub mod edit;
 pub mod embed;
 pub mod eval;
 pub mod gguf;
@@ -40,13 +41,14 @@ pub mod tp;
 pub mod vision;
 
 pub use convert::{convert_safetensors_to_gguf, JsonValue, SafeTensorsHeader};
+pub use edit::GgufEditor;
 pub use embed::{cosine_similarity, l2_normalize, pool, EmbedEngine, Pooling};
 pub use eval::{cross_entropy_loss, ChunkPerplexity, PerplexityEvaluator, PerplexityReport};
 pub use gguf::{discover_shards, GgmlType, Gguf, TensorInfo, Value};
 pub use grammar::{ChoiceGrammar, Grammar, JsonGrammar, RegexMatcher, SchemaGrammar, SchemaNode};
 pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType, MlaKvCache};
 pub use lora::{LoraAdapter, LoraPair};
-pub use map::Mmap;
+pub use map::{Mmap, MmapMut};
 pub use model::ChunkedPrefill;
 pub use ops::{dot_i8, gemm_int8_fused, quantize_int8_dynamic, RopeCache};
 pub use paged::{
