@@ -168,9 +168,11 @@
    - `git diff --check` passes without errors.
 
 ## Next Up in Work Queue
-- Phase 26: GGUF Multi-File Sharded Model Loader (status QUEUED).
+- Phase 27: Tokenizer Jinja/Mini-Template Chat Engine (status QUEUED).
 
 ## Completed in This Execution
 - Phase 25: Added `ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>` and `src/quant/quantize.rs`. The writer preserves GGUF metadata, tensor names/shapes/order, and already-quantized tensor bytes while quantizing F32/F16 tensors. Added quantization round-trip and full GGUF readback coverage for all three target formats.
-- Verification: `cargo test --all-targets` passes (165 tests); `cargo clippy --all-targets -- -D warnings` passes; `cargo fmt --check` passes.
-- Working tree note: `.agent/maintenance.log` has unrelated concurrent log changes with whitespace errors; `src/gguf.rs`, `src/quant/half.rs`, and `src/lib.rs` also have concurrent edits. Retained these changes; do not discard them during follow-up work. `git diff --check` passes when excluding the pre-existing/concurrently appended maintenance log.
+- Phase 26: GGUF Multi-File Sharded Model Loader. Added `Gguf::open_sharded` and auto-shard discovery in `Gguf::open` resolving `-<idx>-of-<total>.gguf` filenames with zero-copy per-shard memory mappings. Added `shard_index` to `TensorInfo` and mapped tensor bytes dynamically to owning shard files. Added comprehensive test suite `tests/sharded.rs` validating explicit sharded paths, automatic shard discovery from any shard index, duplicate tensor rejection, and bit-identical inference output against single-file models.
+- Verification: `cargo test --all-targets` passes (167 tests); `cargo clippy --all-targets -- -D warnings` passes; `cargo fmt --check` passes.
+- Working tree note: `.agent/maintenance.log` has unrelated concurrent log changes with whitespace errors; `git diff --check` passes when excluding the pre-existing/concurrently appended maintenance log.
+

@@ -224,10 +224,11 @@
 
 ### Phase 26: GGUF Multi-File Sharded Model Loader
 - Priority: P2
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Large models (e.g. 70B parameters) are distributed as multiple GGUF shard files (`model-00001-of-00004.gguf`).
-- Files: `src/gguf.rs`, `src/model.rs`, `tests/sharded.rs`
+- Files: `src/gguf.rs`, `src/model.rs`, `src/lib.rs`, `tests/sharded.rs`
 - Acceptance: Parse shard index metadata and resolve cross-file tensor mappings into a single unified virtual model.
+- Completion evidence: Added `Gguf::open_sharded` and auto-shard discovery in `Gguf::open` resolving `-<idx>-of-<total>.gguf` filenames with zero-copy per-shard memory mappings. Added `shard_index` to `TensorInfo` and mapped tensor bytes dynamically to owning shard files. Added comprehensive test suite `tests/sharded.rs` validating explicit sharded paths, automatic shard discovery from any shard index, duplicate tensor rejection, and bit-identical inference output against single-file models. All 167 tests pass.
 
 ### Phase 27: Tokenizer Jinja/Mini-Template Chat Engine
 - Priority: P2

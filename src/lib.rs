@@ -29,7 +29,7 @@ pub mod speculative;
 pub mod synth;
 pub mod tokenizer;
 
-pub use gguf::{GgmlType, Gguf, TensorInfo, Value};
+pub use gguf::{discover_shards, GgmlType, Gguf, TensorInfo, Value};
 pub use grammar::{ChoiceGrammar, Grammar, JsonGrammar, RegexMatcher};
 pub use kv::{BlockQ4_0, BlockQ8_0, KvCache, KvCacheType};
 pub use lora::{LoraAdapter, LoraPair};
