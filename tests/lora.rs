@@ -257,6 +257,17 @@ fn lora_matches_baked_weights_mathematically() {
 
     let baked_builder = base_model_builder(Some(&baked_down));
     let baked_path = write_file("baked_model", &baked_builder);
+    let merged_path = std::env::temp_dir().join("ferrite_lora_merged_model.gguf");
+    let merge_base = Gguf::open(&base_path).expect("open merge base");
+    let merge_adapter = Gguf::open(&lora_path).expect("open merge adapter");
+    ferrite::lora::merge_adapters(&merge_base, &[&merge_adapter], &merged_path)
+        .expect("merge adapter");
+    let merged = Gguf::open(&merged_path).expect("open merged model");
+    let merged_model = Model::load(&merged).expect("load merged model");
+    let mut merged_state = State::new(&merged_model.config);
+    merged_model
+        .forward(&mut merged_state, 1, 0)
+        .expect("forward merged");
 
     // Run base + LoRA
     let base_gguf = Gguf::open(&base_path).expect("open base");
@@ -284,8 +295,15 @@ fn lora_matches_baked_weights_mathematically() {
             "LoRA dynamic forward ({a}) must match baked weights ({b})"
         );
     }
+    for (a, b) in state_lora.logits.iter().zip(&merged_state.logits) {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "merged LoRA output mismatch: {a} vs {b}"
+        );
+    }
 
     fs::remove_file(base_path).ok();
     fs::remove_file(lora_path).ok();
     fs::remove_file(baked_path).ok();
+    fs::remove_file(merged_path).ok();
 }

@@ -22,6 +22,7 @@ usage:
   ferrite quantize <src.gguf> <dst.gguf> <Q8_0|Q4_0|Q4_K>
   ferrite perplexity <model> <file> evaluate text perplexity and loss
   ferrite convert <src> <dst.gguf>  convert SafeTensors to GGUF format
+  ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>
 
 run/serve options:
   -n <count>      tokens to generate (default 128)
@@ -62,6 +63,7 @@ fn main() -> ExitCode {
         Some("quantize") => cmd_quantize(&args[1..]),
         Some("perplexity") => cmd_perplexity(&args[1..]),
         Some("convert") => cmd_convert(&args[1..]),
+        Some("lora") => cmd_lora(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -79,6 +81,23 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_lora(args: &[String]) -> std::io::Result<()> {
+    if args.len() < 4 || args[0] != "merge" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>",
+        ));
+    }
+    let base_path = lmstudio::resolve(&args[1])?;
+    let base = Gguf::open(&base_path)?;
+    let adapter_files: Vec<Gguf> = args[3..]
+        .iter()
+        .map(|path| lmstudio::resolve(path).and_then(|p| Gguf::open(&p)))
+        .collect::<std::io::Result<_>>()?;
+    let refs: Vec<&Gguf> = adapter_files.iter().collect();
+    ferrite::lora::merge_adapters(&base, &refs, std::path::Path::new(&args[2]))
 }
 
 fn cmd_quantize(args: &[String]) -> std::io::Result<()> {

@@ -79,7 +79,17 @@ pub fn attention_online(
     out.fill(0.0);
     let mut max_score = f32::NEG_INFINITY;
     let mut denominator = 0.0f32;
-    let mut scores = vec![0.0f32; tile_size];
+    let mut stack_scores = [0.0f32; 64];
+    let mut heap_scores = if tile_size > 64 {
+        vec![0.0f32; tile_size]
+    } else {
+        Vec::new()
+    };
+    let scores: &mut [f32] = if tile_size <= 64 {
+        &mut stack_scores[..tile_size]
+    } else {
+        &mut heap_scores[..tile_size]
+    };
     for start in (0..len).step_by(tile_size) {
         let end = (start + tile_size).min(len);
         for (i, past) in (start..end).enumerate() {

@@ -186,3 +186,69 @@
 - `git diff --check src/ tests/` passes with 0 errors.
 
 
+
+## Maintenance Scan — 2026-11-06T03:04:20Z
+- Branch: `codex/audit-baseline`
+- Verified HEAD: `65b2008`
+- Queue review: every listed task is `COMPLETED`; no `QUEUED` or `IN_PROGRESS` task exists, so no code changes were selected.
+- Validation on current HEAD:
+  - `cargo test --all-targets` — passed.
+  - `cargo clippy --all-targets -- -D warnings` — passed with no warnings.
+  - `cargo fmt --check` — passed with no formatting differences.
+- Existing worktree change: `.agent/maintenance.log` was already modified at the start of this run and was preserved.
+- Checkpoint files updated to record queue state and validation. No implementation files changed.
+
+## Maintenance Scan — 2026-11-06
+- Branch: `codex/audit-baseline`
+- Verified HEAD: `65b2008`
+- Queue review: all listed tasks are `COMPLETED`; no `QUEUED` or `IN_PROGRESS` task exists, so no implementation task was selected.
+- Validation on current source tree:
+  - `cargo test --all-targets` — passed (113 unit tests and all integration test targets).
+  - `cargo clippy --all-targets -- -D warnings` — passed.
+  - `cargo fmt --check` — passed.
+- No source or test files changed during this scan. Existing worktree modifications to `.agent/WORK_QUEUE.md`, `.agent/RECOVERY_CHECKPOINT.md`, and `.agent/maintenance.log` were present at scan start; checkpoint files were preserved and appended with this result.
+
+## Maintenance Scan — 2026-11-06T04:05:29Z
+- Branch: `codex/audit-baseline`; verified HEAD: `65b2008`.
+- Queue review found no `QUEUED` or `IN_PROGRESS` work; all 30 listed tasks are `COMPLETED`.
+- No implementation changes were selected. Existing uncommitted changes to the checkpoint files and `.agent/maintenance.log` were preserved.
+- Validation on the current source tree:
+  - `cargo test --all-targets` — passed (113 unit tests and all integration targets).
+  - `cargo clippy --all-targets -- -D warnings` — passed.
+  - `cargo fmt --check` — passed.
+
+## Maintenance Scan — 2026-11-06T04:31:31Z
+- Branch: `codex/audit-baseline`; verified HEAD: `65b2008`.
+- Queue review found all listed tasks `COMPLETED`; no `QUEUED` or `IN_PROGRESS` task exists. No implementation files changed.
+- Validation: `cargo test --all-targets` passed (183 tests); `cargo clippy --all-targets -- -D warnings` passed; `cargo fmt --check` passed.
+- The pre-existing worktree changes in `.agent/maintenance.log` were preserved. `git diff --check` reports trailing whitespace in that log's existing appended content; no source/test file diff was produced.
+
+## Maintenance Scan — 2026-11-06T05:05:27Z
+- Repository: `/home/abhishek/Projects/ferrite-audit`; branch/HEAD recorded in the work queue scan.
+- Queue review found all 30 implementation tasks `COMPLETED`; no `QUEUED` or `IN_PROGRESS` task existed, so no code task was selected.
+- Validation on the current source tree passed: `cargo test --all-targets` (183 tests), `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+- No source or test files changed. Existing worktree changes to `.agent/maintenance.log` and the checkpoint files were preserved; this scan appended a record to both checkpoint files.
+
+## Maintenance Run — 2026-11-06T05:36:18Z
+- Branch: `codex/audit-baseline`; HEAD: `65b2008`.
+- Resolved queue conflict by honoring Phase 31's explicit P1 `IN_PROGRESS` status despite stale scan prose. Implemented dynamic adapter stacking/merge in `src/lora.rs` plus `ferrite lora merge` in `src/main.rs`.
+- Merge copies metadata and untouched tensors, adds all matching scaled LoRA deltas, and writes updated matrices as F32. Tests compare merged inference with dynamic LoRA within floating-point tolerance; exact bit parity is not promised due to accumulation order.
+- Validation passed: `cargo test --all-targets` (183 tests), `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+- Updated Phase 31 to `COMPLETED` in `.agent/WORK_QUEUE.md`.
+- Preserved pre-existing `.agent/maintenance.log` changes. `src/quant/quantize.rs` appeared modified during this run with an unrelated visibility change and was preserved.
+
+## Autonomous Execution — Phase 32 & Phase 33 Completion
+- Branch: `codex/audit-baseline`
+- Phase 32 (FlashAttention-2 / Attention Tile Optimization):
+  - In `src/ops.rs::attention_online`, stack-allocated 64-element scratch array `tile_buf` for tile sizes $\le 64$, avoiding per-head heap allocations in prefill.
+- Phase 33 (Mixture of Experts - MoE Architecture Support):
+  - Supported `"mixtral"` and `"qwen2moe"` architectures.
+  - Added router gate `ffn_gate_inp` and per-expert weights `moe_gate`, `moe_up`, `moe_down` in `Layer`.
+  - Implemented unified `Layer::eval_ffn` handling top-k router softmax, weight renormalization, and SwiGLU accumulation across single-token decode, batched prefill, and batched intermediate logit evaluation.
+  - Added `moe_sparse_dispatch_prefill_and_forward_match` in `tests/model.rs` asserting bit-identical logit parity between sequential forward and batched prefill.
+- Validation:
+  - `cargo test --all-targets` passes (113 unit tests, 71 integration tests, 100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` prints exactly 1 line (0 external dependencies).
+

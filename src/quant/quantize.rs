@@ -89,7 +89,7 @@ pub fn quantize_file(src: &Path, dst: &Path, target: GgmlType) -> io::Result<()>
     output.flush()
 }
 
-fn encode(values: &[f32], target: GgmlType) -> io::Result<Vec<u8>> {
+pub(crate) fn encode(values: &[f32], target: GgmlType) -> io::Result<Vec<u8>> {
     let (block, _) = target.layout().expect("supported output format");
     let block = block as usize;
     if values.len() % block != 0 {

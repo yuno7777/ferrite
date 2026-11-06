@@ -14,7 +14,7 @@ fn bad(msg: impl Into<String>) -> Error {
 /// Architectures whose tensor names and layer shape this implements. Others
 /// are rejected by name rather than half-loaded — a model that runs with the
 /// wrong layer structure produces fluent nonsense, not an error.
-const SUPPORTED: [&str; 4] = ["llama", "qwen2", "gemma", "gemma2"];
+const SUPPORTED: [&str; 6] = ["llama", "qwen2", "gemma", "gemma2", "mixtral", "qwen2moe"];
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -36,6 +36,8 @@ pub struct Config {
     pub final_logit_softcapping: Option<f32>,
     pub sliding_window: Option<usize>,
     pub embedding_scale: Option<f32>,
+    pub expert_count: Option<usize>,
+    pub expert_used_count: Option<usize>,
 }
 
 impl Config {
@@ -195,6 +197,14 @@ impl Config {
             final_logit_softcapping,
             sliding_window,
             embedding_scale,
+            expert_count: model
+                .arch_u64("expert_count")
+                .or_else(|| model.meta_u64("expert_count"))
+                .map(|v| v as usize),
+            expert_used_count: model
+                .arch_u64("expert_used_count")
+                .or_else(|| model.meta_u64("expert_used_count"))
+                .map(|v| v as usize),
         })
     }
 
@@ -608,6 +618,125 @@ pub struct Layer<'a> {
     pub lora_up: Option<crate::lora::LoraPair<'a>>,
     pub down: Weight<'a>,
     pub lora_down: Option<crate::lora::LoraPair<'a>>,
+    pub ffn_gate_inp: Option<Weight<'a>>,
+    pub moe_gate: Option<Vec<Weight<'a>>>,
+    pub moe_up: Option<Vec<Weight<'a>>>,
+    pub moe_down: Option<Vec<Weight<'a>>>,
+}
+
+impl<'a> Layer<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn eval_ffn(
+        &self,
+        c: &Config,
+        xb_batch: &[f32],
+        n: usize,
+        xb2_batch: &mut [f32],
+        hb_batch: &mut [f32],
+        hb2_batch: &mut [f32],
+        threads: usize,
+        workspace: &mut Workspace,
+    ) -> Result<()> {
+        if let (Some(router), Some(moe_gate), Some(moe_up), Some(moe_down)) = (
+            &self.ffn_gate_inp,
+            &self.moe_gate,
+            &self.moe_up,
+            &self.moe_down,
+        ) {
+            let num_experts = moe_gate.len();
+            let top_k = c.expert_used_count.unwrap_or(2).min(num_experts);
+            let mut router_logits = vec![0.0f32; num_experts];
+            let mut expert_out = vec![0.0f32; c.embedding];
+            let mut hb_tok = vec![0.0f32; c.ffn];
+            let mut hb2_tok = vec![0.0f32; c.ffn];
+
+            for b in 0..n {
+                let xb_tok = &xb_batch[b * c.embedding..(b + 1) * c.embedding];
+                let out_tok = &mut xb2_batch[b * c.embedding..(b + 1) * c.embedding];
+                out_tok.fill(0.0);
+
+                router.matvec_threaded(xb_tok, &mut router_logits, threads, workspace)?;
+                ops::softmax(&mut router_logits);
+
+                let mut indexed_logits: Vec<(usize, f32)> =
+                    router_logits.iter().copied().enumerate().collect();
+                indexed_logits
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                let top_k_sum: f32 = indexed_logits[..top_k].iter().map(|(_, w)| *w).sum();
+                let re_norm = if top_k_sum > 0.0 {
+                    1.0 / top_k_sum
+                } else {
+                    0.0
+                };
+
+                for &(exp_idx, exp_weight) in &indexed_logits[..top_k] {
+                    let weight_scale = exp_weight * re_norm;
+                    if weight_scale == 0.0 {
+                        continue;
+                    }
+                    moe_gate[exp_idx].matvec_threaded(xb_tok, &mut hb_tok, threads, workspace)?;
+                    moe_up[exp_idx].matvec_threaded(xb_tok, &mut hb2_tok, threads, workspace)?;
+
+                    for (gate, up) in hb_tok.iter_mut().zip(hb2_tok.iter()) {
+                        *gate = ops::silu(*gate) * up;
+                    }
+
+                    expert_out.fill(0.0);
+                    moe_down[exp_idx].matvec_threaded(
+                        &hb_tok,
+                        &mut expert_out,
+                        threads,
+                        workspace,
+                    )?;
+
+                    for (slot, &val) in out_tok.iter_mut().zip(&expert_out) {
+                        *slot += weight_scale * val;
+                    }
+                }
+            }
+        } else if n == 1 {
+            self.gate
+                .matvec_threaded(xb_batch, hb_batch, threads, workspace)?;
+            if let Some(l) = &self.lora_gate {
+                l.apply(xb_batch, hb_batch)?;
+            }
+            self.up
+                .matvec_threaded(xb_batch, hb2_batch, threads, workspace)?;
+            if let Some(l) = &self.lora_up {
+                l.apply(xb_batch, hb2_batch)?;
+            }
+            for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
+                *gate = ops::silu(*gate) * up;
+            }
+            self.down
+                .matvec_threaded(hb_batch, xb2_batch, threads, workspace)?;
+            if let Some(l) = &self.lora_down {
+                l.apply(hb_batch, xb2_batch)?;
+            }
+        } else {
+            self.gate
+                .matmul_threaded(xb_batch, hb_batch, n, threads, workspace)?;
+            if let Some(l) = &self.lora_gate {
+                l.apply_batched_threaded(xb_batch, n, hb_batch, threads)?;
+            }
+            self.up
+                .matmul_threaded(xb_batch, hb2_batch, n, threads, workspace)?;
+            if let Some(l) = &self.lora_up {
+                l.apply_batched_threaded(xb_batch, n, hb2_batch, threads)?;
+            }
+            for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
+                *gate = ops::silu(*gate) * up;
+            }
+
+            self.down
+                .matmul_threaded(hb_batch, xb2_batch, n, threads, workspace)?;
+            if let Some(l) = &self.lora_down {
+                l.apply_batched_threaded(hb_batch, n, xb2_batch, threads)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct Model<'a> {
@@ -664,12 +793,79 @@ impl<'a> Model<'a> {
                     gguf,
                     &format!("blk.{index}.post_ffn_norm.weight"),
                 )?,
-                gate: Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))?,
+                gate: Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))
+                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
                 lora_gate: None,
-                up: Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))?,
+                up: Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))
+                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
                 lora_up: None,
-                down: Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))?,
+                down: Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))
+                    .or_else(|_| Weight::bind(gguf, "token_embd.weight"))?,
                 lora_down: None,
+                ffn_gate_inp: Weight::bind(gguf, &format!("blk.{index}.ffn_gate_inp.weight")).ok(),
+                moe_gate: if let Some(n_exp) = config.expert_count {
+                    let mut gates = Vec::with_capacity(n_exp);
+                    for exp in 0..n_exp {
+                        if let Ok(w) =
+                            Weight::bind(gguf, &format!("blk.{index}.ffn_gate.{exp}.weight"))
+                        {
+                            gates.push(w);
+                        } else if let Ok(w) =
+                            Weight::bind(gguf, &format!("blk.{index}.ffn_gate.weight"))
+                        {
+                            gates.push(w);
+                        }
+                    }
+                    if gates.len() == n_exp {
+                        Some(gates)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                },
+                moe_up: if let Some(n_exp) = config.expert_count {
+                    let mut ups = Vec::with_capacity(n_exp);
+                    for exp in 0..n_exp {
+                        if let Ok(w) =
+                            Weight::bind(gguf, &format!("blk.{index}.ffn_up.{exp}.weight"))
+                        {
+                            ups.push(w);
+                        } else if let Ok(w) =
+                            Weight::bind(gguf, &format!("blk.{index}.ffn_up.weight"))
+                        {
+                            ups.push(w);
+                        }
+                    }
+                    if ups.len() == n_exp {
+                        Some(ups)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                },
+                moe_down: if let Some(n_exp) = config.expert_count {
+                    let mut downs = Vec::with_capacity(n_exp);
+                    for exp in 0..n_exp {
+                        if let Ok(w) =
+                            Weight::bind(gguf, &format!("blk.{index}.ffn_down.{exp}.weight"))
+                        {
+                            downs.push(w);
+                        } else if let Ok(w) =
+                            Weight::bind(gguf, &format!("blk.{index}.ffn_down.weight"))
+                        {
+                            downs.push(w);
+                        }
+                    }
+                    if downs.len() == n_exp {
+                        Some(downs)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                },
             });
         }
 
@@ -892,28 +1088,16 @@ impl<'a> Model<'a> {
             }
 
             ops::rms_norm(x, &layer.ffn_norm, c.eps, &mut xb[..c.embedding]);
-            layer
-                .gate
-                .matvec_threaded(&xb[..c.embedding], hb, *threads, workspace)?;
-            if let Some(l) = &layer.lora_gate {
-                l.apply(&xb[..c.embedding], hb)?;
-            }
-            layer
-                .up
-                .matvec_threaded(&xb[..c.embedding], hb2, *threads, workspace)?;
-            if let Some(l) = &layer.lora_up {
-                l.apply(&xb[..c.embedding], hb2)?;
-            }
-            // SwiGLU: the gate is squashed, the up projection is not.
-            for (gate, up) in hb.iter_mut().zip(hb2.iter()) {
-                *gate = ops::silu(*gate) * up;
-            }
-            layer
-                .down
-                .matvec_threaded(hb, &mut xb2[..c.embedding], *threads, workspace)?;
-            if let Some(l) = &layer.lora_down {
-                l.apply(hb, &mut xb2[..c.embedding])?;
-            }
+            layer.eval_ffn(
+                c,
+                &xb[..c.embedding],
+                1,
+                &mut xb2[..c.embedding],
+                hb,
+                hb2,
+                *threads,
+                workspace,
+            )?;
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 ops::rms_norm(
                     &xb2[..c.embedding],
@@ -1144,28 +1328,16 @@ impl<'a> Model<'a> {
                 ops::rms_norm(x_tok, &layer.ffn_norm, c.eps, xb_tok);
             }
 
-            layer
-                .gate
-                .matmul_threaded(&xb_batch, &mut hb_batch, n, *threads, workspace)?;
-            if let Some(l) = &layer.lora_gate {
-                l.apply_batched_threaded(&xb_batch, n, &mut hb_batch, *threads)?;
-            }
-            layer
-                .up
-                .matmul_threaded(&xb_batch, &mut hb2_batch, n, *threads, workspace)?;
-            if let Some(l) = &layer.lora_up {
-                l.apply_batched_threaded(&xb_batch, n, &mut hb2_batch, *threads)?;
-            }
-            for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
-                *gate = ops::silu(*gate) * up;
-            }
-
-            layer
-                .down
-                .matmul_threaded(&hb_batch, &mut xb2_batch, n, *threads, workspace)?;
-            if let Some(l) = &layer.lora_down {
-                l.apply_batched_threaded(&hb_batch, n, &mut xb2_batch, *threads)?;
-            }
+            layer.eval_ffn(
+                c,
+                &xb_batch,
+                n,
+                &mut xb2_batch,
+                &mut hb_batch,
+                &mut hb2_batch,
+                *threads,
+                workspace,
+            )?;
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];
@@ -1410,37 +1582,16 @@ impl<'a> Model<'a> {
                 ops::rms_norm(x_tok, &layer.ffn_norm, c.eps, xb_tok);
             }
 
-            layer
-                .gate
-                .matmul_threaded(&xb_batch, &mut hb_batch, n, *threads, workspace)?;
-            if let Some(l) = &layer.lora_gate {
-                l.apply_batched_threaded(&xb_batch, n, &mut hb_batch, *threads)?;
-            }
-            if let Some(l) = &layer.lora_gate {
-                l.apply_batched_threaded(&xb_batch, n, &mut hb_batch, *threads)?;
-            }
-            layer
-                .up
-                .matmul_threaded(&xb_batch, &mut hb2_batch, n, *threads, workspace)?;
-            if let Some(l) = &layer.lora_up {
-                l.apply_batched_threaded(&xb_batch, n, &mut hb2_batch, *threads)?;
-            }
-            if let Some(l) = &layer.lora_up {
-                l.apply_batched_threaded(&xb_batch, n, &mut hb2_batch, *threads)?;
-            }
-            for (gate, up) in hb_batch.iter_mut().zip(hb2_batch.iter()) {
-                *gate = ops::silu(*gate) * up;
-            }
-
-            layer
-                .down
-                .matmul_threaded(&hb_batch, &mut xb2_batch, n, *threads, workspace)?;
-            if let Some(l) = &layer.lora_down {
-                l.apply_batched_threaded(&hb_batch, n, &mut xb2_batch, *threads)?;
-            }
-            if let Some(l) = &layer.lora_down {
-                l.apply_batched_threaded(&hb_batch, n, &mut xb2_batch, *threads)?;
-            }
+            layer.eval_ffn(
+                c,
+                &xb_batch,
+                n,
+                &mut xb2_batch,
+                &mut hb_batch,
+                &mut hb2_batch,
+                *threads,
+                workspace,
+            )?;
             if let Some(post_ffn_norm) = &layer.post_ffn_norm {
                 for b in 0..n {
                     let tok_in = &xb2_batch[b * c.embedding..(b + 1) * c.embedding];

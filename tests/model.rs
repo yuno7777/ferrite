@@ -1257,3 +1257,164 @@ fn quantized_kv_cache_q4_0_forward_and_prefill_match() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn moe_sparse_dispatch_prefill_and_forward_match() {
+    let zero = vec![0.0f32; DIM * DIM];
+    let heads = 2;
+    let kv_heads = 2;
+    let kv_dim = kv_heads * (DIM / 2);
+
+    let mut builder = Builder::new()
+        .meta("general.architecture", Value::String("mixtral".into()))
+        .meta("mixtral.block_count", Value::U32(1))
+        .meta("mixtral.embedding_length", Value::U32(DIM as u32))
+        .meta("mixtral.feed_forward_length", Value::U32(FFN as u32))
+        .meta("mixtral.attention.head_count", Value::U32(heads))
+        .meta(
+            "mixtral.attention.head_count_kv",
+            Value::U32(kv_heads as u32),
+        )
+        .meta("mixtral.context_length", Value::U32(16))
+        .meta("mixtral.attention.layer_norm_rms_epsilon", Value::F32(EPS))
+        .meta("mixtral.rope.freq_base", Value::F32(10000.0))
+        .meta("mixtral.expert_count", Value::U32(4))
+        .meta("mixtral.expert_used_count", Value::U32(2))
+        .meta("tokenizer.ggml.model", Value::String("llama".into()))
+        .meta(
+            "tokenizer.ggml.tokens",
+            Value::Array((0..VOCAB).map(|i| Value::String(format!("t{i}"))).collect()),
+        )
+        .tensor(
+            "token_embd.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&embeddings()),
+        )
+        .tensor(
+            "blk.0.attn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "blk.0.attn_q.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&zero),
+        )
+        .tensor(
+            "blk.0.attn_k.weight",
+            &[DIM as u64, kv_dim as u64],
+            GgmlType::F32,
+            bytes(&vec![0.0; DIM * kv_dim]),
+        )
+        .tensor(
+            "blk.0.attn_v.weight",
+            &[DIM as u64, kv_dim as u64],
+            GgmlType::F32,
+            bytes(&zero),
+        )
+        .tensor(
+            "blk.0.attn_output.weight",
+            &[DIM as u64, DIM as u64],
+            GgmlType::F32,
+            bytes(&zero),
+        )
+        .tensor(
+            "blk.0.ffn_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        // Router gate: shape [DIM, expert_count = 4]
+        .tensor(
+            "blk.0.ffn_gate_inp.weight",
+            &[DIM as u64, 4],
+            GgmlType::F32,
+            bytes(&[
+                0.5, -0.2, 0.1, 0.8, -0.4, 0.6, -0.3, 0.2, 0.1, 0.0, 0.7, -0.5, 0.3, 0.9, -0.1, 0.4,
+            ]),
+        );
+
+    // 4 experts with non-zero weights
+    for exp in 0..4 {
+        let val = (exp as f32 + 1.0) * 0.1;
+        builder = builder
+            .tensor(
+                &format!("blk.0.ffn_gate.{exp}.weight"),
+                &[DIM as u64, FFN as u64],
+                GgmlType::F32,
+                bytes(&[val; DIM * FFN]),
+            )
+            .tensor(
+                &format!("blk.0.ffn_up.{exp}.weight"),
+                &[DIM as u64, FFN as u64],
+                GgmlType::F32,
+                bytes(&[val * 0.5; DIM * FFN]),
+            )
+            .tensor(
+                &format!("blk.0.ffn_down.{exp}.weight"),
+                &[FFN as u64, DIM as u64],
+                GgmlType::F32,
+                bytes(&[val * 0.25; FFN * DIM]),
+            );
+    }
+
+    builder = builder
+        .tensor(
+            "output_norm.weight",
+            &[DIM as u64],
+            GgmlType::F32,
+            bytes(&[1.0; DIM]),
+        )
+        .tensor(
+            "output.weight",
+            &[DIM as u64, VOCAB as u64],
+            GgmlType::F32,
+            bytes(&identity(DIM)),
+        );
+
+    let path = write("moe_test", &builder);
+    let gguf = Gguf::open(&path).expect("open fixture");
+    let model = Model::load(&gguf).expect("load model");
+
+    assert_eq!(model.config.expert_count, Some(4));
+    assert_eq!(model.config.expert_used_count, Some(2));
+    assert!(model.layers[0].moe_gate.is_some());
+
+    let mut state_seq = State::new(&model.config);
+    let mut state_batch = State::new(&model.config);
+    let prompt = [0u32, 1u32, 2u32];
+
+    for (pos, &tok) in prompt.iter().enumerate() {
+        model.forward(&mut state_seq, tok, pos).expect("forward");
+    }
+
+    model
+        .prefill(&mut state_batch, &prompt, 0)
+        .expect("prefill");
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&state_seq.logits),
+        bits(&state_batch.logits),
+        "MoE batched prefill logits must exactly match sequential forward"
+    );
+
+    let mut all_logits = vec![0.0f32; prompt.len() * model.config.vocab];
+    let mut state_all = State::new(&model.config);
+    model
+        .prefill_all_logits(&mut state_all, &prompt, 0, &mut all_logits)
+        .expect("prefill_all_logits");
+
+    let last_start = (prompt.len() - 1) * model.config.vocab;
+    let last_logits = &all_logits[last_start..last_start + model.config.vocab];
+    assert_eq!(
+        bits(&state_seq.logits),
+        bits(last_logits),
+        "MoE prefill_all_logits final token must match sequential forward"
+    );
+
+    fs::remove_file(path).ok();
+}

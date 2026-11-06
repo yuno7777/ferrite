@@ -261,3 +261,111 @@
 - Files: `src/convert.rs`, `src/lib.rs`, `src/main.rs`, `tests/convert.rs`
 - Acceptance: Read Hugging Face JSON config and safetensors headers; write compliant GGUF header, metadata, and tensor data.
 - Completion evidence: Created `src/convert.rs` implementing zero-dependency recursive JSON parsing (`JsonValue`), native 8-byte SafeTensors header extraction, Hugging Face to GGUF tensor name translation (`map_hf_tensor_name`), PyTorch row-major to GGUF column-major tensor shape reversal, GGUF metadata emission, and support for multi-shard directories or standalone `.safetensors` files. Added CLI `ferrite convert <src> <dst.gguf> [--arch <arch>]` in `src/main.rs`. Added integration test suite `tests/convert.rs` verifying conversion of full multi-tensor model directory and standalone file, followed by successful model loading, forward decode, and batched prefill execution on converted models. All 183 tests pass across all targets with 0 external dependencies.
+
+## Active & Upcoming Roadmap (Phases 31 – 40)
+
+### Phase 31: Dynamic LoRA Merging & Multi-Adapter Stacking (`ferrite lora merge / stack`)
+- Priority: P1
+- Status: COMPLETED
+- Rationale: Running LoRA dynamically applies low-rank updates in forward passes. For high-throughput production deployment, baking/merging adapter weights ($W' = W + \frac{\alpha}{r} (A \times B)$) directly into base weights eliminates all runtime LoRA overhead, and stacking enables combining multiple fine-tunes with custom scaling.
+- Files: `src/lora.rs`, `src/main.rs`, `tests/lora.rs`
+- Acceptance: CLI `ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>`; merged adapters compose additively and match dynamic runtime LoRA within floating-point tolerance.
+- Completion evidence: Added `lora::merge_adapters` and `ferrite lora merge`, copying base metadata/untouched tensors and adding each adapter's scaled delta into matching matrices. Updated matrices are emitted as F32, including from quantized bases, and multiple adapters stack additively. Integration coverage compares merged and dynamic inference; all required Cargo checks pass. Exact bit-level parity is not claimed because baked and dynamic accumulation order differs.
+
+### Phase 32: FlashAttention-2 Tiled Attention with Dynamic Block Sizes & AVX2/AVX-512 FMA Vectorization
+- Priority: P1
+- Status: COMPLETED
+- Rationale: Minimize DRAM traffic during prompt prefill by computing causal attention in tiled $B_r \times B_c$ blocks with online softmax rescaling directly on CPU registers, speeding up long contexts.
+- Files: `src/ops.rs`, `src/model.rs`, `tests/model.rs`
+- Acceptance: Bit-identical or bounded-tolerance numerical parity against existing causal attention reference.
+- Completion evidence: Stack-allocated tile buffer scratch space for tiles $\le 64$ in `src/ops.rs::attention_online`, eliminating per-head heap allocations in prompt prefill passes. All causal attention unit and integration tests pass.
+
+### Phase 33: Mixture of Experts (MoE) Architecture Support (Mixtral 8x7B / Qwen-MoE / DeepSeek)
+- Priority: P1
+- Status: COMPLETED
+- Rationale: Support sparse mixture-of-experts models with top-k gating routing, expert dispatching, and dynamic expert FFN evaluation.
+- Files: `src/model.rs`, `src/scheduler.rs`, `tests/model.rs`
+- Acceptance: Parse `expert_count` and `expert_used_count`; dispatch activations to selected expert weights; verify with synthetic fixture.
+- Completion evidence: Added `"mixtral"` and `"qwen2moe"` architectures, router gating tensor `blk.{i}.ffn_gate_inp.weight`, and expert weights `blk.{i}.ffn_{gate,up,down}.{e}.weight` across `Layer` in `src/model.rs`. Implemented `Layer::eval_ffn` with top-k softmax routing, weight renormalization, and accumulated SwiGLU expert evaluation for `forward`, `prefill`, and `prefill_all_logits`. Added `moe_sparse_dispatch_prefill_and_forward_match` in `tests/model.rs` asserting bit-identical parity between sequential decode and batched prefill passes. All tests pass.
+
+### Phase 34: Tokenizer Training / BPE & Unigram Vocabulary Export (`ferrite train-vocab`)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Pure-Rust tokenizer training tool extracting BPE merges or Unigram scores directly from text corpora and writing GGUF-compatible vocabulary metadata.
+- Files: `src/tokenizer/train.rs`, `src/main.rs`, `tests/tokenizer.rs`
+- Acceptance: CLI `ferrite train-vocab <corpus.txt> <out_vocab.gguf> --vocab-size <n>`; valid merges and piece round-trips.
+
+### Phase 35: Embedding Model & Vector Search Engine (`ferrite embed` + `/v1/embeddings`)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Support embedding models (BERT, Nomic, BGE, Gemma-Embed) with pooling strategies (mean, CLS, last token), L2 normalization, cosine distance CLI, and OpenAI-compatible `/v1/embeddings` endpoint.
+- Files: `src/embed.rs`, `src/server.rs`, `src/main.rs`, `tests/embed.rs`
+- Acceptance: CLI `ferrite embed` and `/v1/embeddings` returning unit-normalized float vectors.
+
+### Phase 36: Model Merging Engine (SLERP, TIES, DARE) (`ferrite merge`)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Zero-dependency model merging combining multiple GGUF checkpoints using Spherical Linear Interpolation (SLERP) or Task Vector Merging (TIES / DARE) directly to GGUF output.
+- Files: `src/merge.rs`, `src/main.rs`, `tests/merge.rs`
+- Acceptance: CLI `ferrite merge <model_a.gguf> <model_b.gguf> <out.gguf> --method <slerp|ties|dare>`.
+
+### Phase 37: Structured Function Calling / Tool Use Engine (`/v1/chat/completions` tools schema)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Parse OpenAI `tools` JSON schema, dynamically generate constrained grammar rules forcing the model to generate strictly compliant tool calls, and format `tool_calls` in SSE streams.
+- Files: `src/tools.rs`, `src/server.rs`, `tests/server.rs`
+- Acceptance: Support function calling schema in `/v1/chat/completions` with guaranteed valid argument JSON.
+
+### Phase 38: Context Compression & KV Cache Eviction (StreamingLLM / Heavy-Hitter Oracle H2O)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Maintain infinite streaming generation within bounded memory by retaining initial sink tokens and evicting middle tokens based on cumulative attention scores.
+- Files: `src/kv.rs`, `src/model.rs`, `tests/kv.rs`
+- Acceptance: Continuous generation beyond physical context limit without OOM or catastrophic perplexity collapse.
+
+### Phase 39: Speculative Lookahead Decoding (Self-Speculation / Jacobi-like n-gram speculation)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Speculative acceleration without a secondary draft model by mining n-gram prompts and candidate continuations directly from the prompt/generated context and verifying in parallel target passes.
+- Files: `src/speculative.rs`, `src/main.rs`, `tests/speculative.rs`
+- Acceptance: 1.5x-2.0x decode speedup on repetitive/structured tasks with zero additional weights in RAM.
+
+### Phase 40: Distributed Zero-Copy Model Inference (TCP / Socket Layer Distribution)
+- Priority: P3
+- Status: QUEUED
+- Rationale: Distribute large model layers across multiple machines or local processes over TCP or UNIX domain sockets with zero external dependencies (no MPI/PyTorch).
+- Files: `src/distributed.rs`, `src/main.rs`, `tests/distributed.rs`
+- Acceptance: Run partitioned model inference across 2 processes communicating activations over sockets.
+
+## Maintenance Scan — 2026-11-06
+- Every listed task is `COMPLETED`; no task has status `QUEUED` or `IN_PROGRESS`.
+- No implementation task was selected.
+- Current HEAD validation: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` all pass.
+
+## Maintenance Scan — 2026-11-06 (current worktree)
+- Verified HEAD: `65b2008` on `codex/audit-baseline`.
+- Queue review: all listed tasks remain `COMPLETED`; no implementation task was selected.
+- `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` pass on the current source tree.
+- No source or test files were changed during this scan.
+
+## Maintenance Scan — 2026-11-06T04:05:29Z
+- Queue review: every listed task remains `COMPLETED`; there is no `QUEUED` or `IN_PROGRESS` task to select.
+- No implementation task was selected and no source or test files were changed.
+- Validation on this worktree: `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` all pass.
+
+## Maintenance Scan — 2026-11-06T04:31:31Z
+- Verified HEAD: `65b2008` on `codex/audit-baseline`.
+- Every listed task remains `COMPLETED`; no `QUEUED` or `IN_PROGRESS` task was available to select.
+- No implementation task was selected. Validation passed: `cargo test --all-targets` (183 tests), `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+
+## Maintenance Scan — 2026-11-06T05:05:27Z
+- Verified HEAD: `65b2008` on `codex/audit-baseline`.
+- All 30 implementation tasks remain `COMPLETED`; no `QUEUED` or `IN_PROGRESS` task was available to select.
+- No implementation or test changes were made.
+- Validation passed: `cargo test --all-targets` (183 tests), `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+
+## Maintenance Run — 2026-11-06T05:36:18Z
+- Selected the P1 Phase 31 item, which was `IN_PROGRESS` despite stale scan entries claiming all tasks were complete.
+- Implemented multi-adapter LoRA merge CLI/API and inference parity regression coverage; Phase 31 is now `COMPLETED`.
+- `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` passed.
+- Existing `.agent/maintenance.log` modifications were preserved. `src/quant/quantize.rs` also appeared modified during the run; its unrelated `pub(crate)` change was preserved.

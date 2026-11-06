@@ -5,6 +5,7 @@
 //! or mutating base model weights.
 
 use std::io::{Error, ErrorKind, Result};
+use std::path::Path;
 
 use crate::gguf::Gguf;
 use crate::model::Weight;
@@ -244,6 +245,66 @@ impl<'a> LoraAdapter<'a> {
             })
             .map(|(_, p)| p)
     }
+}
+
+/// Merge one or more adapters into F32 base tensors and write a standalone GGUF.
+/// Untouched tensors retain their original encoding. Updated tensors are
+/// written as F32 so merging works for quantized base matrices without a lossy
+/// requantization step.
+pub fn merge_adapters(base: &Gguf, adapters: &[&Gguf], output: &Path) -> Result<()> {
+    use crate::synth::Builder;
+
+    if adapters.is_empty() {
+        return Err(bad("at least one LoRA adapter is required"));
+    }
+    let loaded: Vec<LoraAdapter<'_>> = adapters
+        .iter()
+        .map(|g| LoraAdapter::load(g, None))
+        .collect::<Result<_>>()?;
+    let mut builder = Builder::new();
+    for (key, value) in &base.meta {
+        builder = builder.meta(key, value.clone());
+    }
+    for tensor in &base.tensors {
+        let matching: Vec<_> = loaded.iter().filter_map(|a| a.get(&tensor.name)).collect();
+        let adapted = !matching.is_empty();
+        let data = if matching.is_empty() {
+            base.tensor_bytes(tensor)?.to_vec()
+        } else {
+            if tensor.dims.len() != 2 {
+                return Err(bad(format!(
+                    "LoRA target {} must be a 2D matrix",
+                    tensor.name
+                )));
+            }
+            let cols = tensor.dims[0] as usize;
+            let rows = tensor.dims[1] as usize;
+            let bytes = base.tensor_bytes(tensor)?;
+            let mut dense = vec![
+                0.0f32;
+                rows.checked_mul(cols)
+                    .ok_or_else(|| bad("tensor dimensions overflow"))?
+            ];
+            crate::quant::dequantize(tensor.ty, bytes, &mut dense)?;
+            for pair in matching {
+                if pair.a.cols != cols || pair.b.rows != rows {
+                    return Err(bad(format!(
+                        "LoRA dimensions do not match target {}",
+                        tensor.name
+                    )));
+                }
+                pair.accumulate_into(&mut dense)?;
+            }
+            dense.into_iter().flat_map(f32::to_le_bytes).collect()
+        };
+        let dtype = if adapted {
+            crate::gguf::GgmlType::F32
+        } else {
+            tensor.ty
+        };
+        builder = builder.tensor(&tensor.name, &tensor.dims, dtype, data);
+    }
+    builder.write(output)
 }
 
 #[cfg(test)]

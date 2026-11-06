@@ -392,6 +392,8 @@ mod tests {
             final_logit_softcapping: None,
             sliding_window: None,
             embedding_scale: None,
+            expert_count: None,
+            expert_used_count: None,
         };
 
         let scheduler = BatchScheduler::new(&config, 32, SchedulerConfig::default());
