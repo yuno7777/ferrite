@@ -57,7 +57,8 @@ pub use scheduler::{
 };
 pub use server::{Server, ServerConfig};
 pub use speculative::{
-    MtpEngine, MtpTreeEngine, SpeculativeEngine, SpeculativeStats, SpeculativeTreeEngine,
+    MedusaEngine, MedusaHead, MtpEngine, MtpTreeEngine, SpeculativeEngine, SpeculativeStats,
+    SpeculativeTreeEngine,
 };
 pub use template::{ChatMessage, ChatTemplate};
 pub use tokenizer::train::{

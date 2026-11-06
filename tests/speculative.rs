@@ -822,3 +822,66 @@ fn mtp_tree_speculative_decoding_matches_baseline_forward() {
 
     fs::remove_file(mtp_path).ok();
 }
+
+#[test]
+fn test_medusa_speculative_decoding_matches_baseline_forward() {
+    let path = make_model_fixture("medusa", 0.0);
+    let gguf = Gguf::open(&path).expect("open fixture");
+    let model = Model::load(&gguf).expect("load model");
+
+    let prompt = vec![0u32, 1u32];
+    let total_to_generate = 8;
+
+    // 1. Sequential baseline decode
+    let mut baseline_state = State::new(&model.config);
+    model
+        .prefill(&mut baseline_state, &prompt, 0)
+        .expect("prefill");
+
+    let mut baseline_tokens = Vec::new();
+    let mut baseline_sampler = Sampler::greedy();
+    let mut pos = prompt.len();
+
+    while baseline_tokens.len() < total_to_generate {
+        let tok = baseline_sampler.sample(&mut baseline_state.logits);
+        baseline_tokens.push(tok);
+        model
+            .forward(&mut baseline_state, tok, pos)
+            .expect("forward");
+        pos += 1;
+    }
+
+    // 2. Medusa speculation with 2 draft heads
+    let mut medusa_state = State::new(&model.config);
+    model
+        .prefill(&mut medusa_state, &prompt, 0)
+        .expect("prefill medusa");
+
+    // Head 0 and Head 1 with arbitrary weights
+    let head0_weight = vec![0.1f32; DIM * VOCAB];
+    let head1_weight = vec![0.2f32; DIM * VOCAB];
+    let head0 = ferrite::speculative::MedusaHead::new(DIM, VOCAB, head0_weight, None);
+    let head1 = ferrite::speculative::MedusaHead::new(DIM, VOCAB, head1_weight, None);
+
+    let mut medusa_engine = ferrite::speculative::MedusaEngine::new(&model, vec![head0, head1]);
+    let mut medusa_tokens = Vec::new();
+    let mut medusa_sampler = Sampler::greedy();
+    let mut medusa_pos = prompt.len();
+
+    while medusa_tokens.len() < total_to_generate {
+        let emitted = medusa_engine
+            .step(&mut medusa_state, medusa_pos, &mut medusa_sampler)
+            .expect("medusa step");
+        medusa_pos += emitted.len();
+        medusa_tokens.extend(emitted);
+    }
+    medusa_tokens.truncate(total_to_generate);
+
+    assert_eq!(
+        medusa_tokens, baseline_tokens,
+        "Medusa speculative decoding must match baseline forward decode exactly"
+    );
+    assert!(medusa_engine.stats.proposed > 0);
+
+    fs::remove_file(path).ok();
+}

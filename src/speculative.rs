@@ -755,3 +755,157 @@ impl<'a> MtpTreeEngine<'a> {
         Ok(emitted)
     }
 }
+
+/// A single Medusa or Eagle speculative draft prediction head.
+#[derive(Clone, Debug)]
+pub struct MedusaHead {
+    /// Projection weights mapping hidden state to vocabulary logits.
+    pub weight: Vec<f32>,
+    pub in_dim: usize,
+    pub out_dim: usize,
+    pub bias: Option<Vec<f32>>,
+}
+
+impl MedusaHead {
+    /// Creates a new Medusa head with given input dimension and vocabulary output dimension.
+    pub fn new(in_dim: usize, out_dim: usize, weight: Vec<f32>, bias: Option<Vec<f32>>) -> Self {
+        assert_eq!(weight.len(), in_dim * out_dim);
+        if let Some(b) = &bias {
+            assert_eq!(b.len(), out_dim);
+        }
+        Self {
+            in_dim,
+            out_dim,
+            weight,
+            bias,
+        }
+    }
+
+    /// Evaluates the head on a hidden state vector, computing predicted logits.
+    pub fn predict(&self, hidden_state: &[f32], out: &mut [f32]) {
+        assert_eq!(hidden_state.len(), self.in_dim);
+        assert_eq!(out.len(), self.out_dim);
+        for row in 0..self.out_dim {
+            let row_weight = &self.weight[row * self.in_dim..(row + 1) * self.in_dim];
+            let dot = crate::ops::dot(hidden_state, row_weight);
+            let b = self.bias.as_ref().map(|b| b[row]).unwrap_or(0.0);
+            out[row] = dot + b;
+        }
+    }
+}
+
+/// Speculative Medusa and Eagle multi-head draft engine.
+///
+/// Attaches multiple draft prediction heads directly on top of the target model's
+/// final hidden states, generating multiple speculative candidates in parallel
+/// without requiring a secondary draft language model.
+pub struct MedusaEngine<'a> {
+    pub model: &'a Model<'a>,
+    pub heads: Vec<MedusaHead>,
+    pub stats: SpeculativeStats,
+}
+
+impl<'a> MedusaEngine<'a> {
+    /// Creates a new Medusa speculative decoding engine with the provided heads.
+    pub fn new(model: &'a Model<'a>, heads: Vec<MedusaHead>) -> Self {
+        Self {
+            model,
+            heads,
+            stats: SpeculativeStats::default(),
+        }
+    }
+
+    /// Reset internal performance statistics.
+    pub fn reset(&mut self) {
+        self.stats = SpeculativeStats::default();
+    }
+
+    /// Perform one speculative decoding step using parallel multi-head drafting.
+    pub fn step(
+        &mut self,
+        state: &mut State,
+        position: usize,
+        sampler: &mut Sampler,
+    ) -> Result<Vec<u32>> {
+        let first_tok = sampler.sample(&mut state.logits);
+        let mut emitted = vec![first_tok];
+
+        let num_heads = self.heads.len();
+        if num_heads == 0 || position + num_heads + 2 > state.context() {
+            self.model.forward(state, first_tok, position)?;
+            self.stats.target_batches += 1;
+            self.stats.total_emitted += 1;
+            return Ok(emitted);
+        }
+
+        // 1. Forward base token through main trunk
+        self.model.forward(state, first_tok, position)?;
+        self.stats.target_batches += 1;
+
+        // 2. Sample verified next token (tok_1) predicted by trunk for position + 1
+        let tok_1 = sampler.sample(&mut state.logits);
+        emitted.push(tok_1);
+
+        // 3. Extract final hidden state and predict draft candidates across all Medusa heads
+        let h_state = state.final_hidden_state().to_vec();
+        let vocab = self.model.config.vocab;
+        let mut draft_candidates = Vec::with_capacity(num_heads);
+        let mut head_logits = vec![0.0f32; vocab];
+
+        for head in &self.heads {
+            head.predict(&h_state, &mut head_logits);
+            let cand = sampler.sample(&mut head_logits);
+            draft_candidates.push(cand);
+        }
+        self.stats.proposed += draft_candidates.len();
+
+        // 4. Batch verify candidates concurrently: [tok_1, cand_0, cand_1, ...]
+        let mut batch_tokens = Vec::with_capacity(1 + draft_candidates.len());
+        batch_tokens.push(tok_1);
+        batch_tokens.extend_from_slice(&draft_candidates);
+
+        let num_verify = batch_tokens.len();
+        let mut target_all_logits = vec![0.0f32; num_verify * vocab];
+        self.model.prefill_all_logits(
+            state,
+            &batch_tokens,
+            position + 1,
+            &mut target_all_logits,
+        )?;
+        self.stats.target_batches += 1;
+
+        // 5. Sequentially verify each candidate against target model's predictions
+        let mut rejected_at = None;
+
+        for (idx, &cand) in draft_candidates.iter().enumerate() {
+            let pred_slice = &mut target_all_logits[idx * vocab..(idx + 1) * vocab];
+            let target_pred = sampler.sample(pred_slice);
+            if target_pred == cand {
+                emitted.push(cand);
+                self.stats.accepted += 1;
+            } else {
+                rejected_at = Some((idx, target_pred));
+                break;
+            }
+        }
+
+        if let Some((rej_idx, target_pred)) = rejected_at {
+            // Emit target model's corrective prediction
+            emitted.push(target_pred);
+            // Roll back cache for unaccepted candidates
+            let rollback_from = position + 1 + 1 + rej_idx;
+            let rollback_to = position + 1 + num_verify;
+            state.truncate_cache(&self.model.config, rollback_from, rollback_to);
+            // Resync target forward at corrective position
+            self.model.forward(state, target_pred, rollback_from)?;
+            self.stats.target_batches += 1;
+        } else {
+            // All candidates accepted! State logits set from final target prediction
+            let final_slice = &target_all_logits[(num_verify - 1) * vocab..num_verify * vocab];
+            state.set_logits(final_slice);
+        }
+
+        self.stats.total_emitted += emitted.len();
+        Ok(emitted)
+    }
+}
