@@ -45,6 +45,7 @@ pub mod tokenizer;
 pub mod tools;
 pub mod tp;
 pub mod vision;
+pub mod watermark;
 
 pub use audio::{
     extract_log_mel_spectrogram, stitch_audio_and_text_embeddings, AudioPatchExtractor,
@@ -111,3 +112,7 @@ pub use tp::{
     eval_tp_swiglu, eval_tp_swiglu_dual, matvec_column_parallel, matvec_row_parallel, ThreadPool,
 };
 pub use vision::{Image, MultiModalProjector, VisionConfig, VisionEncoder};
+pub use watermark::{
+    hash_context, is_token_green, WatermarkConfig, WatermarkDetector, WatermarkEngine,
+    WatermarkScore,
+};
