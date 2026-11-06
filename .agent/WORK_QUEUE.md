@@ -103,18 +103,43 @@
 
 ### Phase 12: Multithreaded Prefill & SIMD Portability (ARM NEON & AVX-512)
 - Priority: P1
-- Status: READY TO IMPLEMENT
-- Rationale: Amortized GEMM during prefill can be parallelized across rows using worker threads. In addition, ARM NEON (`std::arch::aarch64`) enables native acceleration on Apple Silicon and ARM64 servers, while AVX-512 VNNI boosts newer x86 CPUs without external dependencies.
-- Files: `src/ops.rs`, `src/model.rs`, `src/quant/neon.rs`, `src/quant/avx512.rs`
-- Acceptance: Multi-threaded batched prefill and cross-platform SIMD kernels.
-- Tests: Unit tests and `examples/bench.rs`.
+- Status: COMPLETED
+- Rationale: Amortized GEMM during prefill parallelized across rows using worker threads via `Weight::matmul_threaded`. Cross-platform SIMD integer kernels via ARM NEON (`src/quant/neon.rs`) for Apple Silicon and ARM64 servers, and AVX-512 (`src/quant/avx512.rs`) for modern x86 architectures without external dependencies.
+- Files: `src/model.rs`, `src/quant/mod.rs`, `src/quant/idot.rs`, `src/quant/neon.rs`, `src/quant/avx512.rs`, `tests/model.rs`
+- Acceptance: Multi-threaded batched prefill and cross-platform SIMD kernels verified bit-identical.
+- Tests: `tests/model.rs::threaded_prefill_matches_single_thread`, `quant::avx512::tests`. All 113 tests pass.
+- Completion evidence: Bit-identical logit and KV-cache verification under multi-threaded prefill; committed in `e3aa884`.
 
-### Phase 13: Zero-Dependency Embedded HTTP / SSE Inference Server
+### Phase 13: Zero-Dependency Embedded HTTP / SSE Inference Daemon (OpenAI-Compatible)
+- Priority: P1
+- Status: COMPLETED
+- Rationale: Ferrite operates as a standalone local inference server exposing OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`) with streaming Server-Sent Events (SSE) directly over `std::net::TcpListener` without external crates (zero dependencies; no tokio, no axum, no serde).
+- Files: `src/server.rs`, `src/lib.rs`, `src/main.rs`, `tests/server.rs`
+- Acceptance: HTTP/1.1 request handling, streaming chunked SSE responses with `data: [DONE]`, CLI subcommand `ferrite serve <model> [--host <host>] [--port <port>]`.
+- Tests: Integration test suite in `tests/server.rs` testing live TCP connections, health endpoint, models endpoint, non-streaming chat completions, and real-time SSE streaming. All 117 tests pass.
+- Completion evidence: Full OpenAI-compatible chat completion and SSE streaming verified with integration tests; committed in `f2af227`.
+
+## Backlog
+
+### Phase 14: Dynamic RoPE Scaling & Extended Context (Linear, NTK-Aware, and YaRN)
+- Priority: P1
+- Status: READY TO IMPLEMENT
+- Rationale: Long context models (32k to 128k tokens) require frequency scaling (NTK-aware / YaRN / linear RoPE scaling) based on GGUF metadata `rope.scaling.type` and `rope.scaling.factor`.
+- Files: `src/ops.rs`, `src/model.rs`, `tests/model.rs`
+- Acceptance: Compute scaled RoPE inv_freq with wavelength adjustments for long contexts; bit-identical output for base lengths.
+
+### Phase 15: Flash-Attention Tile-Based KV Kernel (Online Softmax)
 - Priority: P2
 - Status: QUEUED
-- Rationale: Ferrite can act as a local inference daemon serving OpenAI-compatible `/v1/chat/completions` and `/v1/models` using standard library `std::net` without external crates (no tokio, no axum), enabling instant drop-in with curl, web UIs, and agent harnesses.
-- Files: `src/server.rs`, `src/main.rs`, `tests/server.rs`
-- Acceptance: HTTP 1.1 keep-alive and streaming SSE responses.
-- Tests: Integration test hitting server via standard TCP streams.
+- Rationale: Standard attention materializes the full attention score vector `O(context)`. Online softmax tiling computes attention incrementally in block tiles `O(tile_size)` with running max and sum, reducing peak memory traffic and L1/L2 cache misses during long-context generation.
+- Files: `src/ops.rs`, `src/model.rs`, `examples/bench.rs`
+- Acceptance: Tile-based online softmax attention kernel agreeing bit-for-bit with baseline attention.
+
+### Phase 16: Zero-Copy LoRA Adapter Application
+- Priority: P2
+- Status: QUEUED
+- Rationale: Load and blend GGUF LoRA adapter tensors (`lora_a`, `lora_b`) at runtime with scaling alpha, either dynamically fusing into activations or into weights without duplicating model storage.
+- Files: `src/lora.rs`, `src/model.rs`, `tests/lora.rs`
+- Acceptance: Load LoRA GGUF, compute low-rank additive delta `(A * B) * (alpha / rank)`, verify output against reference adapter forward pass.
 
 

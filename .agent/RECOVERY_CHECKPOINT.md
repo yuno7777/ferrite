@@ -48,12 +48,25 @@
    - Built zero-dependency `SpeculativeEngine` and `SpeculativeStats` in `src/speculative.rs`.
    - Wired CLI flags `--draft <model>` and `--spec-k <k>` into `src/main.rs` with token streaming and acceptance tracking.
    - Added integration test suite `tests/speculative.rs` verifying 100% acceptance on identical models and guaranteed exact baseline parity on divergent models.
-8. Code Quality:
-   - All 107 tests pass across all targets (`cargo test --all-targets`).
+8. Phase 12 Multithreaded Prefill & SIMD Portability:
+   - Implemented `Weight::matmul_threaded` partitioning row sets across worker threads with disjoint unsafe pointer writes via `SyncMutPtr`.
+   - Connected `matmul_threaded` across attention and FFN projections in both `Model::prefill` and `Model::prefill_all_logits`.
+   - Implemented ARM NEON SIMD kernels in `src/quant/neon.rs` (`vld1q_s8`, `vmull_s8`, `vmlal_s8`, `vpadalq_s16`, `vaddvq_s32`).
+   - Implemented AVX-512 SIMD kernels in `src/quant/avx512.rs` with runtime CPU feature detection.
+   - Added integration test `threaded_prefill_matches_single_thread` verifying bit-identical outputs.
+9. Phase 13 Zero-Dependency Embedded HTTP / SSE Inference Daemon:
+   - Implemented `src/server.rs` running directly on `std::net::TcpListener` and `std::net::TcpStream`.
+   - Implemented OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, `/v1/models`, and `/health`.
+   - Built real-time Server-Sent Events (SSE) streaming for `stream: true` ending in `data: [DONE]`.
+   - Added CLI subcommand `ferrite serve <model> [--host <host>] [--port <port>]`.
+   - Added live socket integration test suite in `tests/server.rs`.
+10. Code Quality & Invariants:
+   - All 117 tests pass across all targets (`cargo test --all-targets`).
+   - Strictly 0 external dependencies (`cargo tree` is 1 line).
    - `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `git diff --check` pass with zero errors.
 
 ## Next Up in Work Queue
-- Phase 12: Multithreaded Prefill & SIMD Portability (Row-partitioned GEMM across worker threads + ARM NEON / AVX-512 kernels).
+- Phase 14: Dynamic RoPE Scaling & Extended Context (Linear, NTK-Aware, and YaRN scaling for 32k+ context windows).
 
 
 
