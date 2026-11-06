@@ -29,6 +29,7 @@ pub mod ops;
 pub mod paged;
 pub mod prefill;
 pub mod prefix;
+pub mod prune;
 pub mod quant;
 pub mod sample;
 pub mod scheduler;
@@ -68,6 +69,10 @@ pub use paged::{
 };
 pub use prefill::{AsyncChunkedPrefill, PrefillChunkEvent};
 pub use prefix::{RadixCache, RadixNode};
+pub use prune::{
+    compute_channel_l2_norms, compute_head_l2_norms, prune_channels_slice, prune_heads_slice,
+    prune_unstructured_slice, select_heads_to_prune, ModelPruner, PruningStats,
+};
 pub use quant::awq::{dequantize_awq_int4, dequantize_gptq_int4, dot_awq_int4, dot_gptq_int4};
 pub use quant::outlier::{OutlierConfig, OutlierMatrix, OutlierQuantMode};
 pub use quant::quantize::{quantize_file, quantize_model};

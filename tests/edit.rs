@@ -134,3 +134,134 @@ fn test_in_place_lora_merging() {
 
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn test_unstructured_magnitude_pruning_inplace() {
+    use ferrite::prune::{prune_unstructured_slice, ModelPruner};
+
+    // 1. Slice unit test
+    let mut data = vec![
+        -10.0f32, 0.1, -0.05, 5.0, 0.01, 20.0, -0.02, 12.0, 0.03, -15.0,
+    ];
+    let stats = prune_unstructured_slice(&mut data, 0.4); // 40% sparsity -> 4 smallest elements pruned
+    assert_eq!(stats.total_parameters, 10);
+    assert_eq!(stats.pruned_parameters, 4);
+    assert!((stats.sparsity - 0.4).abs() < 1e-4);
+
+    // Elements 0.01, -0.02, 0.03, -0.05 should be 0.0
+    assert_eq!(data[1], 0.1);
+    assert_eq!(data[2], 0.0);
+    assert_eq!(data[4], 0.0);
+    assert_eq!(data[6], 0.0);
+    assert_eq!(data[8], 0.0);
+
+    // 2. In-place GGUF file test
+    let path = temp_path("unstructured_pruning");
+    let original = [10.0f32, 0.2, 0.1, -15.0, 0.05, 30.0];
+    let bytes: Vec<u8> = original.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let builder = Builder::new()
+        .meta("general.architecture", Value::String("llama".into()))
+        .tensor("weights_f32", &[6], GgmlType::F32, bytes);
+    builder.write(&path).expect("write model");
+
+    let stats = ModelPruner::prune_unstructured_inplace(&path, 0.5, Some(&["weights_f32"]))
+        .expect("prune inplace");
+    assert_eq!(stats.pruned_parameters, 3);
+
+    // Reopen and verify file content on disk
+    let gguf = Gguf::open(&path).expect("open");
+    let t = gguf.tensor("weights_f32").unwrap();
+    let b = gguf.tensor_bytes(t).unwrap();
+    let read_back: Vec<f32> = b
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    // 3 smallest (|0.05|, |0.1|, |0.2|) must be zeroed
+    assert_eq!(read_back[0], 10.0);
+    assert_eq!(read_back[1], 0.0);
+    assert_eq!(read_back[2], 0.0);
+    assert_eq!(read_back[3], -15.0);
+    assert_eq!(read_back[4], 0.0);
+    assert_eq!(read_back[5], 30.0);
+
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn test_structured_head_and_width_pruning_inplace() {
+    use ferrite::prune::ModelPruner;
+
+    let path = temp_path("structured_pruning");
+
+    // 4 heads, each head has 2 rows, cols = 4 -> rows = 8, cols = 4 (dims = [4, 8])
+    // Total = 32 elements
+    let mut weights = [0.0f32; 32];
+
+    // Head 0 (rows 0..2): norm ~ 2.0
+    for r in 0..2 {
+        for c in 0..4 {
+            weights[r * 4 + c] = 1.0;
+        }
+    }
+    // Head 1 (rows 2..4): very small weights (norm ~ 0.02) -> should be pruned!
+    for r in 2..4 {
+        for c in 0..4 {
+            weights[r * 4 + c] = 0.01;
+        }
+    }
+    // Head 2 (rows 4..6): large weights (norm ~ 8.0)
+    for r in 4..6 {
+        for c in 0..4 {
+            weights[r * 4 + c] = 4.0;
+        }
+    }
+    // Head 3 (rows 6..8): norm ~ 4.0
+    for r in 6..8 {
+        for c in 0..4 {
+            weights[r * 4 + c] = 2.0;
+        }
+    }
+
+    let bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let builder = Builder::new()
+        .meta("general.architecture", Value::String("llama".into()))
+        .tensor("attn_q", &[4, 8], GgmlType::F32, bytes.clone())
+        .tensor("mlp_down", &[4, 8], GgmlType::F32, bytes);
+    builder.write(&path).expect("write model");
+
+    // 1. Prune 1 attention head in attn_q
+    let (stats, pruned_heads) =
+        ModelPruner::prune_attention_heads_inplace(&path, "attn_q", 4, 1).expect("prune heads");
+    assert_eq!(pruned_heads, vec![1]); // Head 1 had smallest norm
+    assert_eq!(stats.pruned_parameters, 8); // 2 rows * 4 cols
+
+    // Reopen and verify Head 1 is zeroed while other heads remain intact
+    let gguf = Gguf::open(&path).expect("reopen");
+    let t_q = gguf.tensor("attn_q").unwrap();
+    let b_q = gguf.tensor_bytes(t_q).unwrap();
+    let q_vals: Vec<f32> = b_q
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    // Rows 0..2 (Head 0) intact
+    assert_eq!(q_vals[0], 1.0);
+    // Rows 2..4 (Head 1) zeroed
+    for r in 2..4 {
+        for c in 0..4 {
+            assert_eq!(q_vals[r * 4 + c], 0.0);
+        }
+    }
+    // Rows 4..6 (Head 2) intact
+    assert_eq!(q_vals[4 * 4], 4.0);
+
+    // 2. Prune width in mlp_down (25% of columns = 1 column out of 4)
+    let width_stats =
+        ModelPruner::prune_width_inplace(&path, "mlp_down", 0.25).expect("prune width");
+    assert_eq!(width_stats.pruned_parameters, 8); // 1 col * 8 rows
+
+    fs::remove_file(path).ok();
+}
