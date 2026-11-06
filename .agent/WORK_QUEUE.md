@@ -344,6 +344,41 @@
 - Acceptance: Run partitioned model inference across 2 processes communicating activations over sockets.
 - Completion evidence: Built zero-dependency pipeline-parallel inference engine in `src/distributed.rs` with `ActivationPacket`, `forward_partition`, `run_worker`, and `DistributedDriver` communicating over `TcpStream`. Added CLI commands `ferrite distributed worker` and `ferrite distributed driver` in `src/main.rs`. Added integration test `tests/distributed.rs` verifying bit-identical logit parity between 2-node partitioned pipeline inference over TCP sockets and single-node reference. All checks pass with 0 external dependencies.
 
+### Phase 41: Multi-Modal Vision-Language Projection Engine (CLIP / SigLIP Vision Encoder & Patch Projection)
+- Priority: P2
+- Status: COMPLETED
+- Rationale: Support multi-modal vision-language LLMs (e.g. LLaVA, Qwen2-VL, SigLIP) with pure-Rust, zero-dependency image decoding (PPM P3/P6 and uncompressed BMP 24/32-bit), bilinear image resampling, ViT patch extraction, bidirectional self-attention, and multi-modal linear/MLP projection layers mapping vision tokens directly into LLM embedding space.
+- Files: `src/vision.rs`, `src/model.rs`, `src/main.rs`, `tests/vision.rs`
+- Acceptance:
+  1. Pure-Rust image loaders for PPM P3/P6 and uncompressed BMP 24/32-bit with bilinear resampling and normalization.
+  2. ViT patch extraction, pos_embed addition, bidirectional self-attention, LayerNorm, and GELU MLP.
+  3. MultiModalProjector (Linear and 2-layer MLP) mapping ViT patch representations to LLM embedding dimension.
+  4. `Model::prefill_embeddings` and `Model::prefill_multimodal` for continuous activation prefill.
+  5. CLI command `ferrite vision <model> --image <image> --mmproj <mmproj.gguf> [prompt]`.
+  6. Integration suite in `tests/vision.rs` verifying PPM/BMP parsing, resampling, synthetic GGUF vision encoding, and multi-modal prefill.
+- Completion evidence: All tests in `tests/vision.rs` and full test suite pass with 0 external dependencies.
+
+### Phase 42: DeepSeek Multi-Head Latent Attention (MLA) & Compressed KV Projection
+- Priority: P2
+- Status: QUEUED
+- Rationale: DeepSeek-V2 and DeepSeek-V3 employ Multi-Head Latent Attention (MLA), which compresses KV cache into a low-dimensional latent vector $c^{KV}$ and decouples RoPE. Implementing MLA reduces KV cache memory consumption by 5-10x for long-context models.
+- Files: `src/model.rs`, `src/kv.rs`, `tests/model.rs`
+
+### Phase 43: Dynamic Intra-Node Multi-Threaded Tensor Parallelism (TP / Row-Column Sharding)
+- Priority: P2
+- Status: QUEUED
+- Rationale: Multi-core CPU systems benefit from intra-node column-parallel and row-parallel matrix multiplication sharding across threads with barrier reduction.
+
+### Phase 44: Zero-Overhead AWQ & GPTQ Activation-Aware Quantization Dequantization
+- Priority: P2
+- Status: QUEUED
+- Rationale: Fast runtime execution of group-quantized INT4/INT8 models without external dependencies.
+
+### Phase 45: Kernel Fusion JIT & Self-Optimizing Assembly Dispatch
+- Priority: P3
+- Status: QUEUED
+- Rationale: Runtime micro-benchmark harness dynamically selecting between scalar, NEON, AVX-2, and AVX-512 kernels.
+
 ## Maintenance Scan — 2026-11-06
 - Every listed task is `COMPLETED`; no task has status `QUEUED` or `IN_PROGRESS`.
 - No implementation task was selected.

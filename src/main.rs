@@ -26,6 +26,7 @@ usage:
   ferrite lora merge <base.gguf> <out.gguf> <adapter.gguf...>
   ferrite train-vocab <corpus.txt> <out_vocab.gguf> [--vocab-size <n>]
   ferrite embed <model> <text...>   generate vector embeddings & similarity
+  ferrite vision <model> --image <image> --mmproj <mmproj.gguf> [prompt]
 
 run/serve options:
   -n <count>      tokens to generate (default 128)
@@ -71,6 +72,7 @@ fn main() -> ExitCode {
         Some("train-vocab") => cmd_train_vocab(&args[1..]),
         Some("embed") => cmd_embed(&args[1..]),
         Some("distributed") => cmd_distributed(&args[1..]),
+        Some("vision") => cmd_vision(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -1131,4 +1133,135 @@ fn cmd_serve(args: &[String]) -> std::io::Result<()> {
 
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     server.serve_with_shutdown(&listener, shutdown)
+}
+
+fn cmd_vision(args: &[String]) -> std::io::Result<()> {
+    let limit: usize = flag(args, "-n", 128)?;
+    let temperature: f32 = flag(args, "--temp", 0.0)?;
+    let top_k: usize = flag(args, "--top-k", 40)?;
+    let top_p: f32 = flag(args, "--top-p", 0.95)?;
+    let seed: u64 = flag(args, "--seed", 1)?;
+    let context: usize = flag(args, "--ctx", model::DEFAULT_CONTEXT)?;
+    let threads: usize = flag(args, "--threads", 0)?;
+
+    let image_path: String = {
+        let at = args.iter().position(|a| a == "--image");
+        match at.and_then(|i| args.get(i + 1).cloned()) {
+            Some(p) => p,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "vision requires --image <path.ppm|path.bmp>",
+                ));
+            }
+        }
+    };
+
+    let mmproj_path: String = {
+        let at = args.iter().position(|a| a == "--mmproj");
+        match at.and_then(|i| args.get(i + 1).cloned()) {
+            Some(p) => p,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "vision requires --mmproj <path.gguf>",
+                ));
+            }
+        }
+    };
+
+    let flags = [
+        "-n",
+        "--temp",
+        "--top-k",
+        "--top-p",
+        "--seed",
+        "--ctx",
+        "--threads",
+        "--image",
+        "--mmproj",
+    ];
+    let mut positional = Vec::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        if flags.contains(&args[idx].as_str()) {
+            idx += 2;
+            continue;
+        }
+        positional.push(args[idx].clone());
+        idx += 1;
+    }
+
+    let (model_query, prompt) = match positional.as_slice() {
+        [m] => (m.as_str(), "Describe this image in detail:".to_string()),
+        [m, rest @ ..] => (m.as_str(), rest.join(" ")),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "usage: ferrite vision <model> --image <image> --mmproj <mmproj.gguf> [prompt]",
+            ));
+        }
+    };
+
+    let model_path = lmstudio::resolve(model_query)?;
+    let model_gguf = Gguf::open(&model_path)?;
+    let tokenizer = Tokenizer::from_gguf(&model_gguf)?;
+    let model = Model::load(&model_gguf)?;
+
+    let mm_path = lmstudio::resolve(&mmproj_path)?;
+    let mm_gguf = Gguf::open(&mm_path)?;
+    let vision_encoder = ferrite::vision::VisionEncoder::from_gguf(&mm_gguf)?;
+
+    let image = ferrite::vision::Image::open(&image_path)?;
+    let image_tokens = vision_encoder.encode_image(&image)?;
+
+    let mut state = State::with_context(&model.config, context);
+    if threads > 0 {
+        state.threads = threads;
+    }
+
+    let prefix_tokens = tokenizer.encode("[USER] Image: ", true);
+    let suffix_tokens = tokenizer.encode(&format!("\nPrompt: {prompt}\n[ASSISTANT] "), false);
+
+    let start = Instant::now();
+    model.prefill_multimodal(&mut state, &prefix_tokens, &image_tokens, &suffix_tokens, 0)?;
+
+    let mut sampler = Sampler::new(temperature, top_k, top_p, seed);
+    let mut next_token = sampler.sample(&mut state.logits);
+
+    let mut stdout = std::io::stdout();
+    let num_patches = image_tokens.len() / model.config.embedding;
+    eprintln!(
+        "Vision inference: image ({}x{} -> {} tokens) + prompt ({} tokens)",
+        image.width,
+        image.height,
+        num_patches,
+        prefix_tokens.len() + suffix_tokens.len()
+    );
+
+    let mut pos = prefix_tokens.len() + num_patches + suffix_tokens.len();
+    let mut generated = 0;
+    while generated < limit {
+        if Some(next_token) == tokenizer.eos {
+            break;
+        }
+        let piece = tokenizer.piece(next_token);
+        stdout.write_all(&piece).ok();
+        stdout.flush().ok();
+
+        model.forward(&mut state, next_token, pos)?;
+        pos += 1;
+        generated += 1;
+        next_token = sampler.sample(&mut state.logits);
+    }
+    println!();
+    let elapsed = start.elapsed();
+    eprintln!(
+        "\nGenerated {} tokens in {:.2?} ({:.1} tok/s)",
+        generated,
+        elapsed,
+        generated as f64 / elapsed.as_secs_f64()
+    );
+
+    Ok(())
 }

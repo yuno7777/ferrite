@@ -1194,6 +1194,101 @@ impl<'a> Model<'a> {
         }
 
         let c = &self.config;
+        let mut x_batch = vec![0.0f32; n * c.embedding];
+        for (b, &tok) in tokens.iter().enumerate() {
+            let row = &mut x_batch[b * c.embedding..(b + 1) * c.embedding];
+            self.token_embd.row(tok as usize, row)?;
+        }
+        if let Some(scale) = c.embedding_scale {
+            for v in x_batch.iter_mut() {
+                *v *= scale;
+            }
+        }
+
+        self.prefill_embeddings(state, &x_batch, start_pos)
+    }
+
+    /// Ingests a multimodal sequence composed of text prefix tokens, vision/audio embeddings,
+    /// and text suffix tokens in a single unified prefill pass.
+    pub fn prefill_multimodal(
+        &self,
+        state: &mut State,
+        text_prefix: &[u32],
+        multimodal_embeddings: &[f32],
+        text_suffix: &[u32],
+        start_pos: usize,
+    ) -> Result<()> {
+        let c = &self.config;
+        if multimodal_embeddings.len() % c.embedding != 0 {
+            return Err(bad(format!(
+                "multimodal embeddings length {} is not a multiple of embedding dim {}",
+                multimodal_embeddings.len(),
+                c.embedding
+            )));
+        }
+        let mm_tokens = multimodal_embeddings.len() / c.embedding;
+        let total_tokens = text_prefix.len() + mm_tokens + text_suffix.len();
+        if total_tokens == 0 {
+            return Ok(());
+        }
+
+        let mut x_batch = vec![0.0f32; total_tokens * c.embedding];
+        let mut offset = 0;
+
+        for &tok in text_prefix {
+            let row = &mut x_batch[offset * c.embedding..(offset + 1) * c.embedding];
+            self.token_embd.row(tok as usize, row)?;
+            if let Some(scale) = c.embedding_scale {
+                for v in row.iter_mut() {
+                    *v *= scale;
+                }
+            }
+            offset += 1;
+        }
+
+        if !multimodal_embeddings.is_empty() {
+            let dest = &mut x_batch[offset * c.embedding..(offset + mm_tokens) * c.embedding];
+            dest.copy_from_slice(multimodal_embeddings);
+            offset += mm_tokens;
+        }
+
+        for &tok in text_suffix {
+            let row = &mut x_batch[offset * c.embedding..(offset + 1) * c.embedding];
+            self.token_embd.row(tok as usize, row)?;
+            if let Some(scale) = c.embedding_scale {
+                for v in row.iter_mut() {
+                    *v *= scale;
+                }
+            }
+            offset += 1;
+        }
+
+        self.prefill_embeddings(state, &x_batch, start_pos)
+    }
+
+    /// Process a batch of continuous embedding vectors directly in one pass.
+    ///
+    /// Accepts a slice of concatenated token embeddings `[n * embedding]`,
+    /// populates key/value caches for `start_pos..start_pos + n`,
+    /// leaving `state.logits` holding the logits for the final token.
+    pub fn prefill_embeddings(
+        &self,
+        state: &mut State,
+        embeddings: &[f32],
+        start_pos: usize,
+    ) -> Result<()> {
+        let c = &self.config;
+        if embeddings.is_empty() {
+            return Ok(());
+        }
+        if embeddings.len() % c.embedding != 0 {
+            return Err(bad(format!(
+                "embeddings length {} is not a multiple of embedding dim {}",
+                embeddings.len(),
+                c.embedding
+            )));
+        }
+        let n = embeddings.len() / c.embedding;
         let end_pos = start_pos
             .checked_add(n)
             .ok_or_else(|| bad("prefill range overflows"))?;
@@ -1207,18 +1302,7 @@ impl<'a> Model<'a> {
         let (head_dim, kv_dim, group) = (c.head_dim, c.kv_dim(), c.group());
         let att_dim = c.heads * head_dim;
 
-        // Batch activation buffers:
-        let mut x_batch = vec![0.0f32; n * c.embedding];
-        for (b, &tok) in tokens.iter().enumerate() {
-            let row = &mut x_batch[b * c.embedding..(b + 1) * c.embedding];
-            self.token_embd.row(tok as usize, row)?;
-        }
-        if let Some(scale) = c.embedding_scale {
-            for v in x_batch.iter_mut() {
-                *v *= scale;
-            }
-        }
-
+        let mut x_batch = embeddings.to_vec();
         let mut xb_batch = vec![0.0f32; n * c.embedding];
         let mut xb2_batch = vec![0.0f32; n * c.embedding];
         let mut att_batch = vec![0.0f32; n * att_dim];

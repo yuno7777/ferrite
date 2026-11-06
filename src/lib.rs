@@ -35,6 +35,7 @@ pub mod synth;
 pub mod template;
 pub mod tokenizer;
 pub mod tools;
+pub mod vision;
 
 pub use convert::{convert_safetensors_to_gguf, JsonValue, SafeTensorsHeader};
 pub use embed::{cosine_similarity, l2_normalize, pool, EmbedEngine, Pooling};
@@ -58,3 +59,4 @@ pub use tokenizer::train::{
     train_bpe, train_vocab_file, write_vocab_gguf, TrainConfig, TrainedVocab,
 };
 pub use tokenizer::Tokenizer;
+pub use vision::{Image, MultiModalProjector, VisionConfig, VisionEncoder};
