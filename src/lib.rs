@@ -62,7 +62,7 @@ pub use template::{ChatMessage, ChatTemplate};
 pub use tokenizer::train::{
     train_bpe, train_vocab_file, write_vocab_gguf, TrainConfig, TrainedVocab,
 };
-pub use tokenizer::Tokenizer;
+pub use tokenizer::{DetokenizerOptions, StreamingDetokenizer, Tokenizer};
 pub use tp::{
     eval_tp_swiglu, eval_tp_swiglu_dual, matvec_column_parallel, matvec_row_parallel, ThreadPool,
 };
