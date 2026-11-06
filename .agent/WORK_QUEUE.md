@@ -338,10 +338,11 @@
 
 ### Phase 40: Distributed Zero-Copy Model Inference (TCP / Socket Layer Distribution)
 - Priority: P3
-- Status: QUEUED
+- Status: COMPLETED
 - Rationale: Distribute large model layers across multiple machines or local processes over TCP or UNIX domain sockets with zero external dependencies (no MPI/PyTorch).
 - Files: `src/distributed.rs`, `src/main.rs`, `tests/distributed.rs`
 - Acceptance: Run partitioned model inference across 2 processes communicating activations over sockets.
+- Completion evidence: Built zero-dependency pipeline-parallel inference engine in `src/distributed.rs` with `ActivationPacket`, `forward_partition`, `run_worker`, and `DistributedDriver` communicating over `TcpStream`. Added CLI commands `ferrite distributed worker` and `ferrite distributed driver` in `src/main.rs`. Added integration test `tests/distributed.rs` verifying bit-identical logit parity between 2-node partitioned pipeline inference over TCP sockets and single-node reference. All checks pass with 0 external dependencies.
 
 ## Maintenance Scan — 2026-11-06
 - Every listed task is `COMPLETED`; no task has status `QUEUED` or `IN_PROGRESS`.

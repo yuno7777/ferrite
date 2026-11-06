@@ -1,5 +1,12 @@
 # Recovery Checkpoint
 
+## Maintenance Run — Phase 40 — 2026-11-06
+- Selected queued P3 Phase 40, distributed model inference over TCP.
+- Completed the shared-worktree implementation: validated activation packet framing, worker and driver partition checks, TCP pipeline execution, and `ferrite distributed worker|driver` commands.
+- Added packet round-trip/shape validation coverage. The two-layer TCP integration regression compares partitioned logits bit-for-bit with local inference.
+- `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` passed.
+- Preserved pre-existing shared-worktree edits to `.agent/maintenance.log` and `src/lib.rs`, along with distributed CLI and integration coverage that were already in progress.
+
 - Timestamp: 2026-11-06T06:02:55+05:30
 - Repository: `/home/abhishek/Projects/ferrite-audit`
 - Branch: `codex/audit-baseline`
@@ -347,5 +354,18 @@
   - `cargo fmt --check` passes cleanly.
   - `cargo tree` prints exactly 1 line (0 external dependencies).
 
-
-
+## Autonomous Execution — Phase 40 Completion
+- Branch: `codex/audit-baseline`
+- Phase 40 (Distributed Zero-Copy Model Inference — TCP Socket Pipeline Parallelism):
+  - Created `src/distributed.rs`:
+    - Binary wire format: `ActivationPacket` with magic header (`FERR`), message types (`MSG_ACTIVATION`, `MSG_RESPONSE`, `MSG_SHUTDOWN`), sequence position, batch size, and raw f32 activations.
+    - `forward_partition`: evaluates arbitrary layer slices `layer_range` on hidden state activations with RoPE, Attention, RMSNorm, and FFN compute.
+    - `run_worker`: listens on `TcpListener`, receives activations, evaluates assigned layer partition, and streams response packets.
+    - `DistributedDriver`: client driver coordinating multi-node forward passes across local layers and remote worker layers over `TcpStream`.
+  - Added CLI subcommands `ferrite distributed worker` and `ferrite distributed driver` in `src/main.rs`.
+  - Added integration test `tests/distributed.rs` verifying bit-identical logit agreement between 2-node distributed pipeline inference over live TCP sockets and single-node reference.
+- Validation:
+  - `cargo test --all-targets` passes (100% pass rate).
+  - `cargo clippy --all-targets -- -D warnings` passes without warnings.
+  - `cargo fmt --check` passes cleanly.
+  - `cargo tree` prints exactly 1 line (0 external dependencies).

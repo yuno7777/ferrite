@@ -12,6 +12,7 @@
 //! ```
 
 pub mod convert;
+pub mod distributed;
 pub mod embed;
 pub mod eval;
 pub mod gguf;

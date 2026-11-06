@@ -70,6 +70,7 @@ fn main() -> ExitCode {
         Some("lora") => cmd_lora(&args[1..]),
         Some("train-vocab") => cmd_train_vocab(&args[1..]),
         Some("embed") => cmd_embed(&args[1..]),
+        Some("distributed") => cmd_distributed(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -218,6 +219,89 @@ fn cmd_embed(args: &[String]) -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_distributed(args: &[String]) -> std::io::Result<()> {
+    if args.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: ferrite distributed <worker|driver> ...",
+        ));
+    }
+    match args[0].as_str() {
+        "worker" => {
+            if args.len() < 2 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "usage: ferrite distributed worker <model> [--listen <host:port>] [--layers <start..end>]",
+                ));
+            }
+            let path = lmstudio::resolve(&args[1])?;
+            let gguf = Gguf::open(&path)?;
+            let model = Model::load(&gguf)?;
+            let listen_addr: String = flag(&args[2..], "--listen", "127.0.0.1:9090".to_string())?;
+            let layers_str: String = flag(
+                &args[2..],
+                "--layers",
+                format!("0..{}", model.config.layers),
+            )?;
+            let parts: Vec<&str> = layers_str.split("..").collect();
+            let start: usize = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let end: usize = parts
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(model.config.layers);
+            let listener = std::net::TcpListener::bind(&listen_addr)?;
+            eprintln!("Distributed worker listening on {listen_addr} for layers {start}..{end}");
+            ferrite::distributed::run_worker(&model, start..end, listener)
+        }
+        "driver" => {
+            if args.len() < 3 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "usage: ferrite distributed driver <model> <prompt> [--remote <host:port>] [--layers <start..end>]",
+                ));
+            }
+            let path = lmstudio::resolve(&args[1])?;
+            let gguf = Gguf::open(&path)?;
+            let model = Model::load(&gguf)?;
+            let tokenizer = Tokenizer::from_gguf(&gguf)?;
+            let remote_addr: String = flag(&args[3..], "--remote", "127.0.0.1:9090".to_string())?;
+            let layers_str: String = flag(
+                &args[3..],
+                "--layers",
+                format!("1..{}", model.config.layers),
+            )?;
+            let parts: Vec<&str> = layers_str.split("..").collect();
+            let remote_start: usize = parts.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+            let remote_end: usize = parts
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(model.config.layers);
+            let prompt = &args[2];
+            let tokens = tokenizer.encode(prompt, true);
+            let mut state = State::new(&model.config);
+            let mut driver = ferrite::distributed::DistributedDriver::connect(
+                &model,
+                0..remote_start,
+                remote_start..remote_end,
+                &remote_addr,
+            )?;
+            for (pos, &tok) in tokens.iter().enumerate() {
+                driver.forward(&mut state, tok, pos)?;
+            }
+            let mut sampler = ferrite::sample::Sampler::greedy();
+            let next_tok = sampler.sample(&mut state.logits);
+            let piece = tokenizer.piece(next_tok);
+            println!("{}", String::from_utf8_lossy(&piece));
+            driver.shutdown()?;
+            Ok(())
+        }
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown distributed subcommand '{other}', expected worker or driver"),
+        )),
+    }
 }
 
 fn cmd_lora(args: &[String]) -> std::io::Result<()> {
